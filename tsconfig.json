@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",        // 🔄 was "Node", change to "Bundler" for Vite
+    "lib": ["DOM", "DOM.Iterable", "ES2020"],
+    "jsx": "react-jsx",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "outDir": "dist",
+    "types": ["react", "react-dom"]       // ✅ add this so JSX errors disappear
+  },
+  "include": ["src", "index.html"],       // 🔄 simpler include, enough for Vite
+  "exclude": ["node_modules"]
+}
