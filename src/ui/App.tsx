@@ -71,7 +71,7 @@ export default function App() {
     // If this is the first point:
     if (measurePoints.length === 0) {
       setMeasurePoints([picked])
-      viewerRef.current.setMeasurementSegment(null, null)
+      viewerRef.current.setMeasurementSegment(null, null, null)
       setMeasureMM(null)
       return
     }
@@ -87,15 +87,31 @@ export default function App() {
 
       setMeasurePoints([p1, p2])
       setMeasureMM(dist)
-      viewerRef.current.setMeasurementSegment(p1, p2)
+      const valueInUnits = convert(dist, units)
+      const label = `${fmt(valueInUnits)} ${units}`
+      viewerRef.current.setMeasurementSegment(p1, p2, label)
       return
     }
 
     // If we already had 2 points, start a new measurement
     setMeasurePoints([picked])
     setMeasureMM(null)
-    viewerRef.current.setMeasurementSegment(null, null)
+    viewerRef.current.setMeasurementSegment(null, null, null)
   }
+
+  useEffect(() => {
+    if (!viewerRef.current) return
+    if (measureMM == null) {
+      viewerRef.current.setMeasurementSegment(null, null, null)
+      return
+    }
+    if (measurePoints.length === 2) {
+      const [p1, p2] = measurePoints
+      const valueInUnits = convert(measureMM, units)
+      const label = `${fmt(valueInUnits)} ${units}`
+      viewerRef.current.setMeasurementSegment(p1, p2, label)
+    }
+  }, [units, measureMM, measurePoints, viewerRef])
 
   return (
     <div style={{ height: '100%', width: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -112,13 +128,28 @@ export default function App() {
 
         <button
           onClick={() => {
+            if (!viewerRef.current) return
+            const dataURL = viewerRef.current.getScreenshotDataURL()
+            const link = document.createElement('a')
+            link.href = dataURL
+            link.download = 'cad_viewer_snapshot.png'
+            document.body.appendChild(link)
+            link.click()
+            document.body.removeChild(link)
+          }}
+        >
+          Snapshot
+        </button>
+
+        <button
+          onClick={() => {
             const next = !measureMode
             setMeasureMode(next)
             if (!next && viewerRef.current) {
               // Turning measurement OFF: clear line and values
               setMeasurePoints([])
               setMeasureMM(null)
-              viewerRef.current.setMeasurementSegment(null, null)
+              viewerRef.current.setMeasurementSegment(null, null, null)
             }
           }}
           style={{ background: measureMode ? '#ddd' : undefined }}
