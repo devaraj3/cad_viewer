@@ -18,7 +18,11 @@ export type Viewer = {
 }
 
 export function createViewer(container: HTMLElement): Viewer {
-  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false })
+  const renderer = new THREE.WebGLRenderer({
+    antialias: true,
+    alpha: false,
+    preserveDrawingBuffer: true,
+  })
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.setSize(container.clientWidth, container.clientHeight)
   ;(renderer as any).outputColorSpace = (THREE as any).SRGBColorSpace ?? undefined
@@ -184,7 +188,12 @@ export function createViewer(container: HTMLElement): Viewer {
     }
 
     const texture = new THREE.CanvasTexture(canvas)
-    const mat = new THREE.SpriteMaterial({ map: texture, depthTest: true, depthWrite: false })
+    const mat = new THREE.SpriteMaterial({
+      map: texture,
+      depthTest: true,
+      depthWrite: false,
+      sizeAttenuation: false,
+    })
     if (measureLabel) {
       if (measureLabel.material.map) {
         measureLabel.material.map.dispose()
@@ -197,11 +206,11 @@ export function createViewer(container: HTMLElement): Viewer {
     }
 
     measureLabel.position.copy(mid)
-    const baseScale = 0.05 * mid.length() || 1
-    measureLabel.scale.setScalar(baseScale)
+    measureLabel.scale.set(1, 0.5, 1)
   }
 
   function getScreenshotDataURL(): string {
+    renderer.render(scene, activeCamera)
     return renderer.domElement.toDataURL('image/png')
   }
 
