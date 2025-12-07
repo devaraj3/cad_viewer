@@ -3,6 +3,7 @@ import * as THREE from 'three'
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { ThreeMFLoader } from 'three/examples/jsm/loaders/3MFLoader.js'
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 
 type TessReq = {
@@ -58,6 +59,17 @@ async function loadMeshOnMainThread(file: File, ext: string) {
     return mergeFromObject(root)
   }
 
+  if (ext === 'gltf' || ext === 'glb') {
+    const url = URL.createObjectURL(file)
+    try {
+      const loader = new GLTFLoader()
+      const { scene } = await loader.loadAsync(url)
+      return mergeFromObject(scene)
+    } finally {
+      URL.revokeObjectURL(url)
+    }
+  }
+
   throw new Error('Unsupported mesh format')
 }
 
@@ -68,7 +80,7 @@ function isCADExt(ext: string): ext is CADExt {
 export async function loadMeshFile(file: File, worker?: Worker): Promise<THREE.BufferGeometry> {
   const ext = (file.name.split('.').pop() || '').toLowerCase()
 
-  if (ext === 'stl' || ext === 'obj' || ext === '3mf') {
+  if (ext === 'stl' || ext === 'obj' || ext === '3mf' || ext === 'gltf' || ext === 'glb') {
     return loadMeshOnMainThread(file, ext)
   }
 
@@ -104,5 +116,5 @@ export async function loadMeshFile(file: File, worker?: Worker): Promise<THREE.B
     })
   }
 
-  throw new Error('Unsupported file. Try STL, OBJ, 3MF, STEP, IGES or BREP.')
+  throw new Error('Unsupported file. Try STL, OBJ, 3MF, glTF, GLB, STEP, IGES or BREP.')
 }

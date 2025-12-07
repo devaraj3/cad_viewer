@@ -58,7 +58,11 @@ export default function App() {
   return (
     <div style={{ height: '100%', width: '100%', display: 'flex', flexDirection: 'column' }}>
       <div style={{ padding: '8px', background: '#0b1220', borderBottom: '1px solid #1f2937', display: 'flex', alignItems: 'center', gap: 8 }}>
-        <input type="file" accept=".stl,.STL,.step,.stp,.iges,.igs,.brep,.BREP,.obj,.OBJ,.3mf,.3MF" onChange={onFile} />
+        <input
+          type="file"
+          accept=".stl,.STL,.step,.stp,.iges,.igs,.brep,.BREP,.obj,.OBJ,.3mf,.3MF,.gltf,.GLTF,.glb,.GLB"
+          onChange={onFile}
+        />
         <button onClick={() => viewerRef.current?.setView('iso')}>Iso</button>
         <button onClick={() => viewerRef.current?.setView('top')}>Top</button>
         <button onClick={() => viewerRef.current?.setView('front')}>Front</button>
