@@ -64,7 +64,9 @@ async function loadMeshOnMainThread(file: File, ext: string) {
     try {
       const loader = new GLTFLoader()
       const { scene } = await loader.loadAsync(url)
-      return mergeFromObject(scene)
+      const geom = mergeFromObject(scene)
+      if (!geom) throw new Error('No mesh data found in glTF scene')
+      return geom
     } finally {
       URL.revokeObjectURL(url)
     }
