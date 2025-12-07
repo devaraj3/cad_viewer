@@ -8,6 +8,8 @@ export type Viewer = {
   setProjection: (mode: 'perspective' | 'orthographic') => void
   resize: () => void
   dispose: () => void
+  pickAtScreenPosition: (ndcX: number, ndcY: number) => THREE.Vector3 | null
+  setMeasurementSegment: (p1: THREE.Vector3 | null, p2: THREE.Vector3 | null) => void
 }
 
 export function createViewer(container: HTMLElement): Viewer {
@@ -59,6 +61,12 @@ export function createViewer(container: HTMLElement): Viewer {
   const modelRoot = new THREE.Group()
   scene.add(modelRoot)
 
+  const raycaster = new THREE.Raycaster()
+  const pointer = new THREE.Vector2()
+
+  const measureMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 })
+  let measureLine: THREE.Line | null = null
+
   function fitCameraToBox(box: THREE.Box3, padding = 1.25) {
     if (box.isEmpty()) return
     const size = box.getSize(new THREE.Vector3())
@@ -94,6 +102,37 @@ export function createViewer(container: HTMLElement): Viewer {
     const box = new THREE.Box3()
     box.setFromObject(object)
     return box
+  }
+
+  function pickAtScreenPosition(ndcX: number, ndcY: number): THREE.Vector3 | null {
+    if (modelRoot.children.length === 0) return null
+
+    pointer.set(ndcX, ndcY)
+    raycaster.setFromCamera(pointer, activeCamera)
+    const intersects = raycaster.intersectObjects(modelRoot.children, true)
+
+    if (intersects.length === 0) return null
+    return intersects[0].point.clone()
+  }
+
+  function setMeasurementSegment(p1: THREE.Vector3 | null, p2: THREE.Vector3 | null) {
+    if (p1 === null || p2 === null) {
+      if (measureLine) {
+        scene.remove(measureLine)
+        measureLine.geometry.dispose()
+        measureLine = null
+      }
+      return
+    }
+
+    const geom = new THREE.BufferGeometry().setFromPoints([p1, p2])
+    if (measureLine) {
+      measureLine.geometry.dispose()
+      measureLine.geometry = geom
+    } else {
+      measureLine = new THREE.Line(geom, measureMaterial)
+      scene.add(measureLine)
+    }
   }
 
   function loadMeshFromGeometry(geom: THREE.BufferGeometry) {
@@ -181,5 +220,14 @@ export function createViewer(container: HTMLElement): Viewer {
     container.removeChild(renderer.domElement)
   }
 
-  return { loadMeshFromGeometry, clear, setView, setProjection, resize, dispose }
+  return {
+    loadMeshFromGeometry,
+    clear,
+    setView,
+    setProjection,
+    resize,
+    dispose,
+    pickAtScreenPosition,
+    setMeasurementSegment
+  }
 }
