@@ -27,21 +27,24 @@ async function init() {
   return occt
 }
 
+function buildOcctParams(linearDeflection?: number, angularDeflection?: number) {
+  return {
+    linearUnit: 'millimeter',
+    linearDeflectionType: 'bounding_box_ratio',
+    linearDeflection: linearDeflection ?? 0.001,
+    angularDeflection: angularDeflection ?? 0.5
+  }
+}
 
 ctx.onmessage = async (e: MessageEvent<TessReq>) => {
   const { id, type, payload } = e.data
   if (type !== 'tessellate') return
   try {
-    const { buffer, ext, linearDeflection = 0.5, angularDeflection = 0.3 } = payload
+    const { buffer, ext, linearDeflection, angularDeflection } = payload
     const u8 = new Uint8Array(buffer)
     const mod = await init()
 
-    const params = {
-      linearUnit: 'millimeter',
-      linearDeflectionType: 'absolute_value',
-      linearDeflection,
-      angularDeflection
-    }
+    const params = buildOcctParams(linearDeflection, angularDeflection)
 
     let res: any
     if (ext === 'step' || ext === 'stp')   res = mod.ReadStepFile(u8, params)
@@ -49,7 +52,15 @@ ctx.onmessage = async (e: MessageEvent<TessReq>) => {
     else if (ext === 'brep')                  res = mod.ReadBrepFile(u8, params)
     else throw new Error('Unsupported extension')
 
-    if (!res || !res.success) throw new Error('Import failed')
+    if (ext === 'brep') {
+      console.log('BREP tessellation success:', res?.success, 'meshes:', res?.meshes?.length ?? 0)
+    }
+
+    if (!res || !res.success) {
+      const errMsg = res?.error ? `Import failed: ${res.error}` : 'Import failed'
+      ctx.postMessage({ id, ok: false, error: errMsg } as TessErr)
+      return
+    }
 
     // Flatten meshes
     const positions: number[] = []
@@ -65,6 +76,11 @@ ctx.onmessage = async (e: MessageEvent<TessReq>) => {
 
     const pos = new Float32Array(positions)
     const idx = new Uint32Array(indices)
+
+    if (ext === 'brep') {
+      console.log('BREP final vertex count:', pos.length / 3, 'triangle count:', idx.length / 3)
+    }
+
     ctx.postMessage({ id, ok: true, positions: pos, indices: idx } as TessOk, [pos.buffer, idx.buffer])
   } catch (err: any) {
     ctx.postMessage({ id, ok: false, error: err?.message || String(err) } as TessErr)
