@@ -9,7 +9,12 @@ export type Viewer = {
   resize: () => void
   dispose: () => void
   pickAtScreenPosition: (ndcX: number, ndcY: number) => THREE.Vector3 | null
-  setMeasurementSegment: (p1: THREE.Vector3 | null, p2: THREE.Vector3 | null) => void
+  setMeasurementSegment: (
+    p1: THREE.Vector3 | null,
+    p2: THREE.Vector3 | null,
+    labelText?: string | null
+  ) => void
+  getScreenshotDataURL: () => string
 }
 
 export function createViewer(container: HTMLElement): Viewer {
@@ -66,6 +71,7 @@ export function createViewer(container: HTMLElement): Viewer {
 
   const measureMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 })
   let measureLine: THREE.Line | null = null
+  let measureLabel: THREE.Sprite | null = null
 
   function fitCameraToBox(box: THREE.Box3, padding = 1.25) {
     if (box.isEmpty()) return
@@ -115,12 +121,24 @@ export function createViewer(container: HTMLElement): Viewer {
     return intersects[0].point.clone()
   }
 
-  function setMeasurementSegment(p1: THREE.Vector3 | null, p2: THREE.Vector3 | null) {
+  function setMeasurementSegment(
+    p1: THREE.Vector3 | null,
+    p2: THREE.Vector3 | null,
+    labelText?: string | null
+  ) {
     if (p1 === null || p2 === null) {
       if (measureLine) {
         scene.remove(measureLine)
         measureLine.geometry.dispose()
         measureLine = null
+      }
+      if (measureLabel) {
+        scene.remove(measureLabel)
+        if (measureLabel.material.map) {
+          measureLabel.material.map.dispose()
+        }
+        measureLabel.material.dispose()
+        measureLabel = null
       }
       return
     }
@@ -133,6 +151,58 @@ export function createViewer(container: HTMLElement): Viewer {
       measureLine = new THREE.Line(geom, measureMaterial)
       scene.add(measureLine)
     }
+
+    const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5)
+
+    if (labelText == null) {
+      if (measureLabel) {
+        scene.remove(measureLabel)
+        if (measureLabel.material.map) {
+          measureLabel.material.map.dispose()
+        }
+        measureLabel.material.dispose()
+        measureLabel = null
+      }
+      return
+    }
+
+    const canvas = document.createElement('canvas')
+    const ctx = canvas.getContext('2d')
+    if (ctx) {
+      const fontSize = 48
+      ctx.font = `${fontSize}px sans-serif`
+      const text = labelText
+      const textWidth = ctx.measureText(text).width
+      canvas.width = textWidth + 20
+      canvas.height = fontSize + 20
+      ctx.font = `${fontSize}px sans-serif`
+      ctx.fillStyle = 'white'
+      ctx.strokeStyle = 'black'
+      ctx.lineWidth = 4
+      ctx.strokeText(text, 10, fontSize)
+      ctx.fillText(text, 10, fontSize)
+    }
+
+    const texture = new THREE.CanvasTexture(canvas)
+    const mat = new THREE.SpriteMaterial({ map: texture, depthTest: true, depthWrite: false })
+    if (measureLabel) {
+      if (measureLabel.material.map) {
+        measureLabel.material.map.dispose()
+      }
+      measureLabel.material.dispose()
+      measureLabel.material = mat
+    } else {
+      measureLabel = new THREE.Sprite(mat)
+      scene.add(measureLabel)
+    }
+
+    measureLabel.position.copy(mid)
+    const baseScale = 0.05 * mid.length() || 1
+    measureLabel.scale.setScalar(baseScale)
+  }
+
+  function getScreenshotDataURL(): string {
+    return renderer.domElement.toDataURL('image/png')
   }
 
   function loadMeshFromGeometry(geom: THREE.BufferGeometry) {
@@ -228,6 +298,7 @@ export function createViewer(container: HTMLElement): Viewer {
     resize,
     dispose,
     pickAtScreenPosition,
-    setMeasurementSegment
+    setMeasurementSegment,
+    getScreenshotDataURL
   }
 }
