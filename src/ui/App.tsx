@@ -22,6 +22,7 @@ export default function App() {
   const [measureMode, setMeasureMode] = useState(false)
   const [measurePoints, setMeasurePoints] = useState<THREE.Vector3[]>([])
   const [measureMM, setMeasureMM] = useState<number | null>(null)
+  const [dimScale, setDimScale] = useState(1)
 
   // OCC worker (for STEP/IGES/BREP)
   const workerRef = useRef<Worker | null>(null)
@@ -29,6 +30,7 @@ export default function App() {
   useEffect(() => {
     if (!containerRef.current) return
     viewerRef.current = createViewer(containerRef.current)
+    viewerRef.current.setMeasurementGraphicsScale(dimScale)
 
     workerRef.current = new Worker(new URL('../workers/occ-worker.ts', import.meta.url))
 
@@ -37,6 +39,12 @@ export default function App() {
       workerRef.current?.terminate()
     }
   }, [])
+
+  useEffect(() => {
+    if (viewerRef.current) {
+      viewerRef.current.setMeasurementGraphicsScale(dimScale)
+    }
+  }, [dimScale, viewerRef])
 
   function setDimsFromGeometry(geom: THREE.BufferGeometry) {
     geom.computeBoundingBox()
@@ -156,6 +164,24 @@ export default function App() {
         >
           Measure
         </button>
+
+        <label style={{ marginLeft: 8 }}>
+          Dim size:{' '}
+          <select
+            value={dimScale}
+            onChange={(e) => {
+              const scale = Number(e.target.value) || 1
+              setDimScale(scale)
+              if (viewerRef.current) {
+                viewerRef.current.setMeasurementGraphicsScale(scale)
+              }
+            }}
+          >
+            <option value={0.75}>Small</option>
+            <option value={1}>Medium</option>
+            <option value={1.5}>Large</option>
+          </select>
+        </label>
 
         <div style={{ marginLeft: 16 }}>
           <label style={{ marginRight: 6, opacity: 0.8 }}>Units</label>
