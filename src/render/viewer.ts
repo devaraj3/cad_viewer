@@ -77,6 +77,15 @@ export function createViewer(container: HTMLElement): Viewer {
   const measureMaterial = new THREE.LineBasicMaterial({ color: 0xffffff })
   let measureLine: THREE.Line | null = null
   let measureLabel: THREE.Sprite | null = null
+
+  const arrowMaterial = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    side: THREE.DoubleSide,
+    depthTest: true,
+    depthWrite: true,
+  })
+  let measureArrow1: THREE.Mesh | null = null
+  let measureArrow2: THREE.Mesh | null = null
   let measureGraphicsScale = 1
 
   function setMeasurementGraphicsScale(scale: number) {
@@ -158,6 +167,18 @@ export function createViewer(container: HTMLElement): Viewer {
         measureLabel.material.dispose()
         measureLabel = null
       }
+      if (measureArrow1) {
+        scene.remove(measureArrow1)
+        measureArrow1.geometry.dispose()
+        measureArrow1.material.dispose()
+        measureArrow1 = null
+      }
+      if (measureArrow2) {
+        scene.remove(measureArrow2)
+        measureArrow2.geometry.dispose()
+        measureArrow2.material.dispose()
+        measureArrow2 = null
+      }
       return
     }
 
@@ -177,12 +198,31 @@ export function createViewer(container: HTMLElement): Viewer {
         measureLabel.material.dispose()
         measureLabel = null
       }
+      if (measureArrow1) {
+        scene.remove(measureArrow1)
+        measureArrow1.geometry.dispose()
+        measureArrow1.material.dispose()
+        measureArrow1 = null
+      }
+      if (measureArrow2) {
+        scene.remove(measureArrow2)
+        measureArrow2.geometry.dispose()
+        measureArrow2.material.dispose()
+        measureArrow2 = null
+      }
       return
     }
     dir.normalize()
 
-    const arrowLength = Math.max(len * 0.07, 5 * measureGraphicsScale)
-    const arrowHalfWidth = arrowLength * 0.4
+    const linePoints = [p1.clone(), p2.clone()]
+    const lineGeom = new THREE.BufferGeometry().setFromPoints(linePoints)
+    if (measureLine) {
+      measureLine.geometry.dispose()
+      measureLine.geometry = lineGeom
+    } else {
+      measureLine = new THREE.Line(lineGeom, measureMaterial)
+      scene.add(measureLine)
+    }
 
     const up = new THREE.Vector3(0, 1, 0)
     if (Math.abs(dir.dot(up)) > 0.9) {
@@ -190,35 +230,64 @@ export function createViewer(container: HTMLElement): Viewer {
     }
     const side = new THREE.Vector3().crossVectors(dir, up).normalize()
 
-    const points: THREE.Vector3[] = []
+    // Arrow dimensions
+    const arrowLength = Math.max(len * 0.07, 5 * measureGraphicsScale)
+    const arrowHalfWidth = arrowLength * 0.4
 
-    // Main dimension line
-    points.push(p1.clone(), p2.clone())
-
-    // Arrow at p1
+    // Arrow at p1 (filled triangle)
     const tip1 = p1.clone()
     const base1 = p1.clone().add(dir.clone().multiplyScalar(arrowLength))
     const wing1a = base1.clone().add(side.clone().multiplyScalar(arrowHalfWidth))
     const wing1b = base1.clone().sub(side.clone().multiplyScalar(arrowHalfWidth))
-    points.push(tip1.clone(), wing1a, tip1.clone(), wing1b)
 
-    // Arrow at p2
+    const positions1 = new Float32Array([
+      tip1.x, tip1.y, tip1.z,
+      wing1a.x, wing1a.y, wing1a.z,
+      wing1b.x, wing1b.y, wing1b.z,
+    ])
+    const arrowGeom1 = new THREE.BufferGeometry()
+    arrowGeom1.setAttribute('position', new THREE.BufferAttribute(positions1, 3))
+    arrowGeom1.setIndex([0, 1, 2])
+
+    // Arrow at p2 (filled triangle)
     const tip2 = p2.clone()
     const base2 = p2.clone().add(dir.clone().multiplyScalar(-arrowLength))
     const wing2a = base2.clone().add(side.clone().multiplyScalar(arrowHalfWidth))
     const wing2b = base2.clone().sub(side.clone().multiplyScalar(arrowHalfWidth))
-    points.push(tip2.clone(), wing2a, tip2.clone(), wing2b)
 
-    const geom = new THREE.BufferGeometry().setFromPoints(points)
-    if (measureLine) {
-      measureLine.geometry.dispose()
-      measureLine.geometry = geom
+    const positions2 = new Float32Array([
+      tip2.x, tip2.y, tip2.z,
+      wing2a.x, wing2a.y, wing2a.z,
+      wing2b.x, wing2b.y, wing2b.z,
+    ])
+    const arrowGeom2 = new THREE.BufferGeometry()
+    arrowGeom2.setAttribute('position', new THREE.BufferAttribute(positions2, 3))
+    arrowGeom2.setIndex([0, 1, 2])
+
+    if (measureArrow1) {
+      measureArrow1.geometry.dispose()
+      measureArrow1.geometry = arrowGeom1
     } else {
-      measureLine = new THREE.Line(geom, measureMaterial)
-      scene.add(measureLine)
+      measureArrow1 = new THREE.Mesh(arrowGeom1, arrowMaterial)
+      scene.add(measureArrow1)
+    }
+
+    if (measureArrow2) {
+      measureArrow2.geometry.dispose()
+      measureArrow2.geometry = arrowGeom2
+    } else {
+      measureArrow2 = new THREE.Mesh(arrowGeom2, arrowMaterial)
+      scene.add(measureArrow2)
     }
 
     const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5)
+    const offsetDir = new THREE.Vector3(0, 1, 0)
+    if (Math.abs(dir.dot(offsetDir)) > 0.9) {
+      offsetDir.set(1, 0, 0)
+    }
+    offsetDir.normalize()
+    const offsetAmount = Math.max(len * 0.03, 5 * measureGraphicsScale)
+    mid.add(offsetDir.multiplyScalar(offsetAmount))
 
     if (labelText == null) {
       if (measureLabel) {
@@ -252,7 +321,7 @@ export function createViewer(container: HTMLElement): Viewer {
     const texture = new THREE.CanvasTexture(canvas)
     const mat = new THREE.SpriteMaterial({
       map: texture,
-      depthTest: true,
+      depthTest: false,
       depthWrite: false,
       sizeAttenuation: false,
     })
