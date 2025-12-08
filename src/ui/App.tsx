@@ -22,7 +22,7 @@ export default function App() {
   const [measureMode, setMeasureMode] = useState(false)
   const [measurePoints, setMeasurePoints] = useState<THREE.Vector3[]>([])
   const [measureMM, setMeasureMM] = useState<number | null>(null)
-  const [dimScale, setDimScale] = useState(1)
+  const [dimScale, setDimScale] = useState(0.6)
 
   // OCC worker (for STEP/IGES/BREP)
   const workerRef = useRef<Worker | null>(null)
@@ -166,21 +166,25 @@ export default function App() {
         </button>
 
         <label style={{ marginLeft: 8 }}>
-          Dim size:{' '}
-          <select
+          Dim scale:{' '}
+          <input
+            type="number"
+            step="0.1"
+            min="0.1"
+            max="4"
             value={dimScale}
             onChange={(e) => {
-              const scale = Number(e.target.value) || 1
-              setDimScale(scale)
-              if (viewerRef.current) {
-                viewerRef.current.setMeasurementGraphicsScale(scale)
+              const value = Number(e.target.value)
+              if (!viewerRef.current) {
+                setDimScale(value)
+                return
               }
+              const clamped = Math.min(Math.max(value || 0.1, 0.1), 4)
+              setDimScale(clamped)
+              viewerRef.current.setMeasurementGraphicsScale(clamped)
             }}
-          >
-            <option value={0.75}>Small</option>
-            <option value={1}>Medium</option>
-            <option value={1.5}>Large</option>
-          </select>
+            style={{ width: 60 }}
+          />
         </label>
 
         <div style={{ marginLeft: 16 }}>
