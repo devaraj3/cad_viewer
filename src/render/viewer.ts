@@ -74,18 +74,18 @@ export function createViewer(container: HTMLElement): Viewer {
   const raycaster = new THREE.Raycaster()
   const pointer = new THREE.Vector2()
 
-  const measureMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 })
+  const measureMaterial = new THREE.LineBasicMaterial({ color: 0xffffff })
   let measureLine: THREE.Line | null = null
   let measureLabel: THREE.Sprite | null = null
   let measureGraphicsScale = 1
 
   function setMeasurementGraphicsScale(scale: number) {
-    measureGraphicsScale = Math.max(0.25, Math.min(scale, 4))
+    measureGraphicsScale = Math.max(0.1, Math.min(scale, 4))
     if (measureLabel) {
-      const baseLabelScale = 0.8
+      const baseLabelScale = 0.4
       measureLabel.scale.set(
         baseLabelScale * measureGraphicsScale,
-        0.4 * measureGraphicsScale,
+        0.2 * measureGraphicsScale,
         1
       )
     }
@@ -181,7 +181,8 @@ export function createViewer(container: HTMLElement): Viewer {
     }
     dir.normalize()
 
-    const arrowSize = Math.min(len * 0.1, len * 0.4) * 0.2 * measureGraphicsScale
+    const arrowLength = Math.max(len * 0.07, 5 * measureGraphicsScale)
+    const arrowHalfWidth = arrowLength * 0.4
 
     const up = new THREE.Vector3(0, 1, 0)
     if (Math.abs(dir.dot(up)) > 0.9) {
@@ -191,26 +192,22 @@ export function createViewer(container: HTMLElement): Viewer {
 
     const points: THREE.Vector3[] = []
 
+    // Main dimension line
     points.push(p1.clone(), p2.clone())
 
-    const base1 = p1.clone()
-    const tip1 = p1.clone().add(dir.clone().multiplyScalar(arrowSize))
-    const wingOffset = side.clone().multiplyScalar(arrowSize * 0.6)
-    points.push(
-      tip1.clone().add(wingOffset),
-      base1.clone(),
-      tip1.clone().sub(wingOffset),
-      base1.clone()
-    )
+    // Arrow at p1
+    const tip1 = p1.clone()
+    const base1 = p1.clone().add(dir.clone().multiplyScalar(arrowLength))
+    const wing1a = base1.clone().add(side.clone().multiplyScalar(arrowHalfWidth))
+    const wing1b = base1.clone().sub(side.clone().multiplyScalar(arrowHalfWidth))
+    points.push(tip1.clone(), wing1a, tip1.clone(), wing1b)
 
-    const base2 = p2.clone()
-    const tip2 = p2.clone().add(dir.clone().multiplyScalar(-arrowSize))
-    points.push(
-      tip2.clone().add(wingOffset),
-      base2.clone(),
-      tip2.clone().sub(wingOffset),
-      base2.clone()
-    )
+    // Arrow at p2
+    const tip2 = p2.clone()
+    const base2 = p2.clone().add(dir.clone().multiplyScalar(-arrowLength))
+    const wing2a = base2.clone().add(side.clone().multiplyScalar(arrowHalfWidth))
+    const wing2b = base2.clone().sub(side.clone().multiplyScalar(arrowHalfWidth))
+    points.push(tip2.clone(), wing2a, tip2.clone(), wing2b)
 
     const geom = new THREE.BufferGeometry().setFromPoints(points)
     if (measureLine) {
@@ -271,10 +268,10 @@ export function createViewer(container: HTMLElement): Viewer {
     }
 
     measureLabel.position.copy(mid)
-    const baseLabelScale = 0.8
+    const baseLabelScale = 0.4 // was 0.8; smaller by default
     measureLabel.scale.set(
       baseLabelScale * measureGraphicsScale,
-      0.4 * measureGraphicsScale,
+      0.2 * measureGraphicsScale,
       1
     )
   }
