@@ -14,6 +14,7 @@ export type Viewer = {
     p2: THREE.Vector3 | null,
     labelText?: string | null
   ) => void
+  setMeasurementGraphicsScale: (scale: number) => void
   getScreenshotDataURL: () => string
 }
 
@@ -76,6 +77,19 @@ export function createViewer(container: HTMLElement): Viewer {
   const measureMaterial = new THREE.LineBasicMaterial({ color: 0xff0000 })
   let measureLine: THREE.Line | null = null
   let measureLabel: THREE.Sprite | null = null
+  let measureGraphicsScale = 1
+
+  function setMeasurementGraphicsScale(scale: number) {
+    measureGraphicsScale = Math.max(0.25, Math.min(scale, 4))
+    if (measureLabel) {
+      const baseLabelScale = 0.8
+      measureLabel.scale.set(
+        baseLabelScale * measureGraphicsScale,
+        0.4 * measureGraphicsScale,
+        1
+      )
+    }
+  }
 
   function fitCameraToBox(box: THREE.Box3, padding = 1.25) {
     if (box.isEmpty()) return
@@ -147,7 +161,58 @@ export function createViewer(container: HTMLElement): Viewer {
       return
     }
 
-    const geom = new THREE.BufferGeometry().setFromPoints([p1, p2])
+    const dir = new THREE.Vector3().subVectors(p2, p1)
+    const len = dir.length()
+    if (len === 0) {
+      if (measureLine) {
+        scene.remove(measureLine)
+        measureLine.geometry.dispose()
+        measureLine = null
+      }
+      if (measureLabel) {
+        scene.remove(measureLabel)
+        if (measureLabel.material.map) {
+          measureLabel.material.map.dispose()
+        }
+        measureLabel.material.dispose()
+        measureLabel = null
+      }
+      return
+    }
+    dir.normalize()
+
+    const arrowSize = Math.min(len * 0.1, len * 0.4) * 0.2 * measureGraphicsScale
+
+    const up = new THREE.Vector3(0, 1, 0)
+    if (Math.abs(dir.dot(up)) > 0.9) {
+      up.set(1, 0, 0)
+    }
+    const side = new THREE.Vector3().crossVectors(dir, up).normalize()
+
+    const points: THREE.Vector3[] = []
+
+    points.push(p1.clone(), p2.clone())
+
+    const base1 = p1.clone()
+    const tip1 = p1.clone().add(dir.clone().multiplyScalar(arrowSize))
+    const wingOffset = side.clone().multiplyScalar(arrowSize * 0.6)
+    points.push(
+      tip1.clone().add(wingOffset),
+      base1.clone(),
+      tip1.clone().sub(wingOffset),
+      base1.clone()
+    )
+
+    const base2 = p2.clone()
+    const tip2 = p2.clone().add(dir.clone().multiplyScalar(-arrowSize))
+    points.push(
+      tip2.clone().add(wingOffset),
+      base2.clone(),
+      tip2.clone().sub(wingOffset),
+      base2.clone()
+    )
+
+    const geom = new THREE.BufferGeometry().setFromPoints(points)
     if (measureLine) {
       measureLine.geometry.dispose()
       measureLine.geometry = geom
@@ -173,7 +238,7 @@ export function createViewer(container: HTMLElement): Viewer {
     const canvas = document.createElement('canvas')
     const ctx = canvas.getContext('2d')
     if (ctx) {
-      const fontSize = 48
+      const fontSize = 32
       ctx.font = `${fontSize}px sans-serif`
       const text = labelText
       const textWidth = ctx.measureText(text).width
@@ -206,7 +271,12 @@ export function createViewer(container: HTMLElement): Viewer {
     }
 
     measureLabel.position.copy(mid)
-    measureLabel.scale.set(1, 0.5, 1)
+    const baseLabelScale = 0.8
+    measureLabel.scale.set(
+      baseLabelScale * measureGraphicsScale,
+      0.4 * measureGraphicsScale,
+      1
+    )
   }
 
   function getScreenshotDataURL(): string {
@@ -308,6 +378,7 @@ export function createViewer(container: HTMLElement): Viewer {
     dispose,
     pickAtScreenPosition,
     setMeasurementSegment,
+    setMeasurementGraphicsScale,
     getScreenshotDataURL
   }
 }
