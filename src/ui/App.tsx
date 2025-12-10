@@ -151,6 +151,21 @@ export default function App() {
 
         <button
           onClick={() => {
+            if (!viewerRef.current) return
+            const dataURL = viewerRef.current.getOutlineSnapshotDataURL()
+            const link = document.createElement('a')
+            link.href = dataURL
+            link.download = 'cad_viewer_outline.png'
+            document.body.appendChild(link)
+            link.click()
+            document.body.removeChild(link)
+          }}
+        >
+          Outline Snapshot
+        </button>
+
+        <button
+          onClick={() => {
             const next = !measureMode
             setMeasureMode(next)
             if (!next && viewerRef.current) {

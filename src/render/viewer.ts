@@ -16,6 +16,7 @@ export type Viewer = {
   ) => void
   setMeasurementGraphicsScale: (scale: number) => void
   getScreenshotDataURL: () => string
+  getOutlineSnapshotDataURL: () => string
 }
 
 export function createViewer(container: HTMLElement): Viewer {
@@ -370,6 +371,56 @@ export function createViewer(container: HTMLElement): Viewer {
     return renderer.domElement.toDataURL('image/png')
   }
 
+  function getOutlineSnapshotDataURL(): string {
+    const prevClearColor = renderer.getClearColor(new THREE.Color()).clone()
+    const prevClearAlpha = renderer.getClearAlpha()
+    const prevBackground = scene.background
+    const prevModelVisible = modelRoot.visible
+
+    const edgesGroup = new THREE.Group()
+
+    modelRoot.traverse((obj: any) => {
+      if (!obj.isMesh || !obj.geometry) return
+
+      const geom = obj.geometry as THREE.BufferGeometry
+      const edgesGeom = new THREE.EdgesGeometry(geom)
+      const edgesMat = new THREE.LineBasicMaterial({ color: 0x000000 })
+      const edges = new THREE.LineSegments(edgesGeom, edgesMat)
+      edges.applyMatrix4(obj.matrixWorld)
+      edgesGroup.add(edges)
+    })
+
+    scene.add(edgesGroup)
+
+    modelRoot.visible = false
+
+    renderer.setClearColor(0xffffff, 1)
+    scene.background = null
+
+    renderer.render(scene, activeCamera)
+
+    const dataURL = renderer.domElement.toDataURL('image/png')
+
+    scene.remove(edgesGroup)
+    edgesGroup.traverse((obj: any) => {
+      const asAny = obj as any
+      if (asAny.geometry) asAny.geometry.dispose()
+      if (asAny.material) {
+        if (Array.isArray(asAny.material)) {
+          asAny.material.forEach((m: any) => m.dispose())
+        } else {
+          asAny.material.dispose()
+        }
+      }
+    })
+
+    modelRoot.visible = prevModelVisible
+    renderer.setClearColor(prevClearColor, prevClearAlpha)
+    scene.background = prevBackground
+
+    return dataURL
+  }
+
   function loadMeshFromGeometry(geom: THREE.BufferGeometry) {
     // 1) Ensure normals
     if (!geom.getAttribute('normal')) geom.computeVertexNormals()
@@ -465,6 +516,7 @@ export function createViewer(container: HTMLElement): Viewer {
     pickAtScreenPosition,
     setMeasurementSegment,
     setMeasurementGraphicsScale,
-    getScreenshotDataURL
+    getScreenshotDataURL,
+    getOutlineSnapshotDataURL
   }
 }
