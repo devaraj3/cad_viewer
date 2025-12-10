@@ -61,13 +61,16 @@ export function createViewer(container: HTMLElement): Viewer {
   dir.position.set(300, 400, 300)
   scene.add(dir)
 
-  const grid = new THREE.GridHelper(1000, 50, 0x666666, 0x333333)
-  grid.position.y = 0
-  scene.add(grid)
+  let gridHelper: THREE.GridHelper | null = null
+  let axesHelper: THREE.AxesHelper | null = null
 
-  const axes = new THREE.AxesHelper(200)
-  axes.position.set(0, 0, 0)
-  scene.add(axes)
+  gridHelper = new THREE.GridHelper(1000, 50, 0x666666, 0x333333)
+  gridHelper.position.y = 0
+  scene.add(gridHelper)
+
+  axesHelper = new THREE.AxesHelper(200)
+  axesHelper.position.set(0, 0, 0)
+  scene.add(axesHelper)
 
   const modelRoot = new THREE.Group()
   scene.add(modelRoot)
@@ -92,6 +95,15 @@ export function createViewer(container: HTMLElement): Viewer {
   let measureArrow1: THREE.Mesh | null = null
   let measureArrow2: THREE.Mesh | null = null
   let measureGraphicsScale = 1
+
+  function setOverlayVisible(visible: boolean) {
+    if (measureLine) measureLine.visible = visible
+    if (measureArrow1) measureArrow1.visible = visible
+    if (measureArrow2) measureArrow2.visible = visible
+    if (measureLabel) measureLabel.visible = visible
+    if (gridHelper) gridHelper.visible = visible
+    if (axesHelper) axesHelper.visible = visible
+  }
 
   function setMeasurementGraphicsScale(scale: number) {
     measureGraphicsScale = Math.max(0.1, Math.min(scale, 4))
@@ -367,11 +379,38 @@ export function createViewer(container: HTMLElement): Viewer {
   }
 
   function getScreenshotDataURL(): string {
+    const prevMeasureLineVisible = measureLine ? measureLine.visible : false
+    const prevArrow1Visible = measureArrow1 ? measureArrow1.visible : false
+    const prevArrow2Visible = measureArrow2 ? measureArrow2.visible : false
+    const prevLabelVisible = measureLabel ? measureLabel.visible : false
+    const prevGridVisible = gridHelper ? gridHelper.visible : false
+    const prevAxesVisible = axesHelper ? axesHelper.visible : false
+
+    setOverlayVisible(false)
+
     renderer.render(scene, activeCamera)
-    return renderer.domElement.toDataURL('image/png')
+    const dataURL = renderer.domElement.toDataURL('image/png')
+
+    if (measureLine) measureLine.visible = prevMeasureLineVisible
+    if (measureArrow1) measureArrow1.visible = prevArrow1Visible
+    if (measureArrow2) measureArrow2.visible = prevArrow2Visible
+    if (measureLabel) measureLabel.visible = prevLabelVisible
+    if (gridHelper) gridHelper.visible = prevGridVisible
+    if (axesHelper) axesHelper.visible = prevAxesVisible
+
+    return dataURL
   }
 
   function getOutlineSnapshotDataURL(): string {
+    const prevMeasureLineVisible = measureLine ? measureLine.visible : false
+    const prevArrow1Visible = measureArrow1 ? measureArrow1.visible : false
+    const prevArrow2Visible = measureArrow2 ? measureArrow2.visible : false
+    const prevLabelVisible = measureLabel ? measureLabel.visible : false
+    const prevGridVisible = gridHelper ? gridHelper.visible : false
+    const prevAxesVisible = axesHelper ? axesHelper.visible : false
+
+    setOverlayVisible(false)
+
     const prevClearColor = renderer.getClearColor(new THREE.Color()).clone()
     const prevClearAlpha = renderer.getClearAlpha()
     const prevBackground = scene.background
@@ -383,7 +422,8 @@ export function createViewer(container: HTMLElement): Viewer {
       if (!obj.isMesh || !obj.geometry) return
 
       const geom = obj.geometry as THREE.BufferGeometry
-      const edgesGeom = new THREE.EdgesGeometry(geom)
+      const edgeThreshold = 40
+      const edgesGeom = new THREE.EdgesGeometry(geom, edgeThreshold)
       const edgesMat = new THREE.LineBasicMaterial({ color: 0x000000 })
       const edges = new THREE.LineSegments(edgesGeom, edgesMat)
       edges.applyMatrix4(obj.matrixWorld)
@@ -418,6 +458,13 @@ export function createViewer(container: HTMLElement): Viewer {
     renderer.setClearColor(prevClearColor, prevClearAlpha)
     scene.background = prevBackground
 
+    if (measureLine) measureLine.visible = prevMeasureLineVisible
+    if (measureArrow1) measureArrow1.visible = prevArrow1Visible
+    if (measureArrow2) measureArrow2.visible = prevArrow2Visible
+    if (measureLabel) measureLabel.visible = prevLabelVisible
+    if (gridHelper) gridHelper.visible = prevGridVisible
+    if (axesHelper) axesHelper.visible = prevAxesVisible
+
     return dataURL
   }
 
@@ -451,7 +498,7 @@ export function createViewer(container: HTMLElement): Viewer {
 
     // 5) Fit camera to final bounds
     const finalBox = new THREE.Box3().setFromObject(modelRoot)
-    grid.position.y = 0
+    if (gridHelper) gridHelper.position.y = 0
     fitCameraToBox(finalBox, 1.3)
   }
 
