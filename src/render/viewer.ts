@@ -74,15 +74,19 @@ export function createViewer(container: HTMLElement): Viewer {
   const raycaster = new THREE.Raycaster()
   const pointer = new THREE.Vector2()
 
-  const measureMaterial = new THREE.LineBasicMaterial({ color: 0xffffff })
+  const measureMaterial = new THREE.LineBasicMaterial({
+    color: 0xffffff,
+    depthTest: false,
+    depthWrite: false,
+  })
   let measureLine: THREE.Line | null = null
   let measureLabel: THREE.Sprite | null = null
 
   const arrowMaterial = new THREE.MeshBasicMaterial({
     color: 0xffffff,
     side: THREE.DoubleSide,
-    depthTest: true,
-    depthWrite: true,
+    depthTest: false,
+    depthWrite: false,
   })
   let measureArrow1: THREE.Mesh | null = null
   let measureArrow2: THREE.Mesh | null = null
@@ -214,15 +218,24 @@ export function createViewer(container: HTMLElement): Viewer {
     }
     dir.normalize()
 
-    const linePoints = [p1.clone(), p2.clone()]
+    // Offset dimension graphics slightly toward the camera to act as an overlay
+    const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5)
+    const viewDir = new THREE.Vector3().subVectors(activeCamera.position, mid).normalize()
+    const overlayOffset = viewDir.clone().multiplyScalar(len * 0.02 + 2 * measureGraphicsScale)
+    const p1o = p1.clone().add(overlayOffset)
+    const p2o = p2.clone().add(overlayOffset)
+
+    const linePoints = [p1o.clone(), p2o.clone()]
     const lineGeom = new THREE.BufferGeometry().setFromPoints(linePoints)
     if (measureLine) {
       measureLine.geometry.dispose()
       measureLine.geometry = lineGeom
     } else {
       measureLine = new THREE.Line(lineGeom, measureMaterial)
+      measureLine.renderOrder = 999
       scene.add(measureLine)
     }
+    if (measureLine) measureLine.renderOrder = 999
 
     const up = new THREE.Vector3(0, 1, 0)
     if (Math.abs(dir.dot(up)) > 0.9) {
@@ -235,8 +248,8 @@ export function createViewer(container: HTMLElement): Viewer {
     const arrowHalfWidth = arrowLength * 0.4
 
     // Arrow at p1 (filled triangle)
-    const tip1 = p1.clone()
-    const base1 = p1.clone().add(dir.clone().multiplyScalar(arrowLength))
+    const tip1 = p1o.clone()
+    const base1 = p1o.clone().add(dir.clone().multiplyScalar(arrowLength))
     const wing1a = base1.clone().add(side.clone().multiplyScalar(arrowHalfWidth))
     const wing1b = base1.clone().sub(side.clone().multiplyScalar(arrowHalfWidth))
 
@@ -250,8 +263,8 @@ export function createViewer(container: HTMLElement): Viewer {
     arrowGeom1.setIndex([0, 1, 2])
 
     // Arrow at p2 (filled triangle)
-    const tip2 = p2.clone()
-    const base2 = p2.clone().add(dir.clone().multiplyScalar(-arrowLength))
+    const tip2 = p2o.clone()
+    const base2 = p2o.clone().add(dir.clone().multiplyScalar(-arrowLength))
     const wing2a = base2.clone().add(side.clone().multiplyScalar(arrowHalfWidth))
     const wing2b = base2.clone().sub(side.clone().multiplyScalar(arrowHalfWidth))
 
@@ -269,25 +282,29 @@ export function createViewer(container: HTMLElement): Viewer {
       measureArrow1.geometry = arrowGeom1
     } else {
       measureArrow1 = new THREE.Mesh(arrowGeom1, arrowMaterial)
+      measureArrow1.renderOrder = 999
       scene.add(measureArrow1)
     }
+    if (measureArrow1) measureArrow1.renderOrder = 999
 
     if (measureArrow2) {
       measureArrow2.geometry.dispose()
       measureArrow2.geometry = arrowGeom2
     } else {
       measureArrow2 = new THREE.Mesh(arrowGeom2, arrowMaterial)
+      measureArrow2.renderOrder = 999
       scene.add(measureArrow2)
     }
+    if (measureArrow2) measureArrow2.renderOrder = 999
 
-    const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5)
+    const midOffset = new THREE.Vector3().addVectors(p1o, p2o).multiplyScalar(0.5)
     const offsetDir = new THREE.Vector3(0, 1, 0)
     if (Math.abs(dir.dot(offsetDir)) > 0.9) {
       offsetDir.set(1, 0, 0)
     }
     offsetDir.normalize()
     const offsetAmount = Math.max(len * 0.03, 5 * measureGraphicsScale)
-    mid.add(offsetDir.multiplyScalar(offsetAmount))
+    const labelPos = midOffset.add(offsetDir.multiplyScalar(offsetAmount))
 
     if (labelText == null) {
       if (measureLabel) {
@@ -333,10 +350,13 @@ export function createViewer(container: HTMLElement): Viewer {
       measureLabel.material = mat
     } else {
       measureLabel = new THREE.Sprite(mat)
+      measureLabel.renderOrder = 1000
       scene.add(measureLabel)
     }
 
-    measureLabel.position.copy(mid)
+    if (measureLabel) measureLabel.renderOrder = 1000
+
+    measureLabel.position.copy(labelPos)
     const baseLabelScale = 0.4 // was 0.8; smaller by default
     measureLabel.scale.set(
       baseLabelScale * measureGraphicsScale,
