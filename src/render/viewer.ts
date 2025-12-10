@@ -97,10 +97,6 @@ export function createViewer(container: HTMLElement): Viewer {
   let measureGraphicsScale = 1
 
   function setOverlayVisible(visible: boolean) {
-    if (measureLine) measureLine.visible = visible
-    if (measureArrow1) measureArrow1.visible = visible
-    if (measureArrow2) measureArrow2.visible = visible
-    if (measureLabel) measureLabel.visible = visible
     if (gridHelper) gridHelper.visible = visible
     if (axesHelper) axesHelper.visible = visible
   }
@@ -379,10 +375,6 @@ export function createViewer(container: HTMLElement): Viewer {
   }
 
   function getScreenshotDataURL(): string {
-    const prevMeasureLineVisible = measureLine ? measureLine.visible : false
-    const prevArrow1Visible = measureArrow1 ? measureArrow1.visible : false
-    const prevArrow2Visible = measureArrow2 ? measureArrow2.visible : false
-    const prevLabelVisible = measureLabel ? measureLabel.visible : false
     const prevGridVisible = gridHelper ? gridHelper.visible : false
     const prevAxesVisible = axesHelper ? axesHelper.visible : false
 
@@ -391,10 +383,6 @@ export function createViewer(container: HTMLElement): Viewer {
     renderer.render(scene, activeCamera)
     const dataURL = renderer.domElement.toDataURL('image/png')
 
-    if (measureLine) measureLine.visible = prevMeasureLineVisible
-    if (measureArrow1) measureArrow1.visible = prevArrow1Visible
-    if (measureArrow2) measureArrow2.visible = prevArrow2Visible
-    if (measureLabel) measureLabel.visible = prevLabelVisible
     if (gridHelper) gridHelper.visible = prevGridVisible
     if (axesHelper) axesHelper.visible = prevAxesVisible
 
@@ -402,14 +390,23 @@ export function createViewer(container: HTMLElement): Viewer {
   }
 
   function getOutlineSnapshotDataURL(): string {
-    const prevMeasureLineVisible = measureLine ? measureLine.visible : false
-    const prevArrow1Visible = measureArrow1 ? measureArrow1.visible : false
-    const prevArrow2Visible = measureArrow2 ? measureArrow2.visible : false
-    const prevLabelVisible = measureLabel ? measureLabel.visible : false
     const prevGridVisible = gridHelper ? gridHelper.visible : false
     const prevAxesVisible = axesHelper ? axesHelper.visible : false
 
+    const prevLineColor = measureMaterial.color.clone()
+    const prevArrowColor = arrowMaterial.color.clone()
+    let prevLabelColor: THREE.Color | null = null
+    if (measureLabel && (measureLabel.material as any).color) {
+      prevLabelColor = (measureLabel.material as any).color.clone()
+    }
+
     setOverlayVisible(false)
+
+    measureMaterial.color.set(0x000000)
+    arrowMaterial.color.set(0x000000)
+    if (measureLabel && (measureLabel.material as any).color) {
+      (measureLabel.material as any).color.set(0x000000)
+    }
 
     const prevClearColor = renderer.getClearColor(new THREE.Color()).clone()
     const prevClearAlpha = renderer.getClearAlpha()
@@ -458,10 +455,11 @@ export function createViewer(container: HTMLElement): Viewer {
     renderer.setClearColor(prevClearColor, prevClearAlpha)
     scene.background = prevBackground
 
-    if (measureLine) measureLine.visible = prevMeasureLineVisible
-    if (measureArrow1) measureArrow1.visible = prevArrow1Visible
-    if (measureArrow2) measureArrow2.visible = prevArrow2Visible
-    if (measureLabel) measureLabel.visible = prevLabelVisible
+    measureMaterial.color.copy(prevLineColor)
+    arrowMaterial.color.copy(prevArrowColor)
+    if (measureLabel && prevLabelColor && (measureLabel.material as any).color) {
+      ;(measureLabel.material as any).color.copy(prevLabelColor)
+    }
     if (gridHelper) gridHelper.visible = prevGridVisible
     if (axesHelper) axesHelper.visible = prevAxesVisible
 
