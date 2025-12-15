@@ -14,12 +14,15 @@ function convert(valMM: number, to: Units) {
 }
 function fmt(n: number) { return Number.isFinite(n) ? n.toFixed(2) : '-' }
 
+type MeasureType = 'free' | 'x' | 'y' | 'z' | 'diameter' | 'radius'
+
 export default function App() {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const viewerRef = useRef<ReturnType<typeof createViewer> | null>(null)
   const [dimsMM, setDimsMM] = useState<{ x: number, y: number, z: number } | null>(null)
   const [units, setUnits] = useState<Units>('mm')
   const [measureMode, setMeasureMode] = useState(false)
+  const [measureType, setMeasureType] = useState<MeasureType>('free')
   const [measurePoints, setMeasurePoints] = useState<THREE.Vector3[]>([])
   const [measureMM, setMeasureMM] = useState<number | null>(null)
   const [dimScale, setDimScale] = useState(0.6)
@@ -76,11 +79,20 @@ export default function App() {
     const picked = viewerRef.current.pickAtScreenPosition(x, y)
     if (!picked) return
 
+    if (measurePoints.length >= 2) {
+      setMeasurePoints([picked])
+      setMeasureMM(null)
+      viewerRef.current.setMeasurementSegment(null, null, null)
+      return
+    }
+
     // If this is the first point:
     if (measurePoints.length === 0) {
       setMeasurePoints([picked])
-      viewerRef.current.setMeasurementSegment(null, null, null)
       setMeasureMM(null)
+      if (viewerRef.current) {
+        viewerRef.current.setMeasurementSegment(null, null, null)
+      }
       return
     }
 
@@ -91,35 +103,135 @@ export default function App() {
       const dx = p2.x - p1.x
       const dy = p2.y - p1.y
       const dz = p2.z - p1.z
-      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz) // assume model units are mm
+      const len = Math.sqrt(dx * dx + dy * dy + dz * dz) // assume model units are mm
+
+      let measured = len
+      let segP1 = p1.clone()
+      let segP2 = p2.clone()
+      let prefix = ''
+      const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5)
+
+      switch (measureType) {
+        case 'free':
+          prefix = ''
+          break
+
+        case 'x': {
+          measured = Math.abs(dx)
+          segP1 = new THREE.Vector3(p1.x, mid.y, mid.z)
+          segP2 = new THREE.Vector3(p2.x, mid.y, mid.z)
+          prefix = 'X '
+          break
+        }
+
+        case 'y': {
+          measured = Math.abs(dy)
+          segP1 = new THREE.Vector3(mid.x, p1.y, mid.z)
+          segP2 = new THREE.Vector3(mid.x, p2.y, mid.z)
+          prefix = 'Y '
+          break
+        }
+
+        case 'z': {
+          measured = Math.abs(dz)
+          segP1 = new THREE.Vector3(mid.x, mid.y, p1.z)
+          segP2 = new THREE.Vector3(mid.x, mid.y, p2.z)
+          prefix = 'Z '
+          break
+        }
+
+        case 'diameter': {
+          measured = len
+          segP1 = p1.clone()
+          segP2 = p2.clone()
+          prefix = '⌀ '
+          break
+        }
+
+        case 'radius': {
+          measured = len / 2
+          const center = mid
+          segP1 = center.clone()
+          segP2 = p1.clone()
+          prefix = 'R '
+          break
+        }
+      }
 
       setMeasurePoints([p1, p2])
-      setMeasureMM(dist)
-      const valueInUnits = convert(dist, units)
-      const label = `${fmt(valueInUnits)} ${units}`
-      viewerRef.current.setMeasurementSegment(p1, p2, label)
+      setMeasureMM(measured)
+      const valueInUnits = convert(measured, units)
+      const label = `${prefix}${fmt(valueInUnits)} ${units}`
+      viewerRef.current.setMeasurementSegment(segP1, segP2, label)
       return
     }
 
-    // If we already had 2 points, start a new measurement
-    setMeasurePoints([picked])
-    setMeasureMM(null)
-    viewerRef.current.setMeasurementSegment(null, null, null)
   }
 
   useEffect(() => {
     if (!viewerRef.current) return
-    if (measureMM == null) {
-      viewerRef.current.setMeasurementSegment(null, null, null)
-      return
+    if (measureMM == null) return
+    if (measurePoints.length !== 2) return
+
+    const [p1, p2] = measurePoints
+    const dx = p2.x - p1.x
+    const dy = p2.y - p1.y
+    const dz = p2.z - p1.z
+    const len = Math.sqrt(dx * dx + dy * dy + dz * dz)
+
+    let measured = measureMM
+    let segP1 = p1.clone()
+    let segP2 = p2.clone()
+    let prefix = ''
+    const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5)
+
+    switch (measureType) {
+      case 'free':
+        measured = len
+        segP1 = p1.clone()
+        segP2 = p2.clone()
+        prefix = ''
+        break
+      case 'x':
+        measured = Math.abs(dx)
+        segP1 = new THREE.Vector3(p1.x, mid.y, mid.z)
+        segP2 = new THREE.Vector3(p2.x, mid.y, mid.z)
+        prefix = 'X '
+        break
+      case 'y':
+        measured = Math.abs(dy)
+        segP1 = new THREE.Vector3(mid.x, p1.y, mid.z)
+        segP2 = new THREE.Vector3(mid.x, p2.y, mid.z)
+        prefix = 'Y '
+        break
+      case 'z':
+        measured = Math.abs(dz)
+        segP1 = new THREE.Vector3(mid.x, mid.y, p1.z)
+        segP2 = new THREE.Vector3(mid.x, mid.y, p2.z)
+        prefix = 'Z '
+        break
+      case 'diameter':
+        measured = len
+        segP1 = p1.clone()
+        segP2 = p2.clone()
+        prefix = '⌀ '
+        break
+      case 'radius': {
+        measured = len / 2
+        const center = mid
+        segP1 = center.clone()
+        segP2 = p1.clone()
+        prefix = 'R '
+        break
+      }
     }
-    if (measurePoints.length === 2) {
-      const [p1, p2] = measurePoints
-      const valueInUnits = convert(measureMM, units)
-      const label = `${fmt(valueInUnits)} ${units}`
-      viewerRef.current.setMeasurementSegment(p1, p2, label)
-    }
-  }, [units, measureMM, measurePoints, viewerRef])
+
+    setMeasureMM(measured)
+
+    const valueInUnits = convert(measured, units)
+    const label = `${prefix}${fmt(valueInUnits)} ${units}`
+    viewerRef.current.setMeasurementSegment(segP1, segP2, label)
+  }, [units, measureType, measurePoints, measureMM, viewerRef])
 
   return (
     <div style={{ height: '100%', width: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -179,6 +291,21 @@ export default function App() {
         >
           Measure
         </button>
+
+        <label style={{ marginLeft: 8 }}>
+          Measure type:{' '}
+          <select
+            value={measureType}
+            onChange={(e) => setMeasureType(e.target.value as MeasureType)}
+          >
+            <option value="free">Free</option>
+            <option value="x">X</option>
+            <option value="y">Y</option>
+            <option value="z">Z</option>
+            <option value="diameter">Diameter</option>
+            <option value="radius">Radius</option>
+          </select>
+        </label>
 
         <label style={{ marginLeft: 8 }}>
           Dim scale:{' '}
