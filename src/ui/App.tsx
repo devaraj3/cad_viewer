@@ -15,6 +15,7 @@ function convert(valMM: number, to: Units) {
 function fmt(n: number) { return Number.isFinite(n) ? n.toFixed(2) : '-' }
 
 type MeasureType = 'free' | 'x' | 'y' | 'z' | 'diameter' | 'radius'
+type SectionAxis = 'x' | 'y' | 'z'
 
 export default function App() {
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -26,6 +27,17 @@ export default function App() {
   const [measurePoints, setMeasurePoints] = useState<THREE.Vector3[]>([])
   const [measureMM, setMeasureMM] = useState<number | null>(null)
   const [dimScale, setDimScale] = useState(0.6)
+  const [sectionEnabled, setSectionEnabled] = useState<Record<SectionAxis, boolean>>({
+    x: false,
+    y: false,
+    z: false
+  })
+  const [sectionOffsets, setSectionOffsets] = useState<Record<SectionAxis, number>>({
+    x: 0.5,
+    y: 0.5,
+    z: 0.5
+  })
+  const [sectionPlanesVisible, setSectionPlanesVisible] = useState(true)
 
   // OCC worker (for STEP/IGES/BREP)
   const workerRef = useRef<Worker | null>(null)
@@ -64,6 +76,11 @@ export default function App() {
       const geom = await loadMeshFile(file, workerRef.current ?? undefined)
       setDimsFromGeometry(geom)
       viewerRef.current!.loadMeshFromGeometry(geom)
+      if (viewerRef.current) {
+        viewerRef.current.resetSectionPlanes()
+      }
+      setSectionEnabled({ x: false, y: false, z: false })
+      setSectionOffsets({ x: 0.5, y: 0.5, z: 0.5 })
     } catch (err: any) {
       alert(err?.message ?? 'Failed to load file')
     }
@@ -337,6 +354,52 @@ export default function App() {
             <option value="m">m</option>
             <option value="in">in</option>
           </select>
+        </div>
+
+        <div style={{ marginTop: 8 }}>
+          <strong>Section planes:</strong>{' '}
+          <label style={{ marginLeft: 8 }}>
+            Show planes{' '}
+            <input
+              type="checkbox"
+              checked={sectionPlanesVisible}
+              onChange={(e) => {
+                const visible = e.target.checked
+                setSectionPlanesVisible(visible)
+                viewerRef.current?.setSectionPlanesVisible(visible)
+              }}
+            />
+          </label>
+
+          {(['x', 'y', 'z'] as SectionAxis[]).map((axis) => (
+            <div key={axis} style={{ marginTop: 4 }}>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={sectionEnabled[axis]}
+                  onChange={(e) => {
+                    const enabled = e.target.checked
+                    setSectionEnabled((prev) => ({ ...prev, [axis]: enabled }))
+                    viewerRef.current?.setSectionEnabled(axis, enabled)
+                  }}
+                />{' '}
+                {axis.toUpperCase()} plane
+              </label>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={sectionOffsets[axis]}
+                onChange={(e) => {
+                  const t = Number(e.target.value)
+                  setSectionOffsets((prev) => ({ ...prev, [axis]: t }))
+                  viewerRef.current?.setSectionOffset(axis, t)
+                }}
+                style={{ marginLeft: 8, width: 120 }}
+              />
+            </div>
+          ))}
         </div>
 
         <div style={{ marginLeft: 16, opacity: 0.9 }}>
