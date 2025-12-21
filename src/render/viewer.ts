@@ -1,6 +1,8 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
+type SectionAxis = 'x' | 'y' | 'z'
+
 export type Viewer = {
   loadMeshFromGeometry: (geom: THREE.BufferGeometry) => void
   clear: () => void
@@ -17,6 +19,10 @@ export type Viewer = {
   setMeasurementGraphicsScale: (scale: number) => void
   getScreenshotDataURL: () => string
   getOutlineSnapshotDataURL: () => string
+  setSectionEnabled: (axis: SectionAxis, enabled: boolean) => void
+  setSectionOffset: (axis: SectionAxis, t: number) => void
+  setSectionPlanesVisible: (visible: boolean) => void
+  resetSectionPlanes: () => void
 }
 
 export function createViewer(container: HTMLElement): Viewer {
@@ -74,6 +80,33 @@ export function createViewer(container: HTMLElement): Viewer {
 
   const modelRoot = new THREE.Group()
   scene.add(modelRoot)
+  renderer.localClippingEnabled = true
+
+  const sectionPlanes: Record<SectionAxis, THREE.Plane> = {
+    x: new THREE.Plane(new THREE.Vector3(1, 0, 0), 0),
+    y: new THREE.Plane(new THREE.Vector3(0, 1, 0), 0),
+    z: new THREE.Plane(new THREE.Vector3(0, 0, 1), 0)
+  }
+
+  const sectionPlaneMeshes: Record<SectionAxis, THREE.Mesh | null> = {
+    x: null,
+    y: null,
+    z: null
+  }
+
+  const sectionEnabled: Record<SectionAxis, boolean> = {
+    x: false,
+    y: false,
+    z: false
+  }
+
+  let sectionPlanesVisible = true
+
+  const sectionBounds = {
+    min: new THREE.Vector3(-1, -1, -1),
+    max: new THREE.Vector3(1, 1, 1),
+    center: new THREE.Vector3(0, 0, 0)
+  }
 
   const raycaster = new THREE.Raycaster()
   const pointer = new THREE.Vector2()
@@ -148,6 +181,82 @@ export function createViewer(container: HTMLElement): Viewer {
     const box = new THREE.Box3()
     box.setFromObject(object)
     return box
+  }
+
+  function createOrUpdateSectionPlaneMeshes(size: THREE.Vector3, center: THREE.Vector3) {
+    const planeSizeX = Math.max(size.y, 1) * 1.4
+    const planeSizeY = Math.max(size.z, 1) * 1.4
+    const planeSizeZ = Math.max(size.x, 1) * 1.4
+
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0x999999,
+      transparent: true,
+      opacity: 0.15,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      depthTest: true
+    })
+
+    const ensurePlane = (
+      axis: SectionAxis,
+      width: number,
+      height: number,
+      rotation: (mesh: THREE.Mesh) => void
+    ) => {
+      let mesh = sectionPlaneMeshes[axis]
+      if (!mesh) {
+        const geom = new THREE.PlaneGeometry(width, height)
+        mesh = new THREE.Mesh(geom, mat.clone())
+        sectionPlaneMeshes[axis] = mesh
+        scene.add(mesh)
+      } else {
+        mesh.geometry.dispose()
+        mesh.geometry = new THREE.PlaneGeometry(width, height)
+      }
+      mesh.position.copy(center)
+      rotation(mesh)
+      mesh.visible = sectionEnabled[axis] && sectionPlanesVisible
+    }
+
+    ensurePlane('x', planeSizeY, planeSizeZ, (mesh) => {
+      mesh.rotation.set(0, 0, 0)
+      mesh.rotateY(Math.PI / 2)
+    })
+
+    ensurePlane('y', planeSizeX, planeSizeZ, (mesh) => {
+      mesh.rotation.set(0, 0, 0)
+      mesh.rotateX(-Math.PI / 2)
+    })
+
+    ensurePlane('z', planeSizeX, planeSizeY, (mesh) => {
+      mesh.rotation.set(0, 0, 0)
+    })
+  }
+
+  function updateClippingPlanes() {
+    const active: THREE.Plane[] = []
+    ;(['x', 'y', 'z'] as SectionAxis[]).forEach((axis) => {
+      if (sectionEnabled[axis]) {
+        active.push(sectionPlanes[axis])
+      }
+    })
+
+    renderer.clippingPlanes = active
+
+    modelRoot.traverse((obj: any) => {
+      if (!obj.isMesh || !obj.material) return
+      const mesh = obj as THREE.Mesh
+      if (Array.isArray(mesh.material)) {
+        mesh.material.forEach((m: any) => {
+          m.clippingPlanes = active
+          m.clipIntersection = true
+        })
+      } else {
+        const m: any = mesh.material
+        m.clippingPlanes = active
+        m.clipIntersection = true
+      }
+    })
   }
 
   function pickAtScreenPosition(ndcX: number, ndcY: number): THREE.Vector3 | null {
@@ -389,6 +498,60 @@ export function createViewer(container: HTMLElement): Viewer {
     return dataURL
   }
 
+  function setSectionEnabled(axis: SectionAxis, enabled: boolean) {
+    sectionEnabled[axis] = enabled
+    const mesh = sectionPlaneMeshes[axis]
+    if (mesh) {
+      mesh.visible = enabled && sectionPlanesVisible
+    }
+    updateClippingPlanes()
+  }
+
+  function setSectionOffset(axis: SectionAxis, t: number) {
+    const plane = sectionPlanes[axis]
+    const normal = plane.normal
+    const min = sectionBounds.min
+    const max = sectionBounds.max
+
+    const target = new THREE.Vector3().copy(sectionBounds.center)
+
+    if (axis === 'x') {
+      target.x = THREE.MathUtils.lerp(min.x, max.x, t)
+    } else if (axis === 'y') {
+      target.y = THREE.MathUtils.lerp(min.y, max.y, t)
+    } else {
+      target.z = THREE.MathUtils.lerp(min.z, max.z, t)
+    }
+
+    plane.constant = -normal.dot(target)
+
+    const mesh = sectionPlaneMeshes[axis]
+    if (mesh) {
+      mesh.position.copy(target)
+    }
+  }
+
+  function setSectionPlanesVisible(visible: boolean) {
+    sectionPlanesVisible = visible
+    ;(['x', 'y', 'z'] as SectionAxis[]).forEach((axis) => {
+      const mesh = sectionPlaneMeshes[axis]
+      if (mesh) {
+        mesh.visible = sectionEnabled[axis] && sectionPlanesVisible
+      }
+    })
+  }
+
+  function resetSectionPlanes() {
+    ;(['x', 'y', 'z'] as SectionAxis[]).forEach((axis) => {
+      sectionEnabled[axis] = false
+      const mesh = sectionPlaneMeshes[axis]
+      if (mesh) {
+        mesh.visible = false
+      }
+    })
+    updateClippingPlanes()
+  }
+
   function getOutlineSnapshotDataURL(): string {
     const prevGridVisible = gridHelper ? gridHelper.visible : false
     const prevAxesVisible = axesHelper ? axesHelper.visible : false
@@ -496,6 +659,25 @@ export function createViewer(container: HTMLElement): Viewer {
 
     // 5) Fit camera to final bounds
     const finalBox = new THREE.Box3().setFromObject(modelRoot)
+    const size = new THREE.Vector3()
+    finalBox.getSize(size)
+    const center = new THREE.Vector3()
+    finalBox.getCenter(center)
+
+    sectionBounds.min.copy(finalBox.min)
+    sectionBounds.max.copy(finalBox.max)
+    sectionBounds.center.copy(center)
+
+    ;(['x', 'y', 'z'] as SectionAxis[]).forEach((axis) => {
+      const plane = sectionPlanes[axis]
+      const normal = plane.normal
+      const pointOnPlane = center.clone()
+      const constant = -normal.dot(pointOnPlane)
+      plane.constant = constant
+    })
+
+    createOrUpdateSectionPlaneMeshes(size, center)
+    resetSectionPlanes()
     if (gridHelper) gridHelper.position.y = 0
     fitCameraToBox(finalBox, 1.3)
   }
@@ -562,6 +744,10 @@ export function createViewer(container: HTMLElement): Viewer {
     setMeasurementSegment,
     setMeasurementGraphicsScale,
     getScreenshotDataURL,
-    getOutlineSnapshotDataURL
+    getOutlineSnapshotDataURL,
+    setSectionEnabled,
+    setSectionOffset,
+    setSectionPlanesVisible,
+    resetSectionPlanes
   }
 }
