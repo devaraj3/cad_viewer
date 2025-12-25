@@ -63,32 +63,36 @@ export function createViewer(container: HTMLElement): Viewer {
   controls.enableDamping = true
   controls.dampingFactor = 0.1
 
-  const ambientLight = new THREE.AmbientLight(0xffffff, 0.7)
+  const ambientLight = new THREE.AmbientLight(0xffffff, 1.0)
   scene.add(ambientLight)
 
-  const keyLight = new THREE.DirectionalLight(0xffffff, 1.4)
-  keyLight.position.set(6, 10, 12)
+  const hemiLight = new THREE.HemisphereLight(0xffffff, 0xe0e0e0, 0.6)
+  hemiLight.position.set(0, 1, 0)
+  scene.add(hemiLight)
+
+  const keyLight = new THREE.DirectionalLight(0xffffff, 0.9)
+  keyLight.position.set(5, 8, 10)
   scene.add(keyLight)
 
-  const fillLight = new THREE.DirectionalLight(0xffffff, 0.9)
+  const fillLight = new THREE.DirectionalLight(0xffffff, 0.5)
   fillLight.position.set(-8, 4, -6)
   scene.add(fillLight)
 
   let gridHelper: THREE.GridHelper | null = null
   let axesHelper: THREE.AxesHelper | null = null
 
-  const gridSize = 2000    // big grid so it feels almost endless
-  const gridDivisions = 200
+  const gridSize = 5000      // very large so it feels almost infinite
+  const gridDivisions = 400  // more lines for finer grid
 
   gridHelper = new THREE.GridHelper(
     gridSize,
     gridDivisions,
     0xb0b0b0, // center lines
-    0xe0e0e0, // regular grid lines
+    0xd5d5d5, // regular grid lines
   )
   const gridMat = gridHelper.material as THREE.Material
   gridMat.transparent = true
-  gridMat.opacity = 0.65
+  gridMat.opacity = 0.8      // more visible on light background
   gridHelper.position.set(0, 0, 0)
 
   scene.add(gridHelper)
@@ -136,9 +140,9 @@ export function createViewer(container: HTMLElement): Viewer {
   const pointer = new THREE.Vector2()
 
   const baseMetalMaterial = new THREE.MeshStandardMaterial({
-    color: 0xf2f4f7,   // light steel / aluminum tone
-    metalness: 0.75,
-    roughness: 0.35,
+    color: 0xd0d5dd,   // light neutral gray (stainless-like)
+    metalness: 0.3,    // not fully metallic to avoid black sides
+    roughness: 0.35,   // slight gloss, not mirror
     flatShading: false,
   })
 
