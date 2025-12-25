@@ -100,6 +100,14 @@ export function createViewer(container: HTMLElement): Viewer {
     z: false
   }
 
+  const sectionCapGroups: Record<SectionAxis, THREE.Group | null> = {
+    x: null,
+    y: null,
+    z: null
+  }
+
+  const sectionCapColor = new THREE.Color(0x999999)
+
   let sectionPlanesVisible = true
 
   const sectionBounds = {
@@ -269,6 +277,138 @@ export function createViewer(container: HTMLElement): Viewer {
         m.clippingPlanes = active
         m.clipIntersection = true
       }
+    })
+  }
+
+  function createPlaneStencilGroupForMesh(
+    mesh: THREE.Mesh,
+    plane: THREE.Plane,
+    renderOrderBase: number
+  ): THREE.Group {
+    const group = new THREE.Group()
+    const baseMat = new THREE.MeshBasicMaterial()
+    baseMat.depthWrite = false
+    baseMat.colorWrite = false
+    baseMat.transparent = true
+    baseMat.stencilWrite = true
+    baseMat.stencilFunc = THREE.AlwaysStencilFunc
+
+    const matBack = baseMat.clone()
+    matBack.side = THREE.BackSide
+    matBack.clippingPlanes = [plane]
+    matBack.stencilFail = THREE.IncrementWrapStencilOp
+    matBack.stencilZFail = THREE.IncrementWrapStencilOp
+    matBack.stencilZPass = THREE.IncrementWrapStencilOp
+
+    const matFront = baseMat.clone()
+    matFront.side = THREE.FrontSide
+    matFront.clippingPlanes = [plane]
+    matFront.stencilFail = THREE.DecrementWrapStencilOp
+    matFront.stencilZFail = THREE.DecrementWrapStencilOp
+    matFront.stencilZPass = THREE.DecrementWrapStencilOp
+
+    const backMesh = new THREE.Mesh(mesh.geometry, matBack)
+    backMesh.renderOrder = renderOrderBase
+    group.add(backMesh)
+
+    const frontMesh = new THREE.Mesh(mesh.geometry, matFront)
+    frontMesh.renderOrder = renderOrderBase + 1
+    group.add(frontMesh)
+
+    return group
+  }
+
+  function buildSectionCapForAxis(axis: SectionAxis) {
+    const existing = sectionCapGroups[axis]
+    if (existing) {
+      scene.remove(existing)
+      existing.traverse((obj: any) => {
+        const asAny = obj as any
+        if (asAny.geometry) asAny.geometry.dispose()
+        if (asAny.material) {
+          if (Array.isArray(asAny.material)) {
+            asAny.material.forEach((m: any) => m.dispose())
+          } else {
+            asAny.material.dispose()
+          }
+        }
+      })
+      sectionCapGroups[axis] = null
+    }
+
+    const plane = sectionPlanes[axis]
+    const group = new THREE.Group()
+
+    let renderOrderBase = 1
+    modelRoot.traverse((obj: any) => {
+      if (!obj.isMesh || !obj.geometry) return
+      const mesh = obj as THREE.Mesh
+      const stencilGroup = createPlaneStencilGroupForMesh(mesh, plane, renderOrderBase)
+      group.add(stencilGroup)
+      renderOrderBase += 2
+    })
+
+    const size = new THREE.Vector3().subVectors(sectionBounds.max, sectionBounds.min)
+    const margin = 1.05
+
+    let width = size.x * margin
+    let height = size.y * margin
+
+    if (axis === 'x') {
+      width = Math.max(size.z, 1) * margin
+      height = Math.max(size.y, 1) * margin
+    } else if (axis === 'y') {
+      width = Math.max(size.x, 1) * margin
+      height = Math.max(size.z, 1) * margin
+    } else if (axis === 'z') {
+      width = Math.max(size.x, 1) * margin
+      height = Math.max(size.y, 1) * margin
+    }
+
+    const planeGeom = new THREE.PlaneGeometry(width, height)
+
+    const planeMat = new THREE.MeshStandardMaterial({
+      color: sectionCapColor,
+      metalness: 0.0,
+      roughness: 0.8,
+      side: THREE.DoubleSide,
+      stencilWrite: true,
+      stencilRef: 0,
+      stencilFunc: THREE.NotEqualStencilFunc,
+      stencilFail: THREE.ReplaceStencilOp,
+      stencilZFail: THREE.ReplaceStencilOp,
+      stencilPass: THREE.ReplaceStencilOp,
+      depthWrite: false
+    })
+
+    const capMesh = new THREE.Mesh(planeGeom, planeMat)
+    capMesh.renderOrder = renderOrderBase + 1
+
+    capMesh.onBeforeRender = function () {
+      plane.coplanarPoint(capMesh.position)
+      const n = plane.normal
+      capMesh.lookAt(
+        capMesh.position.x - n.x,
+        capMesh.position.y - n.y,
+        capMesh.position.z - n.z
+      )
+    }
+
+    group.add(capMesh)
+
+    sectionCapGroups[axis] = group
+    scene.add(group)
+    group.visible = false
+  }
+
+  function updateSectionCapVisibility() {
+    const activeAxes = (['x', 'y', 'z'] as SectionAxis[]).filter((axis) => sectionEnabled[axis])
+    const singleAxis = activeAxes.length === 1 ? activeAxes[0] : null
+
+    ;(['x', 'y', 'z'] as SectionAxis[]).forEach((axis) => {
+      const group = sectionCapGroups[axis]
+      if (!group) return
+      group.visible = singleAxis === axis
     })
   }
 
@@ -518,6 +658,12 @@ export function createViewer(container: HTMLElement): Viewer {
       mesh.visible = enabled && sectionPlanesVisible
     }
     updateClippingPlanes()
+    if (enabled) {
+      if (!sectionCapGroups[axis]) {
+        buildSectionCapForAxis(axis)
+      }
+    }
+    updateSectionCapVisibility()
   }
 
   function setSectionOffset(axis: SectionAxis, t: number) {
@@ -574,6 +720,7 @@ export function createViewer(container: HTMLElement): Viewer {
       }
     })
     updateClippingPlanes()
+    updateSectionCapVisibility()
   }
 
   function getOutlineSnapshotDataURL(): string {
@@ -702,6 +849,11 @@ export function createViewer(container: HTMLElement): Viewer {
 
     createOrUpdateSectionPlaneMeshes(size, center)
     resetSectionPlanes()
+    ;(['x', 'y', 'z'] as SectionAxis[]).forEach((axis) => {
+      if (sectionCapGroups[axis]) {
+        buildSectionCapForAxis(axis)
+      }
+    })
     if (gridHelper) gridHelper.position.y = 0
     fitCameraToBox(finalBox, 1.3)
   }
