@@ -196,6 +196,10 @@ export function createViewer(container: HTMLElement): Viewer {
     const widthXY  = Math.max(size.x, 1) * margin
     const heightXY = Math.max(size.y, 1) * margin
 
+    // Explicit X-plane dimensions (plane lies in YZ)
+    const xPlaneWidth  = Math.max(size.z, 1) * margin  // along Z
+    const xPlaneHeight = Math.max(size.y, 1) * margin  // along Y
+
     const mat = new THREE.MeshBasicMaterial({
       color: 0xcccccc,
       transparent: true,
@@ -227,7 +231,7 @@ export function createViewer(container: HTMLElement): Viewer {
     }
 
     // X plane: normal +X, visual plane lies in YZ
-    ensurePlane('x', widthYZ, heightYZ, (mesh) => {
+    ensurePlane('x', xPlaneWidth, xPlaneHeight, (mesh) => {
       mesh.rotation.set(0, 0, 0)
       mesh.rotateY(Math.PI / 2)
     })
