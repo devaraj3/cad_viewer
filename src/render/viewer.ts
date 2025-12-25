@@ -35,10 +35,12 @@ export function createViewer(container: HTMLElement): Viewer {
   renderer.setSize(container.clientWidth, container.clientHeight)
   ;(renderer as any).outputColorSpace = (THREE as any).SRGBColorSpace ?? undefined
   renderer.toneMapping = THREE.ACESFilmicToneMapping
-  renderer.setClearColor(0x111827)
+  const backgroundColor = new THREE.Color(0x11151c)
+  renderer.setClearColor(backgroundColor, 1)
   container.appendChild(renderer.domElement)
 
   const scene = new THREE.Scene()
+  scene.background = backgroundColor
 
   const aspect = container.clientWidth / Math.max(1, container.clientHeight)
   const persp = new THREE.PerspectiveCamera(50, aspect, 0.1, 10000)
@@ -61,22 +63,42 @@ export function createViewer(container: HTMLElement): Viewer {
   controls.enableDamping = true
   controls.dampingFactor = 0.1
 
-  const hemi = new THREE.HemisphereLight(0xffffff, 0x222244, 0.9)
-  scene.add(hemi)
-  const dir = new THREE.DirectionalLight(0xffffff, 1.0)
-  dir.position.set(300, 400, 300)
-  scene.add(dir)
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.35)
+  scene.add(ambientLight)
+
+  const keyLight = new THREE.DirectionalLight(0xffffff, 0.85)
+  keyLight.position.set(3, 5, 8)
+  scene.add(keyLight)
+
+  const fillLight = new THREE.DirectionalLight(0xffffff, 0.4)
+  fillLight.position.set(-4, 3, -3)
+  scene.add(fillLight)
 
   let gridHelper: THREE.GridHelper | null = null
   let axesHelper: THREE.AxesHelper | null = null
 
-  gridHelper = new THREE.GridHelper(1000, 50, 0x666666, 0x333333)
-  gridHelper.position.y = 0
+  const gridSize = 200
+  const gridDivisions = 100
+
+  gridHelper = new THREE.GridHelper(
+    gridSize,
+    gridDivisions,
+    0x444444,
+    0x222222,
+  )
+  ;(gridHelper.material as THREE.Material).transparent = true
+  ;(gridHelper.material as THREE.Material).opacity = 0.45
+  gridHelper.position.set(0, 0, 0)
+
   scene.add(gridHelper)
 
   axesHelper = new THREE.AxesHelper(200)
   axesHelper.position.set(0, 0, 0)
   scene.add(axesHelper)
+  if (axesHelper) {
+    ;(axesHelper.material as THREE.Material).transparent = true
+    ;(axesHelper.material as THREE.Material).opacity = 0.7
+  }
 
   const modelRoot = new THREE.Group()
   scene.add(modelRoot)
@@ -110,6 +132,28 @@ export function createViewer(container: HTMLElement): Viewer {
 
   const raycaster = new THREE.Raycaster()
   const pointer = new THREE.Vector2()
+
+  const baseMetalMaterial = new THREE.MeshStandardMaterial({
+    color: 0x9ea7b8,
+    metalness: 0.7,
+    roughness: 0.25,
+    flatShading: false,
+  })
+
+  function disposeObject(obj: THREE.Object3D) {
+    obj.traverse((child: any) => {
+      if (child.geometry) {
+        child.geometry.dispose()
+      }
+      if (child.material) {
+        if (Array.isArray(child.material)) {
+          child.material.forEach((m: any) => m.dispose())
+        } else {
+          child.material.dispose()
+        }
+      }
+    })
+  }
 
   const measureMaterial = new THREE.LineBasicMaterial({
     color: 0xffffff,
@@ -257,17 +301,18 @@ export function createViewer(container: HTMLElement): Viewer {
     })
 
     modelRoot.traverse((obj: any) => {
-      if (!obj.isMesh || !obj.material) return
-      const mesh = obj as THREE.Mesh
-      if (Array.isArray(mesh.material)) {
-        mesh.material.forEach((m: any) => {
-          m.clippingPlanes = active
-          m.clipIntersection = true
-        })
+      const anyObj = obj as any
+      if (!anyObj.material) return
+
+      const applyClipping = (material: any) => {
+        material.clippingPlanes = active
+        material.clipIntersection = true
+      }
+
+      if (Array.isArray(anyObj.material)) {
+        anyObj.material.forEach(applyClipping)
       } else {
-        const m: any = mesh.material
-        m.clippingPlanes = active
-        m.clipIntersection = true
+        applyClipping(anyObj.material)
       }
     })
   }
@@ -663,13 +708,27 @@ export function createViewer(container: HTMLElement): Viewer {
     geom.translate(-gcenter.x, -gcenter.y, -gcenter.z)
 
     // 3) Create mesh and add to scene
-    const material = new THREE.MeshStandardMaterial({
-      color: 0xb8c2ff,
-      metalness: 0.1,
-      roughness: 0.8
+    modelRoot.children.forEach((child) => {
+      disposeObject(child)
     })
-    const mesh = new THREE.Mesh(geom, material)
     modelRoot.clear()
+
+    const material = baseMetalMaterial.clone()
+    const mesh = new THREE.Mesh(geom, material)
+
+    const edgeThreshold = 40
+    const edgesGeom = new THREE.EdgesGeometry(geom, edgeThreshold)
+    const edgesMat = new THREE.LineBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.4,
+      depthWrite: false,
+      depthTest: true,
+    })
+    const edges = new THREE.LineSegments(edgesGeom, edgesMat)
+    edges.name = 'edgeOverlay'
+    mesh.add(edges)
+
     modelRoot.add(mesh)
 
     // 4) Ground the model: lift so bottom sits on y = 0
@@ -707,6 +766,9 @@ export function createViewer(container: HTMLElement): Viewer {
   }
 
   function clear() {
+    modelRoot.children.forEach((child) => {
+      disposeObject(child)
+    })
     modelRoot.clear()
     modelRoot.position.set(0, 0, 0)
   }
