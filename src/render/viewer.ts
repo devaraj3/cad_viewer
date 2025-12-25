@@ -189,12 +189,12 @@ export function createViewer(container: HTMLElement): Viewer {
     const planeSizeZ = Math.max(size.x, 1) * 1.4
 
     const mat = new THREE.MeshBasicMaterial({
-      color: 0x999999,
+      color: 0xcccccc,
       transparent: true,
-      opacity: 0.15,
+      opacity: 0.35,
       side: THREE.DoubleSide,
       depthWrite: false,
-      depthTest: true
+      depthTest: false
     })
 
     const ensurePlane = (
@@ -240,8 +240,6 @@ export function createViewer(container: HTMLElement): Viewer {
         active.push(sectionPlanes[axis])
       }
     })
-
-    renderer.clippingPlanes = active
 
     modelRoot.traverse((obj: any) => {
       if (!obj.isMesh || !obj.material) return
