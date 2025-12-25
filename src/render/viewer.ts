@@ -184,9 +184,17 @@ export function createViewer(container: HTMLElement): Viewer {
   }
 
   function createOrUpdateSectionPlaneMeshes(size: THREE.Vector3, center: THREE.Vector3) {
-    const planeSizeX = Math.max(size.y, 1) * 1.4
-    const planeSizeY = Math.max(size.z, 1) * 1.4
-    const planeSizeZ = Math.max(size.x, 1) * 1.4
+    // size.x, size.y, size.z are the model extents along X/Y/Z
+    const margin = 1.05 // 5% margin around the part
+
+    const widthYZ  = Math.max(size.y, 1) * margin
+    const heightYZ = Math.max(size.z, 1) * margin
+
+    const widthXZ  = Math.max(size.x, 1) * margin
+    const heightXZ = Math.max(size.z, 1) * margin
+
+    const widthXY  = Math.max(size.x, 1) * margin
+    const heightXY = Math.max(size.y, 1) * margin
 
     const mat = new THREE.MeshBasicMaterial({
       color: 0xcccccc,
@@ -218,17 +226,20 @@ export function createViewer(container: HTMLElement): Viewer {
       mesh.visible = sectionEnabled[axis] && sectionPlanesVisible
     }
 
-    ensurePlane('x', planeSizeY, planeSizeZ, (mesh) => {
+    // X plane: normal +X, visual plane lies in YZ
+    ensurePlane('x', widthYZ, heightYZ, (mesh) => {
       mesh.rotation.set(0, 0, 0)
       mesh.rotateY(Math.PI / 2)
     })
 
-    ensurePlane('y', planeSizeX, planeSizeZ, (mesh) => {
+    // Y plane: normal +Y, visual plane lies in XZ
+    ensurePlane('y', widthXZ, heightXZ, (mesh) => {
       mesh.rotation.set(0, 0, 0)
       mesh.rotateX(-Math.PI / 2)
     })
 
-    ensurePlane('z', planeSizeX, planeSizeY, (mesh) => {
+    // Z plane: normal +Z, visual plane lies in XY
+    ensurePlane('z', widthXY, heightXY, (mesh) => {
       mesh.rotation.set(0, 0, 0)
     })
   }
@@ -521,11 +532,22 @@ export function createViewer(container: HTMLElement): Viewer {
       target.z = THREE.MathUtils.lerp(min.z, max.z, t)
     }
 
+    // Update the clipping plane itself
     plane.constant = -normal.dot(target)
 
     const mesh = sectionPlaneMeshes[axis]
     if (mesh) {
-      mesh.position.copy(target)
+      // Compute a small visual offset based on model size along that axis
+      const size = new THREE.Vector3().subVectors(sectionBounds.max, sectionBounds.min)
+      let axisSize = size.x
+      if (axis === 'y') axisSize = size.y
+      if (axis === 'z') axisSize = size.z
+
+      const visualOffset = Math.max(axisSize * 0.02, 1)
+
+      // Place the mesh slightly off the plane, away from the model
+      const meshPos = target.clone().add(normal.clone().multiplyScalar(visualOffset))
+      mesh.position.copy(meshPos)
     }
   }
 
