@@ -35,7 +35,9 @@ export function createViewer(container: HTMLElement): Viewer {
   renderer.setSize(container.clientWidth, container.clientHeight)
   ;(renderer as any).outputColorSpace = (THREE as any).SRGBColorSpace ?? undefined
   renderer.toneMapping = THREE.ACESFilmicToneMapping
-  const backgroundColor = new THREE.Color(0x11151c)
+  renderer.outputEncoding = THREE.sRGBEncoding
+  renderer.physicallyCorrectLights = true
+  const backgroundColor = new THREE.Color(0xf5f7fa)
   renderer.setClearColor(backgroundColor, 1)
   container.appendChild(renderer.domElement)
 
@@ -63,15 +65,15 @@ export function createViewer(container: HTMLElement): Viewer {
   controls.enableDamping = true
   controls.dampingFactor = 0.1
 
-  const ambientLight = new THREE.AmbientLight(0xffffff, 0.35)
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.5)
   scene.add(ambientLight)
 
-  const keyLight = new THREE.DirectionalLight(0xffffff, 0.85)
-  keyLight.position.set(3, 5, 8)
+  const keyLight = new THREE.DirectionalLight(0xffffff, 1.1)
+  keyLight.position.set(4, 6, 10)
   scene.add(keyLight)
 
-  const fillLight = new THREE.DirectionalLight(0xffffff, 0.4)
-  fillLight.position.set(-4, 3, -3)
+  const fillLight = new THREE.DirectionalLight(0xffffff, 0.7)
+  fillLight.position.set(-6, 4, -4)
   scene.add(fillLight)
 
   let gridHelper: THREE.GridHelper | null = null
@@ -83,11 +85,12 @@ export function createViewer(container: HTMLElement): Viewer {
   gridHelper = new THREE.GridHelper(
     gridSize,
     gridDivisions,
-    0x444444,
-    0x222222,
+    0xcccccc, // center line color
+    0xe0e0e0, // grid line color
   )
-  ;(gridHelper.material as THREE.Material).transparent = true
-  ;(gridHelper.material as THREE.Material).opacity = 0.45
+  const gridMat = gridHelper.material as THREE.Material
+  gridMat.transparent = true
+  gridMat.opacity = 0.6
   gridHelper.position.set(0, 0, 0)
 
   scene.add(gridHelper)
@@ -95,9 +98,10 @@ export function createViewer(container: HTMLElement): Viewer {
   axesHelper = new THREE.AxesHelper(200)
   axesHelper.position.set(0, 0, 0)
   scene.add(axesHelper)
-  if (axesHelper) {
-    ;(axesHelper.material as THREE.Material).transparent = true
-    ;(axesHelper.material as THREE.Material).opacity = 0.7
+  if (axesHelper && (axesHelper.material as any)) {
+    const axesMat = axesHelper.material as any
+    axesMat.transparent = true
+    axesMat.opacity = 0.8
   }
 
   const modelRoot = new THREE.Group()
@@ -134,9 +138,9 @@ export function createViewer(container: HTMLElement): Viewer {
   const pointer = new THREE.Vector2()
 
   const baseMetalMaterial = new THREE.MeshStandardMaterial({
-    color: 0x9ea7b8,
-    metalness: 0.7,
-    roughness: 0.25,
+    color: 0xe3e6ea,    // light stainless steel tone
+    metalness: 0.9,
+    roughness: 0.18,
     flatShading: false,
   })
 
@@ -719,9 +723,9 @@ export function createViewer(container: HTMLElement): Viewer {
     const edgeThreshold = 40
     const edgesGeom = new THREE.EdgesGeometry(geom, edgeThreshold)
     const edgesMat = new THREE.LineBasicMaterial({
-      color: 0xffffff,
+      color: 0x777777,    // medium gray edges
       transparent: true,
-      opacity: 0.4,
+      opacity: 0.7,
       depthWrite: false,
       depthTest: true,
     })
