@@ -63,10 +63,10 @@ export function createViewer(container: HTMLElement): Viewer {
   controls.enableDamping = true
   controls.dampingFactor = 0.1
 
-  const ambientLight = new THREE.AmbientLight(0xffffff, 1.0)
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.45)
   scene.add(ambientLight)
 
-  const hemiLight = new THREE.HemisphereLight(0xffffff, 0xe0e0e0, 0.6)
+  const hemiLight = new THREE.HemisphereLight(0xffffff, 0xe0e0e0, 0.3)
   hemiLight.position.set(0, 1, 0)
   scene.add(hemiLight)
 
@@ -74,7 +74,7 @@ export function createViewer(container: HTMLElement): Viewer {
   keyLight.position.set(5, 8, 10)
   scene.add(keyLight)
 
-  const fillLight = new THREE.DirectionalLight(0xffffff, 0.5)
+  const fillLight = new THREE.DirectionalLight(0xffffff, 0.4)
   fillLight.position.set(-8, 4, -6)
   scene.add(fillLight)
 
@@ -140,9 +140,9 @@ export function createViewer(container: HTMLElement): Viewer {
   const pointer = new THREE.Vector2()
 
   const baseMetalMaterial = new THREE.MeshStandardMaterial({
-    color: 0xd0d5dd,   // light neutral gray (stainless-like)
-    metalness: 0.3,    // not fully metallic to avoid black sides
-    roughness: 0.35,   // slight gloss, not mirror
+    color: 0xc5cad3,   // light/mid grey, clearly darker than background
+    metalness: 0.0,    // treat as diffuse solid, not full metal (no environment map)
+    roughness: 0.6,    // soft shading, not glossy
     flatShading: false,
   })
 
