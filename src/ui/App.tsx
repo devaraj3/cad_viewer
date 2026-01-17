@@ -2,17 +2,24 @@ import React, { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { loadMeshFile } from '../loaders/meshLoader'
 import { createViewer } from '../render/viewer'
+import './App.css'
 
 type Units = 'mm' | 'cm' | 'm' | 'in'
 function convert(valMM: number, to: Units) {
   switch (to) {
-    case 'mm': return valMM
-    case 'cm': return valMM / 10
-    case 'm':  return valMM / 1000
-    case 'in': return valMM / 25.4
+    case 'mm':
+      return valMM
+    case 'cm':
+      return valMM / 10
+    case 'm':
+      return valMM / 1000
+    case 'in':
+      return valMM / 25.4
   }
 }
-function fmt(n: number) { return Number.isFinite(n) ? n.toFixed(2) : '-' }
+function fmt(n: number) {
+  return Number.isFinite(n) ? n.toFixed(2) : '-'
+}
 
 type MeasureType = 'free' | 'x' | 'y' | 'z' | 'diameter' | 'radius'
 type SectionAxis = 'x' | 'y' | 'z'
@@ -21,7 +28,9 @@ export default function App() {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const cubeCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const viewerRef = useRef<ReturnType<typeof createViewer> | null>(null)
-  const [dimsMM, setDimsMM] = useState<{ x: number, y: number, z: number } | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const [currentFileName, setCurrentFileName] = useState<string | null>(null)
+  const [dimsMM, setDimsMM] = useState<{ x: number; y: number; z: number } | null>(null)
   const [units, setUnits] = useState<Units>('mm')
   const [measureMode, setMeasureMode] = useState(false)
   const [measureType, setMeasureType] = useState<MeasureType>('free')
@@ -31,14 +40,18 @@ export default function App() {
   const [sectionEnabled, setSectionEnabled] = useState<Record<SectionAxis, boolean>>({
     x: false,
     y: false,
-    z: false
+    z: false,
   })
   const [sectionOffsets, setSectionOffsets] = useState<Record<SectionAxis, number>>({
     x: 0.5,
     y: 0.5,
-    z: 0.5
+    z: 0.5,
   })
   const [sectionPlanesVisible, setSectionPlanesVisible] = useState(true)
+  const [showSectionPopover, setShowSectionPopover] = useState(false)
+
+  const acceptedFormats =
+    '.stl,.STL,.step,.stp,.iges,.igs,.brep,.BREP,.obj,.OBJ,.3mf,.3MF,.gltf,.GLTF,.glb,.GLB'
 
   // OCC worker (for STEP/IGES/BREP)
   const workerRef = useRef<Worker | null>(null)
@@ -83,6 +96,7 @@ export default function App() {
       if (viewerRef.current) {
         viewerRef.current.resetSectionPlanes()
       }
+      setCurrentFileName(file.name)
       setSectionEnabled({ x: false, y: false, z: false })
       setSectionOffsets({ x: 0.5, y: 0.5, z: 0.5 })
     } catch (err: any) {
@@ -186,7 +200,6 @@ export default function App() {
       viewerRef.current.setMeasurementSegment(segP1, segP2, label)
       return
     }
-
   }
 
   useEffect(() => {
@@ -254,189 +267,298 @@ export default function App() {
     viewerRef.current.setMeasurementSegment(segP1, segP2, label)
   }, [units, measureType, measurePoints, measureMM, viewerRef])
 
+  const handleSnapshot = () => {
+    if (!viewerRef.current) return
+    const dataURL = viewerRef.current.getScreenshotDataURL()
+    const link = document.createElement('a')
+    link.href = dataURL
+    link.download = 'cad_viewer_snapshot.png'
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  }
+
+  const handleOutlineSnapshot = () => {
+    if (!viewerRef.current) return
+    const dataURL = viewerRef.current.getOutlineSnapshotDataURL()
+    const link = document.createElement('a')
+    link.href = dataURL
+    link.download = 'cad_viewer_outline.png'
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  }
+
+  const handleMeasureClick = () => {
+    const next = !measureMode
+    setMeasureMode(next)
+    if (!next && viewerRef.current) {
+      setMeasurePoints([])
+      setMeasureMM(null)
+      viewerRef.current.setMeasurementSegment(null, null, null)
+    }
+  }
+
+  const handleDimScaleChange = (value: number) => {
+    if (!viewerRef.current) {
+      setDimScale(value)
+      return
+    }
+    const clamped = Math.min(Math.max(value || 0.1, 0.1), 4)
+    setDimScale(clamped)
+    viewerRef.current.setMeasurementGraphicsScale(clamped)
+  }
+
+  const toggleShowSectionPlanes = (visible: boolean) => {
+    setSectionPlanesVisible(visible)
+    viewerRef.current?.setSectionPlanesVisible(visible)
+  }
+
+  const toggleSectionPlane = (axis: SectionAxis, enabled: boolean) => {
+    setSectionEnabled((prev) => ({ ...prev, [axis]: enabled }))
+    viewerRef.current?.setSectionEnabled(axis, enabled)
+  }
+
+  const setSectionPlaneOffset = (axis: SectionAxis, t: number) => {
+    setSectionOffsets((prev) => ({ ...prev, [axis]: t }))
+    viewerRef.current?.setSectionOffset(axis, t)
+  }
+
+  const resetSectionPlanes = () => {
+    viewerRef.current?.resetSectionPlanes()
+    setSectionEnabled({ x: false, y: false, z: false })
+    setSectionOffsets({ x: 0.5, y: 0.5, z: 0.5 })
+  }
+
+  const dimsText = dimsMM
+    ? `L ${fmt(convert(dimsMM.x, units))} ${units} · W ${fmt(convert(dimsMM.z, units))} ${units} · H ${fmt(
+        convert(dimsMM.y, units),
+      )} ${units}`
+    : '—'
+
+  const measureText = measureMM != null ? `${fmt(convert(measureMM, units))} ${units}` : '—'
+
   return (
-    <div style={{ height: '100%', width: '100%', display: 'flex', flexDirection: 'column' }}>
-      <div style={{ padding: '8px', background: '#0b1220', borderBottom: '1px solid #1f2937', display: 'flex', alignItems: 'center', gap: 8 }}>
-        <input
-          type="file"
-          accept=".stl,.STL,.step,.stp,.iges,.igs,.brep,.BREP,.obj,.OBJ,.3mf,.3MF,.gltf,.GLTF,.glb,.GLB"
-          onChange={onFile}
-        />
-        <button
-          onClick={() => {
-            if (!viewerRef.current) return
-            const dataURL = viewerRef.current.getScreenshotDataURL()
-            const link = document.createElement('a')
-            link.href = dataURL
-            link.download = 'cad_viewer_snapshot.png'
-            document.body.appendChild(link)
-            link.click()
-            document.body.removeChild(link)
-          }}
-        >
-          Snapshot
-        </button>
-
-        <button
-          onClick={() => {
-            if (!viewerRef.current) return
-            const dataURL = viewerRef.current.getOutlineSnapshotDataURL()
-            const link = document.createElement('a')
-            link.href = dataURL
-            link.download = 'cad_viewer_outline.png'
-            document.body.appendChild(link)
-            link.click()
-            document.body.removeChild(link)
-          }}
-        >
-          Outline Snapshot
-        </button>
-
-        <button
-          onClick={() => {
-            const next = !measureMode
-            setMeasureMode(next)
-            if (!next && viewerRef.current) {
-              // Turning measurement OFF: clear line and values
-              setMeasurePoints([])
-              setMeasureMM(null)
-              viewerRef.current.setMeasurementSegment(null, null, null)
-            }
-          }}
-          style={{ background: measureMode ? '#ddd' : undefined }}
-        >
-          Measure
-        </button>
-
-        <label style={{ marginLeft: 8 }}>
-          Measure type:{' '}
-          <select
-            value={measureType}
-            onChange={(e) => setMeasureType(e.target.value as MeasureType)}
-          >
-            <option value="free">Free</option>
-            <option value="x">X</option>
-            <option value="y">Y</option>
-            <option value="z">Z</option>
-            <option value="diameter">Diameter</option>
-            <option value="radius">Radius</option>
-          </select>
-        </label>
-
-        <label style={{ marginLeft: 8 }}>
-          Dim scale:{' '}
-          <input
-            type="number"
-            step="0.1"
-            min="0.1"
-            max="4"
-            value={dimScale}
-            onChange={(e) => {
-              const value = Number(e.target.value)
-              if (!viewerRef.current) {
-                setDimScale(value)
-                return
-              }
-              const clamped = Math.min(Math.max(value || 0.1, 0.1), 4)
-              setDimScale(clamped)
-              viewerRef.current.setMeasurementGraphicsScale(clamped)
-            }}
-            style={{ width: 60 }}
-          />
-        </label>
-
-        <div style={{ marginLeft: 16 }}>
-          <label style={{ marginRight: 6, opacity: 0.8 }}>Units</label>
-          <select value={units} onChange={(e) => setUnits(e.target.value as Units)}>
-            <option value="mm">mm</option>
-            <option value="cm">cm</option>
-            <option value="m">m</option>
-            <option value="in">in</option>
-          </select>
-        </div>
-
-        <div style={{ marginTop: 8 }}>
-          <strong>Section planes:</strong>{' '}
-          <label style={{ marginLeft: 8 }}>
-            Show planes{' '}
+    <div className="app-root">
+      <div className="app-toolbar">
+        <div className="app-toolbar-left">
+          <div className="toolbar-group">
+            <button
+              className="toolbar-button primary"
+              onClick={() => fileInputRef.current?.click()}
+              title="Open CAD file"
+            >
+              <span className="toolbar-icon">📂</span>
+              <span>Open</span>
+            </button>
             <input
-              type="checkbox"
-              checked={sectionPlanesVisible}
-              onChange={(e) => {
-                const visible = e.target.checked
-                setSectionPlanesVisible(visible)
-                viewerRef.current?.setSectionPlanesVisible(visible)
-              }}
+              ref={fileInputRef}
+              type="file"
+              accept={acceptedFormats}
+              style={{ display: 'none' }}
+              onChange={onFile}
             />
-          </label>
+            {currentFileName && (
+              <span className="toolbar-label" title={currentFileName}>
+                {currentFileName}
+              </span>
+            )}
+          </div>
 
-          {(['x', 'y', 'z'] as SectionAxis[]).map((axis) => (
-            <div key={axis} style={{ marginTop: 4 }}>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={sectionEnabled[axis]}
-                  onChange={(e) => {
-                    const enabled = e.target.checked
-                    setSectionEnabled((prev) => ({ ...prev, [axis]: enabled }))
-                    viewerRef.current?.setSectionEnabled(axis, enabled)
-                  }}
-                />{' '}
-                {axis.toUpperCase()} plane
-              </label>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                value={sectionOffsets[axis]}
-                onChange={(e) => {
-                  const t = Number(e.target.value)
-                  setSectionOffsets((prev) => ({ ...prev, [axis]: t }))
-                  viewerRef.current?.setSectionOffset(axis, t)
-                }}
-                style={{ marginLeft: 8, width: 120 }}
-              />
-            </div>
-          ))}
+          <div className="toolbar-group">
+            <button
+              className="toolbar-button"
+              onClick={handleSnapshot}
+              title="Save shaded snapshot"
+            >
+              <span className="toolbar-icon">📸</span>
+            </button>
+            <button
+              className="toolbar-button"
+              onClick={handleOutlineSnapshot}
+              title="Save outline snapshot"
+            >
+              <span className="toolbar-icon">🖼️</span>
+            </button>
+            <button
+              className="toolbar-button"
+              onClick={handleMeasureClick}
+              title="Start / finish measurement"
+            >
+              <span className="toolbar-icon">📏</span>
+              <span>Measure</span>
+            </button>
+            <select
+              className="toolbar-select"
+              value={measureType}
+              onChange={(e) => setMeasureType(e.target.value as MeasureType)}
+              title="Measurement mode"
+            >
+              <option value="free">Free</option>
+              <option value="x">X</option>
+              <option value="y">Y</option>
+              <option value="z">Z</option>
+              <option value="diameter">Diameter</option>
+              <option value="radius">Radius</option>
+            </select>
+          </div>
         </div>
 
-        <div style={{ marginLeft: 16, opacity: 0.9 }}>
-          {dimsMM ? (
-            <>
-              <strong>Dimensions:</strong>{' '}
-              L {fmt(convert(dimsMM.x, units))} {units} ·
-              W {fmt(convert(dimsMM.z, units))} {units} ·
-              H {fmt(convert(dimsMM.y, units))} {units}
-            </>
-          ) : (
-            <span>Dimensions: —</span>
-          )}
-          <div style={{ marginTop: 4 }}>
-            <strong>Measure:</strong>{' '}
-            {measureMM != null ? `${fmt(convert(measureMM, units))} ${units}` : '—'}
+        <div className="app-toolbar-right">
+          <div className="toolbar-group">
+            <span className="toolbar-label">Dim scale</span>
+            <input
+              className="toolbar-input"
+              type="number"
+              step={0.1}
+              min={0.1}
+              max={4}
+              value={dimScale}
+              onChange={(e) => handleDimScaleChange(Number(e.target.value))}
+              title="Dimension graphics scale"
+            />
+            <span className="toolbar-label">Units</span>
+            <select
+              className="toolbar-select"
+              value={units}
+              onChange={(e) => setUnits(e.target.value as Units)}
+              title="Measurement units"
+            >
+              <option value="mm">mm</option>
+              <option value="cm">cm</option>
+              <option value="m">m</option>
+              <option value="in">in</option>
+            </select>
+          </div>
+
+          <div className="toolbar-group section-toggle-button">
+            <button
+              className="toolbar-button"
+              onClick={() => setShowSectionPopover((v) => !v)}
+              title="Section planes"
+            >
+              <span className="toolbar-icon">✂️</span>
+              <span>Section</span>
+            </button>
+            <label className="toolbar-label">
+              <input
+                type="checkbox"
+                checked={sectionPlanesVisible}
+                onChange={(e) => toggleShowSectionPlanes(e.target.checked)}
+              />
+              Show planes
+            </label>
+
+            {showSectionPopover && (
+              <div className="section-popover">
+                <div className="section-popover-header">
+                  <span>Section planes</span>
+                  <button
+                    className="toolbar-button"
+                    style={{ padding: '2px 6px', fontSize: 10 }}
+                    onClick={resetSectionPlanes}
+                  >
+                    Reset
+                  </button>
+                </div>
+
+                <div className="section-popover-row">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={sectionEnabled.x}
+                      onChange={(e) => toggleSectionPlane('x', e.target.checked)}
+                    />
+                    X plane
+                  </label>
+                  <input
+                    className="section-slider"
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={sectionOffsets.x}
+                    onChange={(e) => setSectionPlaneOffset('x', Number(e.target.value))}
+                  />
+                </div>
+
+                <div className="section-popover-row">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={sectionEnabled.y}
+                      onChange={(e) => toggleSectionPlane('y', e.target.checked)}
+                    />
+                    Y plane
+                  </label>
+                  <input
+                    className="section-slider"
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={sectionOffsets.y}
+                    onChange={(e) => setSectionPlaneOffset('y', Number(e.target.value))}
+                  />
+                </div>
+
+                <div className="section-popover-row">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={sectionEnabled.z}
+                      onChange={(e) => toggleSectionPlane('z', e.target.checked)}
+                    />
+                    Z plane
+                  </label>
+                  <input
+                    className="section-slider"
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={sectionOffsets.z}
+                    onChange={(e) => setSectionPlaneOffset('z', Number(e.target.value))}
+                  />
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>
-      <div
-        id="viewport"
-        ref={containerRef}
-        onClick={handleViewportClick}
-        style={{ position: 'relative', flex: 1, minHeight: 0 }}
-      >
-        <canvas
-          ref={cubeCanvasRef}
-          onMouseDown={(event) => event.stopPropagation()}
-          onClick={(event) => event.stopPropagation()}
-          style={{
-            position: 'absolute',
-            top: 12,
-            right: 12,
-            width: 80,
-            height: 80,
-            pointerEvents: 'auto',
-          }}
-        />
+
+      <div className="app-main">
+        <div
+          id="viewport"
+          ref={containerRef}
+          onClick={handleViewportClick}
+          className="viewer-container"
+        >
+          <canvas
+            ref={cubeCanvasRef}
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              position: 'absolute',
+              top: 12,
+              right: 12,
+              width: 80,
+              height: 80,
+              pointerEvents: 'auto',
+            }}
+          />
+        </div>
+
+        <div className="info-panel">
+          <div>
+            <div className="info-heading">Dimensions</div>
+            <div className="info-value">{dimsText}</div>
+          </div>
+          <div>
+            <div className="info-heading">Measure</div>
+            <div className="info-value">{measureText}</div>
+          </div>
+        </div>
       </div>
     </div>
   )
