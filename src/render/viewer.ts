@@ -361,14 +361,17 @@ export function createViewer(container: HTMLElement): Viewer {
     p2: THREE.Vector3
   }
 
-  function detectHoleAtIntersection(
-    hit: THREE.Intersection
-  ): HoleDetectionResult | null {
+  /**
+   * Try to detect a cylindrical hole at the given intersection.
+   * Assumes hole axis is roughly aligned with global X/Y/Z.
+   */
+  function detectHoleAtIntersection(hit: THREE.Intersection): HoleDetectionResult | null {
     const mesh = hit.object as THREE.Mesh
     const geom = mesh.geometry as THREE.BufferGeometry
     const posAttr = geom.getAttribute('position') as THREE.BufferAttribute
     if (!posAttr || posAttr.count === 0) return null
 
+    // Build world-space vertex positions for THIS mesh
     const worldPositions: THREE.Vector3[] = new Array(posAttr.count)
     const v = new THREE.Vector3()
     for (let i = 0; i < posAttr.count; i++) {
@@ -379,12 +382,14 @@ export function createViewer(container: HTMLElement): Viewer {
 
     const hitPoint = hit.point.clone()
 
+    // Use model size for tolerances
     const bbox = new THREE.Box3().setFromObject(modelRoot)
     const bboxSize = new THREE.Vector3()
     bbox.getSize(bboxSize)
     const diag = bboxSize.length() || 1
-    const sliceThickness = diag * 0.002
-    const minPoints = 16
+
+    const sliceThickness = diag * 0.01   // thicker slice than before (1%)
+    const minPoints = 8                  // fewer points required
 
     type Candidate = {
       axisIndex: 0 | 1 | 2
@@ -396,13 +401,12 @@ export function createViewer(container: HTMLElement): Viewer {
 
     const candidates: Candidate[] = []
 
-    const axisConfigs: {
-      axisIndex: 0 | 1 | 2
-      coordA: 0 | 1 | 2
-      coordB: 0 | 1 | 2
-    }[] = [
+    const axisConfigs: { axisIndex: 0 | 1 | 2; coordA: 0 | 1 | 2; coordB: 0 | 1 | 2 }[] = [
+      // axis X → plane (y,z)
       { axisIndex: 0, coordA: 1, coordB: 2 },
+      // axis Y → plane (x,z)
       { axisIndex: 1, coordA: 0, coordB: 2 },
+      // axis Z → plane (x,y)
       { axisIndex: 2, coordA: 0, coordB: 1 },
     ]
 
@@ -430,6 +434,7 @@ export function createViewer(container: HTMLElement): Viewer {
         const dy = p.y - cy
         radiusSum += Math.sqrt(dx * dx + dy * dy)
       }
+
       const radius = radiusSum / n
       if (radius <= 0) return null
 
@@ -440,15 +445,14 @@ export function createViewer(container: HTMLElement): Viewer {
         const r = Math.sqrt(dx * dx + dy * dy)
         errSum += Math.abs(r - radius)
       }
-      const error = errSum / n
 
+      const error = errSum / n
       return { cx, cy, radius, error }
     }
 
     for (const cfg of axisConfigs) {
       const { axisIndex, coordA, coordB } = cfg
       const targetCoord = hitPoint.getComponent(axisIndex)
-
       const planePoints: { x: number; y: number }[] = []
 
       for (let i = 0; i < worldPositions.length; i++) {
@@ -469,7 +473,9 @@ export function createViewer(container: HTMLElement): Viewer {
 
       const { cx, cy, radius, error } = fit
       const normErr = error / (radius || 1)
-      if (normErr > 0.08) continue
+
+      // permissive threshold so it actually finds holes
+      if (normErr > 0.25) continue
 
       candidates.push({ axisIndex, cx, cy, radius, error: normErr })
     }
@@ -481,10 +487,13 @@ export function createViewer(container: HTMLElement): Viewer {
 
     const centerWorld = new THREE.Vector3()
     if (best.axisIndex === 0) {
+      // axis X: (x = hit.x, y = cx, z = cy)
       centerWorld.set(hitPoint.x, best.cx, best.cy)
     } else if (best.axisIndex === 1) {
+      // axis Y: (x = cx, y = hit.y, z = cy)
       centerWorld.set(best.cx, hitPoint.y, best.cy)
     } else {
+      // axis Z: (x = cx, y = cy, z = hit.z)
       centerWorld.set(best.cx, best.cy, hitPoint.z)
     }
 
@@ -493,12 +502,15 @@ export function createViewer(container: HTMLElement): Viewer {
     const p1 = centerWorld.clone()
     const p2 = centerWorld.clone()
     if (best.axisIndex === 2) {
+      // axis Z → draw along X
       p1.x += radius
       p2.x -= radius
     } else if (best.axisIndex === 0) {
+      // axis X → draw along Y
       p1.y += radius
       p2.y -= radius
     } else {
+      // axis Y → draw along X
       p1.x += radius
       p2.x -= radius
     }
@@ -533,7 +545,7 @@ export function createViewer(container: HTMLElement): Viewer {
 
     const { p1, p2, radius } = result
 
-    setMeasurementSegment(p1, p2, null)
+    setMeasurementSegment(p1, p2)
 
     const diameter = 2 * radius
     return diameter

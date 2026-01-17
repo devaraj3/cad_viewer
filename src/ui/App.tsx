@@ -114,17 +114,15 @@ export default function App() {
 
     if (measureType === 'hole-auto') {
       const viewer = viewerRef.current
-      const diameterModel = viewer.autoMeasureHoleAtScreenPosition
-        ? viewer.autoMeasureHoleAtScreenPosition(x, y)
-        : null
+      const fn = viewer.autoMeasureHoleAtScreenPosition
+      const diameterModel = fn ? fn(x, y) : null
 
       if (diameterModel && diameterModel > 0) {
         const value = convert(diameterModel, units)
         const formatted = fmt(value)
         setHoleMeasureText(`Hole Ø ${formatted} ${units}`)
       } else {
-        setHoleMeasureText('Hole: —')
-        viewer.setMeasurementSegment(null, null, null)
+        setHoleMeasureText('Hole Ø —')
       }
 
       setMeasurePoints([])
