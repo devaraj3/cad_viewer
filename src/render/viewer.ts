@@ -699,11 +699,13 @@ export function createViewer(container: HTMLElement): Viewer {
   function loadMeshFromGeometry(geom: THREE.BufferGeometry) {
     // 1) Ensure normals
     if (!geom.getAttribute('normal')) geom.computeVertexNormals()
-    // 2) Recenter geometry at origin
+    // 2) Translate geometry so its min corner sits at the origin
     geom.computeBoundingBox()
-    const gbox = geom.boundingBox!.clone()
-    const gcenter = gbox.getCenter(new THREE.Vector3())
-    geom.translate(-gcenter.x, -gcenter.y, -gcenter.z)
+    const gbox = geom.boundingBox
+    if (gbox) {
+      const min = gbox.min
+      geom.translate(-min.x, -min.y, -min.z)
+    }
 
     // 3) Create mesh and add to scene
     modelRoot.children.forEach((child) => {
@@ -729,16 +731,7 @@ export function createViewer(container: HTMLElement): Viewer {
 
     modelRoot.add(mesh)
 
-    // 4) Ground the model: lift so bottom sits on y = 0
-    mesh.updateWorldMatrix(true, true)
-    const box1 = new THREE.Box3().setFromObject(modelRoot)
-    const lift = -box1.min.y
-    if (Math.abs(lift) > 1e-6) {
-      modelRoot.position.y += lift
-      modelRoot.updateWorldMatrix(true, true)
-    }
-
-    // 5) Fit camera to final bounds
+    // 4) Fit camera to final bounds
     const finalBox = new THREE.Box3().setFromObject(modelRoot)
     const size = new THREE.Vector3()
     finalBox.getSize(size)
