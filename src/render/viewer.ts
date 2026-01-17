@@ -881,7 +881,7 @@ export function createViewer(container: HTMLElement): Viewer {
       c.height = size
       const ctx = c.getContext('2d')
       if (!ctx) {
-        return new THREE.MeshBasicMaterial({ color: 0xd0d5dd })
+        return new THREE.MeshBasicMaterial({ color: 0xffffff })
       }
 
       // Background: light grey (same family as model)
@@ -907,6 +907,7 @@ export function createViewer(container: HTMLElement): Viewer {
 
       return new THREE.MeshBasicMaterial({
         map: tex,
+        color: 0xffffff,
         transparent: true,
       })
     }
@@ -925,6 +926,8 @@ export function createViewer(container: HTMLElement): Viewer {
 
     cubeMesh = new THREE.Mesh(cubeGeom, materials)
     cubeRoot.add(cubeMesh)
+
+    let hoverFaceIndex: number | null = null
 
     const edgeGeom = new THREE.EdgesGeometry(cubeGeom, 1)
     const edgeMat = new THREE.LineBasicMaterial({ color: 0x222222 })
@@ -946,7 +949,7 @@ export function createViewer(container: HTMLElement): Viewer {
     makeAxis(new THREE.Vector3(0, 1, 0), 0x00ff00)
     makeAxis(new THREE.Vector3(0, 0, 1), 0x0000ff)
 
-    axesGroup.position.set(-0.7, -0.7, 0)
+    axesGroup.position.set(-0.5, -0.5, -0.5)
     cubeRoot.add(axesGroup)
 
     function handleClick(event: MouseEvent) {
@@ -999,6 +1002,53 @@ export function createViewer(container: HTMLElement): Viewer {
 
     cubeCanvasEl.addEventListener('click', handleClick)
     ;(cubeCanvasEl as any).__viewCubeClickHandler = handleClick
+
+    function handlePointerMove(event: MouseEvent) {
+      if (!cubeRenderer || !cubeCamera || !cubeScene || !cubeMesh) return
+
+      const rect = cubeRenderer.domElement.getBoundingClientRect()
+      if (rect.width === 0 || rect.height === 0) return
+
+      const ndcX = ((event.clientX - rect.left) / rect.width) * 2 - 1
+      const ndcY = -((event.clientY - rect.top) / rect.height) * 2 + 1
+      cubePointer.set(ndcX, ndcY)
+
+      cubeRaycaster.setFromCamera(cubePointer, cubeCamera)
+      const intersects = cubeRaycaster.intersectObject(cubeMesh, false)
+
+      let newIndex: number | null = null
+      if (intersects.length && intersects[0].face) {
+        newIndex = intersects[0].face!.materialIndex ?? 0
+      }
+
+      if (newIndex === hoverFaceIndex) {
+        return
+      }
+
+      if (hoverFaceIndex !== null && Array.isArray(cubeMesh.material)) {
+        const oldMat = cubeMesh.material[hoverFaceIndex] as THREE.MeshBasicMaterial
+        oldMat.color.set(0xffffff)
+      }
+
+      hoverFaceIndex = newIndex
+
+      if (hoverFaceIndex !== null && Array.isArray(cubeMesh.material)) {
+        const newMat = cubeMesh.material[hoverFaceIndex] as THREE.MeshBasicMaterial
+        newMat.color.set(0xcfe3ff)
+      }
+    }
+
+    function handlePointerLeave() {
+      if (!cubeMesh || hoverFaceIndex === null) return
+      if (Array.isArray(cubeMesh.material)) {
+        const oldMat = cubeMesh.material[hoverFaceIndex] as THREE.MeshBasicMaterial
+        oldMat.color.set(0xffffff)
+      }
+      hoverFaceIndex = null
+    }
+
+    cubeCanvasEl.addEventListener('mousemove', handlePointerMove)
+    cubeCanvasEl.addEventListener('mouseleave', handlePointerLeave)
   }
 
   function setProjection(mode: 'perspective' | 'orthographic') {
