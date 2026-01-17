@@ -665,7 +665,13 @@ export function createViewer(container: HTMLElement): Viewer {
     const viewDir = new THREE.Vector3()
     activeCamera.getWorldDirection(viewDir)
 
-    type Segment = { x1: number; y1: number; x2: number; y2: number }
+    type Segment = {
+      x1: number
+      y1: number
+      x2: number
+      y2: number
+      midWorld: THREE.Vector3
+    }
     const segments: Segment[] = []
 
     const worldVertex = new THREE.Vector3()
@@ -779,11 +785,53 @@ export function createViewer(container: HTMLElement): Viewer {
         const x1 = (vertexScreen.x * 0.5 + 0.5) * width
         const y1 = (-vertexScreen.y * 0.5 + 0.5) * height
 
-        segments.push({ x1: x0, y1: y0, x2: x1, y2: y1 })
+        const midWorld = new THREE.Vector3().addVectors(p0, p1).multiplyScalar(0.5)
+
+        segments.push({ x1: x0, y1: y0, x2: x1, y2: y1, midWorld })
       })
     })
 
     if (!segments.length) {
+      return canvas.toDataURL('image/png')
+    }
+
+    const cameraPos = new THREE.Vector3()
+    camera.getWorldPosition(cameraPos)
+
+    const bbox = new THREE.Box3().setFromObject(modelRoot)
+    const bboxSize = new THREE.Vector3()
+    bbox.getSize(bboxSize)
+    const diag = bboxSize.length() || 1
+    const depthEps = diag * 1e-3
+
+    const raycaster = new THREE.Raycaster()
+    const ndc2 = new THREE.Vector2()
+    const tmp = new THREE.Vector3()
+
+    const visibleSegments: Segment[] = []
+    for (const seg of segments) {
+      tmp.copy(seg.midWorld).project(camera)
+      ndc2.set(tmp.x, tmp.y)
+
+      raycaster.setFromCamera(ndc2, camera)
+      const hits = raycaster.intersectObject(modelRoot, true)
+      if (!hits.length) {
+        visibleSegments.push(seg)
+        continue
+      }
+
+      const first = hits[0]
+      const hitDist = first.point.distanceTo(cameraPos)
+      const midDist = seg.midWorld.distanceTo(cameraPos)
+
+      if (hitDist < midDist - depthEps) {
+        continue
+      }
+
+      visibleSegments.push(seg)
+    }
+
+    if (!visibleSegments.length) {
       return canvas.toDataURL('image/png')
     }
 
@@ -793,7 +841,7 @@ export function createViewer(container: HTMLElement): Viewer {
     ctx.lineCap = 'round'
 
     ctx.beginPath()
-    for (const seg of segments) {
+    for (const seg of visibleSegments) {
       ctx.moveTo(seg.x1, seg.y1)
       ctx.lineTo(seg.x2, seg.y2)
     }
