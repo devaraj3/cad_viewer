@@ -853,27 +853,68 @@ export function createViewer(container: HTMLElement): Viewer {
     cubeCamera = new THREE.PerspectiveCamera(35, 1, 0.1, 10)
     cubeCamera.position.set(0, 0, 3)
 
+    const cubeCanvasEl = cubeRenderer.domElement as HTMLCanvasElement
+    cubeCanvasEl.width = 100
+    cubeCanvasEl.height = 100
+    cubeRenderer.setSize(100, 100, false)
+    cubeCamera.aspect = 1
+    cubeCamera.updateProjectionMatrix()
+
     const ambient = new THREE.AmbientLight(0xffffff, 0.8)
     cubeScene.add(ambient)
     const dir = new THREE.DirectionalLight(0xffffff, 0.5)
     dir.position.set(3, 5, 6)
     cubeScene.add(dir)
 
-    const cubeGeom = new THREE.BoxGeometry(1, 1, 1)
-    const makeFaceMaterial = (color: number) =>
-      new THREE.MeshStandardMaterial({
-        color,
-        metalness: 0,
-        roughness: 0.6,
-      })
+    function makeLabeledFaceMaterial(label: string): THREE.MeshBasicMaterial {
+      const size = 256
+      const canvas = document.createElement('canvas')
+      canvas.width = size
+      canvas.height = size
+      const ctx = canvas.getContext('2d')
+      if (!ctx) {
+        return new THREE.MeshBasicMaterial({ color: 0xd0d5dd })
+      }
 
+      // Background: light grey (same family as model)
+      ctx.fillStyle = '#e0e4eb'
+      ctx.fillRect(0, 0, size, size)
+
+      // Border
+      ctx.strokeStyle = '#c0c4cc'
+      ctx.lineWidth = 8
+      ctx.strokeRect(12, 12, size - 24, size - 24)
+
+      // Label text
+      ctx.font =
+        'bold 80px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+      ctx.fillStyle = '#374151' // dark grey
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(label, size / 2, size / 2)
+
+      const texture = new THREE.CanvasTexture(canvas)
+      texture.anisotropy = cubeRenderer
+        ? cubeRenderer.capabilities.getMaxAnisotropy()
+        : 1
+      texture.needsUpdate = true
+
+      return new THREE.MeshBasicMaterial({
+        map: texture,
+        transparent: true,
+      })
+    }
+
+    const cubeGeom = new THREE.BoxGeometry(1, 1, 1)
+
+    // BoxGeometry material order: [ +X, -X, +Y, -Y, +Z, -Z ]
     const materials: THREE.Material[] = [
-      makeFaceMaterial(0x93c5fd), // +X (right)
-      makeFaceMaterial(0xfca5a5), // -X (left)
-      makeFaceMaterial(0x86efac), // +Y (top)
-      makeFaceMaterial(0xfcd34d), // -Y (bottom)
-      makeFaceMaterial(0xc4b5fd), // +Z (front)
-      makeFaceMaterial(0xfda4af), // -Z (back)
+      makeLabeledFaceMaterial('Right'),  // +X
+      makeLabeledFaceMaterial('Left'),   // -X
+      makeLabeledFaceMaterial('Top'),    // +Y
+      makeLabeledFaceMaterial('Bottom'), // -Y
+      makeLabeledFaceMaterial('Front'),  // +Z
+      makeLabeledFaceMaterial('Back'),   // -Z
     ]
 
     cubeMesh = new THREE.Mesh(cubeGeom, materials)
@@ -884,12 +925,15 @@ export function createViewer(container: HTMLElement): Viewer {
     const edges = new THREE.LineSegments(edgeGeom, edgeMat)
     cubeMesh.add(edges)
 
-    cubePointerHandler = (event: MouseEvent) => {
-      if (!cubeRenderer || !cubeCamera || !cubeScene || !cubeMesh || !cubeCanvas) return
-      const rect = cubeCanvas.getBoundingClientRect()
-      const x = ((event.clientX - rect.left) / rect.width) * 2 - 1
-      const y = -((event.clientY - rect.top) / rect.height) * 2 + 1
-      cubePointer.set(x, y)
+    function handlePointerDown(event: MouseEvent) {
+      if (!cubeRenderer || !cubeCamera || !cubeScene || !cubeMesh) return
+
+      const rect = cubeRenderer.domElement.getBoundingClientRect()
+      if (rect.width === 0 || rect.height === 0) return
+
+      const ndcX = ((event.clientX - rect.left) / rect.width) * 2 - 1
+      const ndcY = -((event.clientY - rect.top) / rect.height) * 2 + 1
+      cubePointer.set(ndcX, ndcY)
 
       cubeRaycaster.setFromCamera(cubePointer, cubeCamera)
       const intersects = cubeRaycaster.intersectObject(cubeMesh, true)
@@ -898,32 +942,44 @@ export function createViewer(container: HTMLElement): Viewer {
       const face = intersects[0].face
       if (!face) return
 
-      const normal = face.normal.clone().applyQuaternion(cubeMesh.quaternion).normalize()
+      const idx = face.materialIndex ?? 0
 
+      // Map BoxGeometry material indices to view presets:
+      // 0: +X, 1: -X, 2: +Y, 3: -Y, 4: +Z, 5: -Z
       let preset: ViewPreset = 'front'
-      if (normal.z > 0.9) preset = 'front'
-      else if (normal.z < -0.9) preset = 'back'
-      else if (normal.x > 0.9) preset = 'right'
-      else if (normal.x < -0.9) preset = 'left'
-      else if (normal.y > 0.9) preset = 'top'
-      else if (normal.y < -0.9) preset = 'bottom'
+      switch (idx) {
+        case 0:
+          preset = 'right'
+          break
+        case 1:
+          preset = 'left'
+          break
+        case 2:
+          preset = 'top'
+          break
+        case 3:
+          preset = 'bottom'
+          break
+        case 4:
+          preset = 'front'
+          break
+        case 5:
+          preset = 'back'
+          break
+      }
 
       setView(preset)
     }
 
-    cubeCanvas.addEventListener('mousedown', cubePointerHandler)
+    cubePointerHandler = handlePointerDown
+    cubeCanvasEl.addEventListener('mousedown', handlePointerDown)
 
     resizeCubeRenderer = () => {
-      if (!cubeRenderer || !cubeCamera || !cubeCanvas) return
-      const width = cubeCanvas.clientWidth || cubeCanvas.width
-      const height = cubeCanvas.clientHeight || cubeCanvas.height
-      const size = Math.min(width, height)
-      cubeRenderer.setSize(size, size, false)
+      if (!cubeRenderer || !cubeCamera) return
+      cubeRenderer.setSize(100, 100, false)
       cubeCamera.aspect = 1
       cubeCamera.updateProjectionMatrix()
     }
-
-    resizeCubeRenderer()
   }
 
   function setProjection(mode: 'perspective' | 'orthographic') {
