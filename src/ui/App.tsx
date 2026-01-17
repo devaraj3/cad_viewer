@@ -19,6 +19,7 @@ type SectionAxis = 'x' | 'y' | 'z'
 
 export default function App() {
   const containerRef = useRef<HTMLDivElement | null>(null)
+  const cubeCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const viewerRef = useRef<ReturnType<typeof createViewer> | null>(null)
   const [dimsMM, setDimsMM] = useState<{ x: number, y: number, z: number } | null>(null)
   const [units, setUnits] = useState<Units>('mm')
@@ -46,6 +47,9 @@ export default function App() {
     if (!containerRef.current) return
     viewerRef.current = createViewer(containerRef.current)
     viewerRef.current.setMeasurementGraphicsScale(dimScale)
+    if (cubeCanvasRef.current && viewerRef.current.attachViewCube) {
+      viewerRef.current.attachViewCube(cubeCanvasRef.current)
+    }
 
     workerRef.current = new Worker(new URL('../workers/occ-worker.ts', import.meta.url))
 
@@ -258,11 +262,6 @@ export default function App() {
           accept=".stl,.STL,.step,.stp,.iges,.igs,.brep,.BREP,.obj,.OBJ,.3mf,.3MF,.gltf,.GLTF,.glb,.GLB"
           onChange={onFile}
         />
-        <button onClick={() => viewerRef.current?.setView('iso')}>Iso</button>
-        <button onClick={() => viewerRef.current?.setView('top')}>Top</button>
-        <button onClick={() => viewerRef.current?.setView('front')}>Front</button>
-        <button onClick={() => viewerRef.current?.setView('right')}>Right</button>
-
         <button
           onClick={() => {
             if (!viewerRef.current) return
@@ -419,7 +418,26 @@ export default function App() {
           </div>
         </div>
       </div>
-      <div id="viewport" ref={containerRef} onClick={handleViewportClick} />
+      <div
+        id="viewport"
+        ref={containerRef}
+        onClick={handleViewportClick}
+        style={{ position: 'relative', flex: 1, minHeight: 0 }}
+      >
+        <canvas
+          ref={cubeCanvasRef}
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+          style={{
+            position: 'absolute',
+            top: 12,
+            right: 12,
+            width: 80,
+            height: 80,
+            pointerEvents: 'auto',
+          }}
+        />
+      </div>
     </div>
   )
 }
