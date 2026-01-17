@@ -20,6 +20,7 @@ export type Viewer = {
   resize: () => void
   dispose: () => void
   pickAtScreenPosition: (ndcX: number, ndcY: number) => THREE.Vector3 | null
+  autoMeasureHoleAtScreenPosition?: (ndcX: number, ndcY: number) => number | null
   setMeasurementSegment: (
     p1: THREE.Vector3 | null,
     p2: THREE.Vector3 | null,
@@ -350,6 +351,192 @@ export function createViewer(container: HTMLElement): Viewer {
 
     if (intersects.length === 0) return null
     return intersects[0].point.clone()
+  }
+
+  type HoleDetectionResult = {
+    center: THREE.Vector3
+    radius: number
+    axisIndex: 0 | 1 | 2
+    p1: THREE.Vector3
+    p2: THREE.Vector3
+  }
+
+  function detectHoleAtIntersection(
+    hit: THREE.Intersection
+  ): HoleDetectionResult | null {
+    const mesh = hit.object as THREE.Mesh
+    const geom = mesh.geometry as THREE.BufferGeometry
+    const posAttr = geom.getAttribute('position') as THREE.BufferAttribute
+    if (!posAttr || posAttr.count === 0) return null
+
+    const worldPositions: THREE.Vector3[] = new Array(posAttr.count)
+    const v = new THREE.Vector3()
+    for (let i = 0; i < posAttr.count; i++) {
+      v.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i))
+      v.applyMatrix4(mesh.matrixWorld)
+      worldPositions[i] = v.clone()
+    }
+
+    const hitPoint = hit.point.clone()
+
+    const bbox = new THREE.Box3().setFromObject(modelRoot)
+    const bboxSize = new THREE.Vector3()
+    bbox.getSize(bboxSize)
+    const diag = bboxSize.length() || 1
+    const sliceThickness = diag * 0.002
+    const minPoints = 16
+
+    type Candidate = {
+      axisIndex: 0 | 1 | 2
+      cx: number
+      cy: number
+      radius: number
+      error: number
+    }
+
+    const candidates: Candidate[] = []
+
+    const axisConfigs: {
+      axisIndex: 0 | 1 | 2
+      coordA: 0 | 1 | 2
+      coordB: 0 | 1 | 2
+    }[] = [
+      { axisIndex: 0, coordA: 1, coordB: 2 },
+      { axisIndex: 1, coordA: 0, coordB: 2 },
+      { axisIndex: 2, coordA: 0, coordB: 1 },
+    ]
+
+    function fitCircle(points: { x: number; y: number }[]): {
+      cx: number
+      cy: number
+      radius: number
+      error: number
+    } | null {
+      const n = points.length
+      if (n < minPoints) return null
+
+      let cx = 0
+      let cy = 0
+      for (const p of points) {
+        cx += p.x
+        cy += p.y
+      }
+      cx /= n
+      cy /= n
+
+      let radiusSum = 0
+      for (const p of points) {
+        const dx = p.x - cx
+        const dy = p.y - cy
+        radiusSum += Math.sqrt(dx * dx + dy * dy)
+      }
+      const radius = radiusSum / n
+      if (radius <= 0) return null
+
+      let errSum = 0
+      for (const p of points) {
+        const dx = p.x - cx
+        const dy = p.y - cy
+        const r = Math.sqrt(dx * dx + dy * dy)
+        errSum += Math.abs(r - radius)
+      }
+      const error = errSum / n
+
+      return { cx, cy, radius, error }
+    }
+
+    for (const cfg of axisConfigs) {
+      const { axisIndex, coordA, coordB } = cfg
+      const targetCoord = hitPoint.getComponent(axisIndex)
+
+      const planePoints: { x: number; y: number }[] = []
+
+      for (let i = 0; i < worldPositions.length; i++) {
+        const wp = worldPositions[i]
+        const coord = wp.getComponent(axisIndex)
+        if (Math.abs(coord - targetCoord) > sliceThickness) continue
+
+        planePoints.push({
+          x: wp.getComponent(coordA),
+          y: wp.getComponent(coordB),
+        })
+      }
+
+      if (planePoints.length < minPoints) continue
+
+      const fit = fitCircle(planePoints)
+      if (!fit) continue
+
+      const { cx, cy, radius, error } = fit
+      const normErr = error / (radius || 1)
+      if (normErr > 0.08) continue
+
+      candidates.push({ axisIndex, cx, cy, radius, error: normErr })
+    }
+
+    if (!candidates.length) return null
+
+    candidates.sort((a, b) => a.error - b.error)
+    const best = candidates[0]
+
+    const centerWorld = new THREE.Vector3()
+    if (best.axisIndex === 0) {
+      centerWorld.set(hitPoint.x, best.cx, best.cy)
+    } else if (best.axisIndex === 1) {
+      centerWorld.set(best.cx, hitPoint.y, best.cy)
+    } else {
+      centerWorld.set(best.cx, best.cy, hitPoint.z)
+    }
+
+    const radius = best.radius
+
+    const p1 = centerWorld.clone()
+    const p2 = centerWorld.clone()
+    if (best.axisIndex === 2) {
+      p1.x += radius
+      p2.x -= radius
+    } else if (best.axisIndex === 0) {
+      p1.y += radius
+      p2.y -= radius
+    } else {
+      p1.x += radius
+      p2.x -= radius
+    }
+
+    return {
+      center: centerWorld,
+      radius,
+      axisIndex: best.axisIndex,
+      p1,
+      p2,
+    }
+  }
+
+  function autoMeasureHoleAtScreenPosition(
+    ndcX: number,
+    ndcY: number
+  ): number | null {
+    if (!activeCamera) return null
+
+    const pointer = new THREE.Vector2(ndcX, ndcY)
+    raycaster.setFromCamera(pointer, activeCamera)
+    const hits = raycaster.intersectObject(modelRoot, true)
+    if (!hits.length) {
+      return null
+    }
+
+    const hit = hits[0]
+    const result = detectHoleAtIntersection(hit)
+    if (!result) {
+      return null
+    }
+
+    const { p1, p2, radius } = result
+
+    setMeasurementSegment(p1, p2, null)
+
+    const diameter = 2 * radius
+    return diameter
   }
 
   function setMeasurementSegment(
@@ -1255,6 +1442,7 @@ export function createViewer(container: HTMLElement): Viewer {
     resize,
     dispose,
     pickAtScreenPosition,
+    autoMeasureHoleAtScreenPosition,
     setMeasurementSegment,
     setMeasurementGraphicsScale,
     getScreenshotDataURL,
