@@ -646,72 +646,160 @@ export function createViewer(container: HTMLElement): Viewer {
   }
 
   function getOutlineSnapshotDataURL(): string {
-    const prevGridVisible = gridHelper ? gridHelper.visible : false
-    const prevAxesVisible = axesHelper ? axesHelper.visible : false
+    if (!renderer || !activeCamera) return ''
 
-    const prevLineColor = measureMaterial.color.clone()
-    const prevArrowColor = arrowMaterial.color.clone()
-    let prevLabelColor: THREE.Color | null = null
-    if (measureLabel && (measureLabel.material as any).color) {
-      prevLabelColor = (measureLabel.material as any).color.clone()
-    }
+    const dom = renderer.domElement
+    const width = dom.width || dom.clientWidth
+    const height = dom.height || dom.clientHeight
+    if (!width || !height) return ''
 
-    setOverlayVisible(false)
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return ''
 
-    measureMaterial.color.set(0x000000)
-    arrowMaterial.color.set(0x000000)
-    if (measureLabel && (measureLabel.material as any).color) {
-      (measureLabel.material as any).color.set(0x000000)
-    }
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, width, height)
 
-    const prevModelVisible = modelRoot.visible
+    const viewDir = new THREE.Vector3()
+    activeCamera.getWorldDirection(viewDir)
 
-    const edgesGroup = new THREE.Group()
+    type Segment = { x1: number; y1: number; x2: number; y2: number }
+    const segments: Segment[] = []
+
+    const worldVertex = new THREE.Vector3()
+    const worldPositions: THREE.Vector3[] = []
+    const vertexScreen = new THREE.Vector3()
+
+    const camera = activeCamera as THREE.Camera
 
     modelRoot.traverse((obj: any) => {
       if (!obj.isMesh || !obj.geometry) return
+      const mesh = obj as THREE.Mesh
+      const geom = mesh.geometry as THREE.BufferGeometry
+      const posAttr = geom.getAttribute('position') as THREE.BufferAttribute
+      if (!posAttr || posAttr.count === 0) return
 
-      const geom = obj.geometry as THREE.BufferGeometry
-      const edgeThreshold = 40
-      const edgesGeom = new THREE.EdgesGeometry(geom, edgeThreshold)
-      const edgesMat = new THREE.LineBasicMaterial({ color: 0x000000 })
-      const edges = new THREE.LineSegments(edgesGeom, edgesMat)
-      edges.applyMatrix4(obj.matrixWorld)
-      edgesGroup.add(edges)
-    })
-
-    scene.add(edgesGroup)
-
-    modelRoot.visible = false
-
-    renderer.render(scene, activeCamera)
-
-    const dataURL = renderer.domElement.toDataURL('image/png')
-
-    scene.remove(edgesGroup)
-    edgesGroup.traverse((obj: any) => {
-      const asAny = obj as any
-      if (asAny.geometry) asAny.geometry.dispose()
-      if (asAny.material) {
-        if (Array.isArray(asAny.material)) {
-          asAny.material.forEach((m: any) => m.dispose())
+      worldPositions.length = posAttr.count
+      for (let i = 0; i < posAttr.count; i++) {
+        worldVertex.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i))
+        worldVertex.applyMatrix4(mesh.matrixWorld)
+        if (!worldPositions[i]) {
+          worldPositions[i] = worldVertex.clone()
         } else {
-          asAny.material.dispose()
+          worldPositions[i].copy(worldVertex)
         }
       }
+
+      const index = geom.getIndex()
+      const indices = index ? index.array : null
+      const triCount = indices ? indices.length / 3 : posAttr.count / 3
+
+      const faceFront: boolean[] = new Array(triCount)
+      const a = new THREE.Vector3()
+      const b = new THREE.Vector3()
+      const c = new THREE.Vector3()
+      const ab = new THREE.Vector3()
+      const ac = new THREE.Vector3()
+      const normal = new THREE.Vector3()
+
+      for (let t = 0; t < triCount; t++) {
+        const i0 = indices ? indices[t * 3 + 0] : t * 3 + 0
+        const i1 = indices ? indices[t * 3 + 1] : t * 3 + 1
+        const i2 = indices ? indices[t * 3 + 2] : t * 3 + 2
+
+        a.copy(worldPositions[i0])
+        b.copy(worldPositions[i1])
+        c.copy(worldPositions[i2])
+
+        ab.subVectors(b, a)
+        ac.subVectors(c, a)
+        normal.crossVectors(ab, ac).normalize()
+
+        const dot = normal.dot(viewDir)
+        faceFront[t] = dot < 0
+      }
+
+      type EdgeInfo = {
+        v0: number
+        v1: number
+        triA: number
+        triB: number | null
+      }
+      const edgeMap = new Map<string, EdgeInfo>()
+
+      const addEdge = (v0: number, v1: number, triIndex: number) => {
+        const key = v0 < v1 ? `${v0}_${v1}` : `${v1}_${v0}`
+        const existing = edgeMap.get(key)
+        if (!existing) {
+          edgeMap.set(key, {
+            v0,
+            v1,
+            triA: triIndex,
+            triB: null,
+          })
+        } else {
+          existing.triB = triIndex
+        }
+      }
+
+      for (let t = 0; t < triCount; t++) {
+        const i0 = indices ? indices[t * 3 + 0] : t * 3 + 0
+        const i1 = indices ? indices[t * 3 + 1] : t * 3 + 1
+        const i2 = indices ? indices[t * 3 + 2] : t * 3 + 2
+
+        addEdge(i0, i1, t)
+        addEdge(i1, i2, t)
+        addEdge(i2, i0, t)
+      }
+
+      edgeMap.forEach((edge) => {
+        const { v0, v1, triA, triB } = edge
+        const frontA = faceFront[triA]
+        const frontB = triB !== null ? faceFront[triB] : null
+
+        let isSilhouette = false
+        if (triB === null) {
+          isSilhouette = true
+        } else if (frontA !== frontB) {
+          isSilhouette = true
+        }
+
+        if (!isSilhouette) return
+
+        const p0 = worldPositions[v0]
+        const p1 = worldPositions[v1]
+
+        vertexScreen.copy(p0).project(camera)
+        const x0 = (vertexScreen.x * 0.5 + 0.5) * width
+        const y0 = (-vertexScreen.y * 0.5 + 0.5) * height
+
+        vertexScreen.copy(p1).project(camera)
+        const x1 = (vertexScreen.x * 0.5 + 0.5) * width
+        const y1 = (-vertexScreen.y * 0.5 + 0.5) * height
+
+        segments.push({ x1: x0, y1: y0, x2: x1, y2: y1 })
+      })
     })
 
-    modelRoot.visible = prevModelVisible
-
-    measureMaterial.color.copy(prevLineColor)
-    arrowMaterial.color.copy(prevArrowColor)
-    if (measureLabel && prevLabelColor && (measureLabel.material as any).color) {
-      ;(measureLabel.material as any).color.copy(prevLabelColor)
+    if (!segments.length) {
+      return canvas.toDataURL('image/png')
     }
-    if (gridHelper) gridHelper.visible = prevGridVisible
-    if (axesHelper) axesHelper.visible = prevAxesVisible
 
-    return dataURL
+    ctx.strokeStyle = '#000000'
+    ctx.lineWidth = 1.5
+    ctx.lineJoin = 'round'
+    ctx.lineCap = 'round'
+
+    ctx.beginPath()
+    for (const seg of segments) {
+      ctx.moveTo(seg.x1, seg.y1)
+      ctx.lineTo(seg.x2, seg.y2)
+    }
+    ctx.stroke()
+
+    return canvas.toDataURL('image/png')
   }
 
   function loadMeshFromGeometry(geom: THREE.BufferGeometry) {
