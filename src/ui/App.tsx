@@ -21,7 +21,7 @@ function fmt(n: number) {
   return Number.isFinite(n) ? n.toFixed(2) : '-'
 }
 
-type MeasureType = 'free' | 'x' | 'y' | 'z' | 'diameter' | 'radius'
+type MeasureType = 'free' | 'x' | 'y' | 'z' | 'diameter' | 'radius' | 'hole-auto'
 type SectionAxis = 'x' | 'y' | 'z'
 
 export default function App() {
@@ -36,6 +36,7 @@ export default function App() {
   const [measureType, setMeasureType] = useState<MeasureType>('free')
   const [measurePoints, setMeasurePoints] = useState<THREE.Vector3[]>([])
   const [measureMM, setMeasureMM] = useState<number | null>(null)
+  const [holeMeasureText, setHoleMeasureText] = useState<string | null>(null)
   const [dimScale, setDimScale] = useState(0.6)
   const [sectionEnabled, setSectionEnabled] = useState<Record<SectionAxis, boolean>>({
     x: false,
@@ -110,6 +111,26 @@ export default function App() {
     const rect = containerRef.current.getBoundingClientRect()
     const x = ((event.clientX - rect.left) / rect.width) * 2 - 1
     const y = -((event.clientY - rect.top) / rect.height) * 2 + 1
+
+    if (measureType === 'hole-auto') {
+      const viewer = viewerRef.current
+      const diameterModel = viewer.autoMeasureHoleAtScreenPosition
+        ? viewer.autoMeasureHoleAtScreenPosition(x, y)
+        : null
+
+      if (diameterModel && diameterModel > 0) {
+        const value = convert(diameterModel, units)
+        const formatted = fmt(value)
+        setHoleMeasureText(`Hole Ø ${formatted} ${units}`)
+      } else {
+        setHoleMeasureText('Hole: —')
+        viewer.setMeasurementSegment(null, null, null)
+      }
+
+      setMeasurePoints([])
+      setMeasureMM(null)
+      return
+    }
 
     const picked = viewerRef.current.pickAtScreenPosition(x, y)
     if (!picked) return
@@ -295,6 +316,7 @@ export default function App() {
     if (!next && viewerRef.current) {
       setMeasurePoints([])
       setMeasureMM(null)
+      setHoleMeasureText(null)
       viewerRef.current.setMeasurementSegment(null, null, null)
     }
   }
@@ -336,7 +358,12 @@ export default function App() {
       )} ${units}`
     : '—'
 
-  const measureText = measureMM != null ? `${fmt(convert(measureMM, units))} ${units}` : '—'
+  const measureText =
+    measureType === 'hole-auto'
+      ? holeMeasureText ?? '—'
+      : measureMM != null
+        ? `${fmt(convert(measureMM, units))} ${units}`
+        : '—'
 
   return (
     <div className="app-root">
@@ -400,6 +427,7 @@ export default function App() {
               <option value="z">Z</option>
               <option value="diameter">Diameter</option>
               <option value="radius">Radius</option>
+              <option value="hole-auto">Hole (auto)</option>
             </select>
           </div>
         </div>
