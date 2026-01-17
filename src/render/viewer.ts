@@ -152,12 +152,10 @@ export function createViewer(container: HTMLElement): Viewer {
   let cubeRenderer: THREE.WebGLRenderer | null = null
   let cubeScene: THREE.Scene | null = null
   let cubeCamera: THREE.PerspectiveCamera | null = null
+  let cubeRoot: THREE.Group | null = null
   let cubeMesh: THREE.Mesh | null = null
   const cubeRaycaster = new THREE.Raycaster()
   const cubePointer = new THREE.Vector2()
-  let cubeCanvas: HTMLCanvasElement | null = null
-  let resizeCubeRenderer: (() => void) | null = null
-  let cubePointerHandler: ((event: PointerEvent) => void) | null = null
 
   const baseMetalMaterial = new THREE.MeshStandardMaterial({
     color: 0xc5cad3,   // light/mid grey, clearly darker than background
@@ -840,7 +838,6 @@ export function createViewer(container: HTMLElement): Viewer {
   }
 
   function attachViewCube(canvas: HTMLCanvasElement) {
-    cubeCanvas = canvas
     cubeRenderer = new THREE.WebGLRenderer({
       canvas,
       antialias: true,
@@ -852,27 +849,37 @@ export function createViewer(container: HTMLElement): Viewer {
     cubeScene = new THREE.Scene()
     cubeCamera = new THREE.PerspectiveCamera(35, 1, 0.1, 10)
     cubeCamera.position.set(0, 0, 3)
+    cubeCamera.lookAt(0, 0, 0)
 
     const cubeCanvasEl = cubeRenderer.domElement as HTMLCanvasElement
     cubeCanvasEl.style.pointerEvents = 'auto'
-    cubeCanvasEl.width = 150
-    cubeCanvasEl.height = 150
-    cubeRenderer.setSize(150, 150, false)
-    cubeCamera.aspect = 1
-    cubeCamera.updateProjectionMatrix()
 
-    const ambient = new THREE.AmbientLight(0xffffff, 0.8)
+    // Internal size (drawing buffer); CSS size is handled in App.tsx
+    const resizeCubeRenderer = () => {
+      const width = cubeCanvasEl.clientWidth || 100
+      const height = cubeCanvasEl.clientHeight || 100
+      const size = Math.min(width, height)
+      cubeRenderer!.setSize(size, size, false)
+      cubeCamera!.aspect = 1
+      cubeCamera!.updateProjectionMatrix()
+    }
+    resizeCubeRenderer()
+
+    const ambient = new THREE.AmbientLight(0xffffff, 0.9)
     cubeScene.add(ambient)
-    const dir = new THREE.DirectionalLight(0xffffff, 0.5)
+    const dir = new THREE.DirectionalLight(0xffffff, 0.6)
     dir.position.set(3, 5, 6)
     cubeScene.add(dir)
 
+    cubeRoot = new THREE.Group()
+    cubeScene.add(cubeRoot)
+
     function makeLabeledFaceMaterial(label: string): THREE.MeshBasicMaterial {
       const size = 256
-      const canvas = document.createElement('canvas')
-      canvas.width = size
-      canvas.height = size
-      const ctx = canvas.getContext('2d')
+      const c = document.createElement('canvas')
+      c.width = size
+      c.height = size
+      const ctx = c.getContext('2d')
       if (!ctx) {
         return new THREE.MeshBasicMaterial({ color: 0xd0d5dd })
       }
@@ -894,14 +901,12 @@ export function createViewer(container: HTMLElement): Viewer {
       ctx.textBaseline = 'middle'
       ctx.fillText(label, size / 2, size / 2)
 
-      const texture = new THREE.CanvasTexture(canvas)
-      texture.anisotropy = cubeRenderer
-        ? cubeRenderer.capabilities.getMaxAnisotropy()
-        : 1
-      texture.needsUpdate = true
+      const tex = new THREE.CanvasTexture(c)
+      tex.anisotropy = cubeRenderer!.capabilities.getMaxAnisotropy()
+      tex.needsUpdate = true
 
       return new THREE.MeshBasicMaterial({
-        map: texture,
+        map: tex,
         transparent: true,
       })
     }
@@ -919,20 +924,38 @@ export function createViewer(container: HTMLElement): Viewer {
     ]
 
     cubeMesh = new THREE.Mesh(cubeGeom, materials)
-    cubeScene.add(cubeMesh)
+    cubeRoot.add(cubeMesh)
 
     const edgeGeom = new THREE.EdgesGeometry(cubeGeom, 1)
     const edgeMat = new THREE.LineBasicMaterial({ color: 0x222222 })
     const edges = new THREE.LineSegments(edgeGeom, edgeMat)
     cubeMesh.add(edges)
 
-    function handlePointerDown(event: PointerEvent) {
+    const axesGroup = new THREE.Group()
+    const axisLen = 0.8
+
+    const makeAxis = (dir: THREE.Vector3, color: number) => {
+      const pts = [new THREE.Vector3(0, 0, 0), dir.clone().multiplyScalar(axisLen)]
+      const g = new THREE.BufferGeometry().setFromPoints(pts)
+      const m = new THREE.LineBasicMaterial({ color })
+      const line = new THREE.Line(g, m)
+      axesGroup.add(line)
+    }
+
+    makeAxis(new THREE.Vector3(1, 0, 0), 0xff0000)
+    makeAxis(new THREE.Vector3(0, 1, 0), 0x00ff00)
+    makeAxis(new THREE.Vector3(0, 0, 1), 0x0000ff)
+
+    axesGroup.position.set(-0.7, -0.7, 0)
+    cubeRoot.add(axesGroup)
+
+    function handleClick(event: MouseEvent) {
       if (!cubeRenderer || !cubeCamera || !cubeScene || !cubeMesh) return
 
       event.preventDefault()
       event.stopPropagation()
 
-      const rect = cubeRenderer.domElement.getBoundingClientRect()
+      const rect = cubeCanvasEl.getBoundingClientRect()
       if (rect.width === 0 || rect.height === 0) return
 
       const ndcX = ((event.clientX - rect.left) / rect.width) * 2 - 1
@@ -940,7 +963,7 @@ export function createViewer(container: HTMLElement): Viewer {
       cubePointer.set(ndcX, ndcY)
 
       cubeRaycaster.setFromCamera(cubePointer, cubeCamera)
-      const intersects = cubeRaycaster.intersectObject(cubeMesh, true)
+      const intersects = cubeRaycaster.intersectObject(cubeMesh, false)
       if (!intersects.length) return
 
       const face = intersects[0].face
@@ -974,15 +997,8 @@ export function createViewer(container: HTMLElement): Viewer {
       setView(preset)
     }
 
-    cubePointerHandler = handlePointerDown
-    cubeCanvasEl.addEventListener('pointerdown', handlePointerDown)
-
-    resizeCubeRenderer = () => {
-      if (!cubeRenderer || !cubeCamera) return
-      cubeRenderer.setSize(150, 150, false)
-      cubeCamera.aspect = 1
-      cubeCamera.updateProjectionMatrix()
-    }
+    cubeCanvasEl.addEventListener('click', handleClick)
+    ;(cubeCanvasEl as any).__viewCubeClickHandler = handleClick
   }
 
   function setProjection(mode: 'perspective' | 'orthographic') {
@@ -996,15 +1012,23 @@ export function createViewer(container: HTMLElement): Viewer {
     const aspect = w / Math.max(1, h)
     persp.aspect = aspect
     persp.updateProjectionMatrix()
-    if (resizeCubeRenderer) resizeCubeRenderer()
+    if (cubeRenderer && cubeCamera) {
+      const cubeCanvasEl = cubeRenderer.domElement as HTMLCanvasElement
+      const width = cubeCanvasEl.clientWidth || 100
+      const height = cubeCanvasEl.clientHeight || 100
+      const size = Math.min(width, height)
+      cubeRenderer.setSize(size, size, false)
+      cubeCamera.aspect = 1
+      cubeCamera.updateProjectionMatrix()
+    }
   }
 
   const render = () => {
     controls.update()
     renderer.render(scene, activeCamera)
-    if (cubeRenderer && cubeScene && cubeCamera && cubeMesh) {
-      cubeMesh.quaternion.copy(activeCamera.quaternion)
-      cubeMesh.quaternion.invert()
+    if (cubeRenderer && cubeScene && cubeCamera && cubeRoot) {
+      cubeRoot.quaternion.copy(activeCamera.quaternion)
+      cubeRoot.quaternion.invert()
       cubeRenderer.render(cubeScene, cubeCamera)
     }
   }
@@ -1022,16 +1046,18 @@ export function createViewer(container: HTMLElement): Viewer {
     if (cubeRenderer) {
       cubeRenderer.dispose()
     }
-    if (cubeMesh) {
-      if (Array.isArray(cubeMesh.material)) {
-        cubeMesh.material.forEach((material) => material.dispose())
-      } else {
-        cubeMesh.material.dispose()
-      }
-      cubeMesh.geometry.dispose()
+    if (cubeRoot) {
+      disposeObject(cubeRoot)
     }
-    if (cubeCanvas && cubePointerHandler) {
-      cubeCanvas.removeEventListener('pointerdown', cubePointerHandler)
+    if (cubeRenderer) {
+      const cubeCanvasEl = cubeRenderer.domElement as HTMLCanvasElement
+      const handler = (cubeCanvasEl as any).__viewCubeClickHandler as
+        | ((event: MouseEvent) => void)
+        | undefined
+      if (handler) {
+        cubeCanvasEl.removeEventListener('click', handler)
+        delete (cubeCanvasEl as any).__viewCubeClickHandler
+      }
     }
   }
 
