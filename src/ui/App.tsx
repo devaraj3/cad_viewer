@@ -109,15 +109,22 @@ export default function App() {
     const y = -((event.clientY - rect.top) / rect.height) * 2 + 1
 
     const viewer = viewerRef.current
-    const fn = viewer.measureEdgeAtScreenPosition
-    const lengthModel = fn ? fn(x, y) : null
+    const measureFn = viewer.measureEdgeOrArcAtScreenPosition
+    const res = measureFn ? measureFn(x, y) : null
 
-    if (lengthModel && lengthModel > 0) {
-      const value = convert(lengthModel, units)
+    if (!res) {
+      setEdgeMeasureText('Measure: —')
+      return
+    }
+
+    if (res.isArc && res.radius && res.radius > 0) {
+      const value = convert(res.radius, units)
+      const formatted = fmt(value)
+      setEdgeMeasureText(`Radius R = ${formatted} ${units}`)
+    } else {
+      const value = convert(res.edgeLength, units)
       const formatted = fmt(value)
       setEdgeMeasureText(`Edge L = ${formatted} ${units}`)
-    } else {
-      setEdgeMeasureText('Edge L = —')
     }
   }
 
