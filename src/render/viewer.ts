@@ -132,7 +132,7 @@ export function createViewer(container: HTMLElement): Viewer {
       new THREE.Vector3(0, 0, 0),
     ])
     const mat = new THREE.LineBasicMaterial({
-      color: 0xff8c00, // orange highlight
+      color: 0xff0000, // bright red for visibility
     })
     edgeHoverLine = new THREE.LineSegments(geom, mat)
     edgeHoverLine.visible = false
@@ -167,7 +167,6 @@ export function createViewer(container: HTMLElement): Viewer {
 
   const raycaster = new THREE.Raycaster()
   raycaster.params.Line = raycaster.params.Line || {}
-  raycaster.params.Line.threshold = 0.01
   const pointer = new THREE.Vector2()
 
   let cubeRenderer: THREE.WebGLRenderer | null = null
@@ -385,6 +384,15 @@ export function createViewer(container: HTMLElement): Viewer {
   ): EdgePickResult | null {
     if (!activeCamera || edgePickables.length === 0) return null
 
+    // Adjust line picking threshold based on model size
+    const bbox = new THREE.Box3().setFromObject(modelRoot)
+    const size = new THREE.Vector3()
+    bbox.getSize(size)
+    const diag = size.length() || 1
+    // threshold is a few percent of the model diagonal
+    raycaster.params.Line = raycaster.params.Line || {}
+    ;(raycaster.params.Line as any).threshold = diag * 0.02
+
     const pointer = new THREE.Vector2(ndcX, ndcY)
     raycaster.setFromCamera(pointer, activeCamera)
 
@@ -402,7 +410,9 @@ export function createViewer(container: HTMLElement): Viewer {
     const posAttr = geom.getAttribute('position') as THREE.BufferAttribute
     if (!posAttr) return null
 
-    const segIndex = hit.index !== undefined ? hit.index : 0
+    // For LineSegments, hit.index is the index of the first vertex of the segment
+    const vIndex = hit.index !== undefined ? hit.index : 0
+    const segIndex = Math.floor(vIndex / 2)
     const i0 = segIndex * 2
     const i1 = i0 + 1
     if (i1 >= posAttr.count) return null
@@ -436,8 +446,17 @@ export function createViewer(container: HTMLElement): Viewer {
     }
 
     const geom = edgeHoverLine.geometry as THREE.BufferGeometry
-    const posAttr = geom.getAttribute('position') as THREE.BufferAttribute
-    if (!posAttr) return
+    let posAttr = geom.getAttribute('position') as THREE.BufferAttribute | null
+    if (!posAttr || posAttr.count < 2) {
+      // rebuild simple 2-point geometry if needed
+      const newGeom = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0, 0),
+      ])
+      edgeHoverLine.geometry.dispose()
+      edgeHoverLine.geometry = newGeom
+      posAttr = newGeom.getAttribute('position') as THREE.BufferAttribute
+    }
 
     posAttr.setXYZ(0, pick.start.x, pick.start.y, pick.start.z)
     posAttr.setXYZ(1, pick.end.x, pick.end.y, pick.end.z)
@@ -458,7 +477,7 @@ export function createViewer(container: HTMLElement): Viewer {
   ): number | null {
     const pick = pickEdgeAtScreenPosition(ndcX, ndcY)
     if (!pick) {
-      if (edgeHoverLine) edgeHoverLine.visible = false
+      clearEdgeHighlight()
       return null
     }
 
@@ -1210,9 +1229,6 @@ export function createViewer(container: HTMLElement): Viewer {
     sectionBounds.min.copy(finalBox.min)
     sectionBounds.max.copy(finalBox.max)
     sectionBounds.center.copy(center)
-
-    const diag = size.length() || 1
-    raycaster.params.Line.threshold = Math.max(diag * 0.002, 0.01)
 
     ;(['x', 'y', 'z'] as SectionAxis[]).forEach((axis) => {
       const plane = sectionPlanes[axis]
