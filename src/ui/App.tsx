@@ -21,15 +21,6 @@ function fmt(n: number) {
   return Number.isFinite(n) ? n.toFixed(2) : '-'
 }
 
-type MeasureType =
-  | 'free'
-  | 'x'
-  | 'y'
-  | 'z'
-  | 'diameter'
-  | 'radius'
-  | 'hole-auto'
-  | 'edge'
 type SectionAxis = 'x' | 'y' | 'z'
 
 export default function App() {
@@ -41,10 +32,6 @@ export default function App() {
   const [dimsMM, setDimsMM] = useState<{ x: number; y: number; z: number } | null>(null)
   const [units, setUnits] = useState<Units>('mm')
   const [measureMode, setMeasureMode] = useState(false)
-  const [measureType, setMeasureType] = useState<MeasureType>('free')
-  const [measurePoints, setMeasurePoints] = useState<THREE.Vector3[]>([])
-  const [measureMM, setMeasureMM] = useState<number | null>(null)
-  const [holeMeasureText, setHoleMeasureText] = useState<string | null>(null)
   const [edgeMeasureText, setEdgeMeasureText] = useState<string | null>(null)
   const [dimScale, setDimScale] = useState(0.6)
   const [sectionEnabled, setSectionEnabled] = useState<Record<SectionAxis, boolean>>({
@@ -121,198 +108,18 @@ export default function App() {
     const x = ((event.clientX - rect.left) / rect.width) * 2 - 1
     const y = -((event.clientY - rect.top) / rect.height) * 2 + 1
 
-    if (measureType === 'edge') {
-      const viewer = viewerRef.current
-      const fn = viewer.measureEdgeAtScreenPosition
-      const lengthModel = fn ? fn(x, y) : null
+    const viewer = viewerRef.current
+    const fn = viewer.measureEdgeAtScreenPosition
+    const lengthModel = fn ? fn(x, y) : null
 
-      if (lengthModel && lengthModel > 0) {
-        const value = convert(lengthModel, units)
-        const formatted = fmt(value)
-        setEdgeMeasureText(`Edge L = ${formatted} ${units}`)
-      } else {
-        setEdgeMeasureText('Edge L = —')
-      }
-
-      setMeasurePoints([])
-      setMeasureMM(null)
-      setHoleMeasureText(null)
-      return
-    }
-
-    if (measureType === 'hole-auto') {
-      const viewer = viewerRef.current
-      const fn = viewer.autoMeasureHoleAtScreenPosition
-      const diameterModel = fn ? fn(x, y) : null
-
-      if (diameterModel && diameterModel > 0) {
-        const value = convert(diameterModel, units)
-        const formatted = fmt(value)
-        setHoleMeasureText(`Hole Ø ${formatted} ${units}`)
-      } else {
-        setHoleMeasureText('Hole Ø —')
-      }
-
-      setMeasurePoints([])
-      setMeasureMM(null)
-      return
-    }
-
-    const picked = viewerRef.current.pickAtScreenPosition(x, y)
-    if (!picked) return
-
-    if (measurePoints.length >= 2) {
-      setMeasurePoints([picked])
-      setMeasureMM(null)
-      viewerRef.current.setMeasurementSegment(null, null, null)
-      return
-    }
-
-    // If this is the first point:
-    if (measurePoints.length === 0) {
-      setMeasurePoints([picked])
-      setMeasureMM(null)
-      if (viewerRef.current) {
-        viewerRef.current.setMeasurementSegment(null, null, null)
-      }
-      return
-    }
-
-    // If this is the second point:
-    if (measurePoints.length === 1) {
-      const p1 = measurePoints[0]
-      const p2 = picked
-      const dx = p2.x - p1.x
-      const dy = p2.y - p1.y
-      const dz = p2.z - p1.z
-      const len = Math.sqrt(dx * dx + dy * dy + dz * dz) // assume model units are mm
-
-      let measured = len
-      let segP1 = p1.clone()
-      let segP2 = p2.clone()
-      let prefix = ''
-      const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5)
-
-      switch (measureType) {
-        case 'free':
-          prefix = ''
-          break
-
-        case 'x': {
-          measured = Math.abs(dx)
-          segP1 = new THREE.Vector3(p1.x, mid.y, mid.z)
-          segP2 = new THREE.Vector3(p2.x, mid.y, mid.z)
-          prefix = 'X '
-          break
-        }
-
-        case 'y': {
-          measured = Math.abs(dy)
-          segP1 = new THREE.Vector3(mid.x, p1.y, mid.z)
-          segP2 = new THREE.Vector3(mid.x, p2.y, mid.z)
-          prefix = 'Y '
-          break
-        }
-
-        case 'z': {
-          measured = Math.abs(dz)
-          segP1 = new THREE.Vector3(mid.x, mid.y, p1.z)
-          segP2 = new THREE.Vector3(mid.x, mid.y, p2.z)
-          prefix = 'Z '
-          break
-        }
-
-        case 'diameter': {
-          measured = len
-          segP1 = p1.clone()
-          segP2 = p2.clone()
-          prefix = '⌀ '
-          break
-        }
-
-        case 'radius': {
-          measured = len / 2
-          const center = mid
-          segP1 = center.clone()
-          segP2 = p1.clone()
-          prefix = 'R '
-          break
-        }
-      }
-
-      setMeasurePoints([p1, p2])
-      setMeasureMM(measured)
-      const valueInUnits = convert(measured, units)
-      const label = `${prefix}${fmt(valueInUnits)} ${units}`
-      viewerRef.current.setMeasurementSegment(segP1, segP2, label)
-      return
+    if (lengthModel && lengthModel > 0) {
+      const value = convert(lengthModel, units)
+      const formatted = fmt(value)
+      setEdgeMeasureText(`Edge L = ${formatted} ${units}`)
+    } else {
+      setEdgeMeasureText('Edge L = —')
     }
   }
-
-  useEffect(() => {
-    if (!viewerRef.current) return
-    if (measureMM == null) return
-    if (measurePoints.length !== 2) return
-
-    const [p1, p2] = measurePoints
-    const dx = p2.x - p1.x
-    const dy = p2.y - p1.y
-    const dz = p2.z - p1.z
-    const len = Math.sqrt(dx * dx + dy * dy + dz * dz)
-
-    let measured = measureMM
-    let segP1 = p1.clone()
-    let segP2 = p2.clone()
-    let prefix = ''
-    const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5)
-
-    switch (measureType) {
-      case 'free':
-        measured = len
-        segP1 = p1.clone()
-        segP2 = p2.clone()
-        prefix = ''
-        break
-      case 'x':
-        measured = Math.abs(dx)
-        segP1 = new THREE.Vector3(p1.x, mid.y, mid.z)
-        segP2 = new THREE.Vector3(p2.x, mid.y, mid.z)
-        prefix = 'X '
-        break
-      case 'y':
-        measured = Math.abs(dy)
-        segP1 = new THREE.Vector3(mid.x, p1.y, mid.z)
-        segP2 = new THREE.Vector3(mid.x, p2.y, mid.z)
-        prefix = 'Y '
-        break
-      case 'z':
-        measured = Math.abs(dz)
-        segP1 = new THREE.Vector3(mid.x, mid.y, p1.z)
-        segP2 = new THREE.Vector3(mid.x, mid.y, p2.z)
-        prefix = 'Z '
-        break
-      case 'diameter':
-        measured = len
-        segP1 = p1.clone()
-        segP2 = p2.clone()
-        prefix = '⌀ '
-        break
-      case 'radius': {
-        measured = len / 2
-        const center = mid
-        segP1 = center.clone()
-        segP2 = p1.clone()
-        prefix = 'R '
-        break
-      }
-    }
-
-    setMeasureMM(measured)
-
-    const valueInUnits = convert(measured, units)
-    const label = `${prefix}${fmt(valueInUnits)} ${units}`
-    viewerRef.current.setMeasurementSegment(segP1, segP2, label)
-  }, [units, measureType, measurePoints, measureMM, viewerRef])
 
   const handleSnapshot = () => {
     if (!viewerRef.current) return
@@ -337,16 +144,15 @@ export default function App() {
   }
 
   const handleMeasureClick = () => {
-    const next = !measureMode
-    setMeasureMode(next)
-    if (!next && viewerRef.current) {
-      setMeasurePoints([])
-      setMeasureMM(null)
-      setHoleMeasureText(null)
-      setEdgeMeasureText(null)
-      viewerRef.current.setMeasurementSegment(null, null, null)
-      viewerRef.current.clearEdgeHighlight?.()
-    }
+    setMeasureMode((prev) => {
+      const next = !prev
+      if (!next && viewerRef.current) {
+        setEdgeMeasureText(null)
+        viewerRef.current.setMeasurementSegment(null, null, null)
+        viewerRef.current.clearEdgeHighlight?.()
+      }
+      return next
+    })
   }
 
   const handleDimScaleChange = (value: number) => {
@@ -386,14 +192,7 @@ export default function App() {
       )} ${units}`
     : '—'
 
-  const measureText =
-    measureType === 'hole-auto'
-      ? holeMeasureText ?? '—'
-      : measureType === 'edge'
-        ? edgeMeasureText ?? 'Edge L = —'
-        : measureMM != null
-          ? `${fmt(convert(measureMM, units))} ${units}`
-          : '—'
+  const measureText = edgeMeasureText ?? 'Edge L = —'
 
   const handleViewerPointerMove = (
     event: React.PointerEvent<HTMLDivElement>,
@@ -405,18 +204,10 @@ export default function App() {
     const y = -((event.clientY - rect.top) / rect.height) * 2 + 1
 
     const viewer = viewerRef.current
-    if (measureMode && measureType === 'edge') {
+    if (measureMode) {
       viewer.highlightEdgeAtScreenPosition?.(x, y)
     } else {
       viewer.clearEdgeHighlight?.()
-    }
-  }
-
-  const handleMeasureTypeChange = (nextType: MeasureType) => {
-    setMeasureType(nextType)
-    if (nextType !== 'edge') {
-      setEdgeMeasureText(null)
-      viewerRef.current?.clearEdgeHighlight?.()
     }
   }
 
@@ -470,21 +261,6 @@ export default function App() {
               <span className="toolbar-icon">📏</span>
               <span>Measure</span>
             </button>
-            <select
-              className="toolbar-select"
-              value={measureType}
-              onChange={(e) => handleMeasureTypeChange(e.target.value as MeasureType)}
-              title="Measurement mode"
-            >
-              <option value="free">Free</option>
-              <option value="x">X</option>
-              <option value="y">Y</option>
-              <option value="z">Z</option>
-              <option value="diameter">Diameter</option>
-              <option value="radius">Radius</option>
-              <option value="hole-auto">Hole (auto)</option>
-              <option value="edge">Edge length</option>
-            </select>
           </div>
         </div>
 
@@ -617,6 +393,7 @@ export default function App() {
           ref={containerRef}
           onPointerDown={handleViewportPointerDown}
           onPointerMove={handleViewerPointerMove}
+          onPointerLeave={() => viewerRef.current?.clearEdgeHighlight?.()}
           className="viewer-container"
         >
           <canvas
