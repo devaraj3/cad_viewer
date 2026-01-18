@@ -21,6 +21,9 @@ export type Viewer = {
   dispose: () => void
   pickAtScreenPosition: (ndcX: number, ndcY: number) => THREE.Vector3 | null
   autoMeasureHoleAtScreenPosition?: (ndcX: number, ndcY: number) => number | null
+  highlightEdgeAtScreenPosition?: (ndcX: number, ndcY: number) => void
+  clearEdgeHighlight?: () => void
+  measureEdgeAtScreenPosition?: (ndcX: number, ndcY: number) => number | null
   setMeasurementSegment: (
     p1: THREE.Vector3 | null,
     p2: THREE.Vector3 | null,
@@ -91,6 +94,8 @@ export function createViewer(container: HTMLElement): Viewer {
 
   let gridHelper: THREE.GridHelper | null = null
   let axesHelper: THREE.AxesHelper | null = null
+  const edgePickables: THREE.LineSegments[] = []
+  let edgeHoverLine: THREE.LineSegments | null = null
 
   const gridSize = 5000      // very large so it feels almost infinite
   const gridDivisions = 400  // more lines for finer grid
@@ -121,6 +126,19 @@ export function createViewer(container: HTMLElement): Viewer {
   scene.add(modelRoot)
   renderer.localClippingEnabled = true
 
+  {
+    const geom = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(0, 0, 0),
+    ])
+    const mat = new THREE.LineBasicMaterial({
+      color: 0xff8c00, // orange highlight
+    })
+    edgeHoverLine = new THREE.LineSegments(geom, mat)
+    edgeHoverLine.visible = false
+    scene.add(edgeHoverLine)
+  }
+
   const sectionPlanes: Record<SectionAxis, THREE.Plane> = {
     x: new THREE.Plane(new THREE.Vector3(1, 0, 0), 0),
     y: new THREE.Plane(new THREE.Vector3(0, 1, 0), 0),
@@ -148,6 +166,8 @@ export function createViewer(container: HTMLElement): Viewer {
   }
 
   const raycaster = new THREE.Raycaster()
+  raycaster.params.Line = raycaster.params.Line || {}
+  raycaster.params.Line.threshold = 0.01
   const pointer = new THREE.Vector2()
 
   let cubeRenderer: THREE.WebGLRenderer | null = null
@@ -351,6 +371,100 @@ export function createViewer(container: HTMLElement): Viewer {
 
     if (intersects.length === 0) return null
     return intersects[0].point.clone()
+  }
+
+  type EdgePickResult = {
+    start: THREE.Vector3
+    end: THREE.Vector3
+    length: number
+  }
+
+  function pickEdgeAtScreenPosition(
+    ndcX: number,
+    ndcY: number
+  ): EdgePickResult | null {
+    if (!activeCamera || edgePickables.length === 0) return null
+
+    const pointer = new THREE.Vector2(ndcX, ndcY)
+    raycaster.setFromCamera(pointer, activeCamera)
+
+    const intersections: THREE.Intersection[] = raycaster.intersectObjects(
+      edgePickables,
+      true,
+    )
+    if (!intersections.length) {
+      return null
+    }
+
+    const hit = intersections[0]
+    const line = hit.object as THREE.LineSegments
+    const geom = line.geometry as THREE.BufferGeometry
+    const posAttr = geom.getAttribute('position') as THREE.BufferAttribute
+    if (!posAttr) return null
+
+    const segIndex = hit.index !== undefined ? hit.index : 0
+    const i0 = segIndex * 2
+    const i1 = i0 + 1
+    if (i1 >= posAttr.count) return null
+
+    const startLocal = new THREE.Vector3(
+      posAttr.getX(i0),
+      posAttr.getY(i0),
+      posAttr.getZ(i0),
+    )
+    const endLocal = new THREE.Vector3(
+      posAttr.getX(i1),
+      posAttr.getY(i1),
+      posAttr.getZ(i1),
+    )
+
+    const startWorld = startLocal.clone().applyMatrix4(line.matrixWorld)
+    const endWorld = endLocal.clone().applyMatrix4(line.matrixWorld)
+
+    const length = startWorld.distanceTo(endWorld)
+
+    return { start: startWorld, end: endWorld, length }
+  }
+
+  function highlightEdgeAtScreenPosition(ndcX: number, ndcY: number): void {
+    if (!edgeHoverLine) return
+
+    const pick = pickEdgeAtScreenPosition(ndcX, ndcY)
+    if (!pick) {
+      edgeHoverLine.visible = false
+      return
+    }
+
+    const geom = edgeHoverLine.geometry as THREE.BufferGeometry
+    const posAttr = geom.getAttribute('position') as THREE.BufferAttribute
+    if (!posAttr) return
+
+    posAttr.setXYZ(0, pick.start.x, pick.start.y, pick.start.z)
+    posAttr.setXYZ(1, pick.end.x, pick.end.y, pick.end.z)
+    posAttr.needsUpdate = true
+
+    edgeHoverLine.visible = true
+  }
+
+  function clearEdgeHighlight(): void {
+    if (edgeHoverLine) {
+      edgeHoverLine.visible = false
+    }
+  }
+
+  function measureEdgeAtScreenPosition(
+    ndcX: number,
+    ndcY: number
+  ): number | null {
+    const pick = pickEdgeAtScreenPosition(ndcX, ndcY)
+    if (!pick) {
+      if (edgeHoverLine) edgeHoverLine.visible = false
+      return null
+    }
+
+    setMeasurementSegment(pick.start, pick.end)
+
+    return pick.length
   }
 
   type HoleDetectionResult = {
@@ -1065,6 +1179,7 @@ export function createViewer(container: HTMLElement): Viewer {
       disposeObject(child)
     })
     modelRoot.clear()
+    edgePickables.length = 0
 
     const material = baseMetalMaterial.clone()
     const mesh = new THREE.Mesh(geom, material)
@@ -1081,6 +1196,7 @@ export function createViewer(container: HTMLElement): Viewer {
     const edges = new THREE.LineSegments(edgesGeom, edgesMat)
     edges.name = 'edgeOverlay'
     mesh.add(edges)
+    edgePickables.push(edges)
 
     modelRoot.add(mesh)
 
@@ -1094,6 +1210,9 @@ export function createViewer(container: HTMLElement): Viewer {
     sectionBounds.min.copy(finalBox.min)
     sectionBounds.max.copy(finalBox.max)
     sectionBounds.center.copy(center)
+
+    const diag = size.length() || 1
+    raycaster.params.Line.threshold = Math.max(diag * 0.002, 0.01)
 
     ;(['x', 'y', 'z'] as SectionAxis[]).forEach((axis) => {
       const plane = sectionPlanes[axis]
@@ -1115,6 +1234,8 @@ export function createViewer(container: HTMLElement): Viewer {
     })
     modelRoot.clear()
     modelRoot.position.set(0, 0, 0)
+    edgePickables.length = 0
+    if (edgeHoverLine) edgeHoverLine.visible = false
   }
 
   function setView(preset: ViewPreset) {
@@ -1455,6 +1576,9 @@ export function createViewer(container: HTMLElement): Viewer {
     dispose,
     pickAtScreenPosition,
     autoMeasureHoleAtScreenPosition,
+    highlightEdgeAtScreenPosition,
+    clearEdgeHighlight,
+    measureEdgeAtScreenPosition,
     setMeasurementSegment,
     setMeasurementGraphicsScale,
     getScreenshotDataURL,

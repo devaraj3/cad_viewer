@@ -21,7 +21,15 @@ function fmt(n: number) {
   return Number.isFinite(n) ? n.toFixed(2) : '-'
 }
 
-type MeasureType = 'free' | 'x' | 'y' | 'z' | 'diameter' | 'radius' | 'hole-auto'
+type MeasureType =
+  | 'free'
+  | 'x'
+  | 'y'
+  | 'z'
+  | 'diameter'
+  | 'radius'
+  | 'hole-auto'
+  | 'edge'
 type SectionAxis = 'x' | 'y' | 'z'
 
 export default function App() {
@@ -37,6 +45,7 @@ export default function App() {
   const [measurePoints, setMeasurePoints] = useState<THREE.Vector3[]>([])
   const [measureMM, setMeasureMM] = useState<number | null>(null)
   const [holeMeasureText, setHoleMeasureText] = useState<string | null>(null)
+  const [edgeMeasureText, setEdgeMeasureText] = useState<string | null>(null)
   const [dimScale, setDimScale] = useState(0.6)
   const [sectionEnabled, setSectionEnabled] = useState<Record<SectionAxis, boolean>>({
     x: false,
@@ -105,12 +114,31 @@ export default function App() {
     }
   }
 
-  const handleViewportClick = (event: React.MouseEvent<HTMLDivElement>) => {
+  const handleViewportPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!measureMode || !viewerRef.current || !containerRef.current) return
 
     const rect = containerRef.current.getBoundingClientRect()
     const x = ((event.clientX - rect.left) / rect.width) * 2 - 1
     const y = -((event.clientY - rect.top) / rect.height) * 2 + 1
+
+    if (measureType === 'edge') {
+      const viewer = viewerRef.current
+      const fn = viewer.measureEdgeAtScreenPosition
+      const lengthModel = fn ? fn(x, y) : null
+
+      if (lengthModel && lengthModel > 0) {
+        const value = convert(lengthModel, units)
+        const formatted = fmt(value)
+        setEdgeMeasureText(`Edge L = ${formatted} ${units}`)
+      } else {
+        setEdgeMeasureText('Edge L = —')
+      }
+
+      setMeasurePoints([])
+      setMeasureMM(null)
+      setHoleMeasureText(null)
+      return
+    }
 
     if (measureType === 'hole-auto') {
       const viewer = viewerRef.current
@@ -315,7 +343,9 @@ export default function App() {
       setMeasurePoints([])
       setMeasureMM(null)
       setHoleMeasureText(null)
+      setEdgeMeasureText(null)
       viewerRef.current.setMeasurementSegment(null, null, null)
+      viewerRef.current.clearEdgeHighlight?.()
     }
   }
 
@@ -359,9 +389,36 @@ export default function App() {
   const measureText =
     measureType === 'hole-auto'
       ? holeMeasureText ?? '—'
-      : measureMM != null
-        ? `${fmt(convert(measureMM, units))} ${units}`
-        : '—'
+      : measureType === 'edge'
+        ? edgeMeasureText ?? 'Edge L = —'
+        : measureMM != null
+          ? `${fmt(convert(measureMM, units))} ${units}`
+          : '—'
+
+  const handleViewerPointerMove = (
+    event: React.PointerEvent<HTMLDivElement>,
+  ) => {
+    if (!viewerRef.current || !containerRef.current) return
+
+    const rect = containerRef.current.getBoundingClientRect()
+    const x = ((event.clientX - rect.left) / rect.width) * 2 - 1
+    const y = -((event.clientY - rect.top) / rect.height) * 2 + 1
+
+    const viewer = viewerRef.current
+    if (measureMode && measureType === 'edge') {
+      viewer.highlightEdgeAtScreenPosition?.(x, y)
+    } else {
+      viewer.clearEdgeHighlight?.()
+    }
+  }
+
+  const handleMeasureTypeChange = (nextType: MeasureType) => {
+    setMeasureType(nextType)
+    if (nextType !== 'edge') {
+      setEdgeMeasureText(null)
+      viewerRef.current?.clearEdgeHighlight?.()
+    }
+  }
 
   return (
     <div className="app-root">
@@ -416,7 +473,7 @@ export default function App() {
             <select
               className="toolbar-select"
               value={measureType}
-              onChange={(e) => setMeasureType(e.target.value as MeasureType)}
+              onChange={(e) => handleMeasureTypeChange(e.target.value as MeasureType)}
               title="Measurement mode"
             >
               <option value="free">Free</option>
@@ -426,6 +483,7 @@ export default function App() {
               <option value="diameter">Diameter</option>
               <option value="radius">Radius</option>
               <option value="hole-auto">Hole (auto)</option>
+              <option value="edge">Edge length</option>
             </select>
           </div>
         </div>
@@ -557,7 +615,8 @@ export default function App() {
         <div
           id="viewport"
           ref={containerRef}
-          onClick={handleViewportClick}
+          onPointerDown={handleViewportPointerDown}
+          onPointerMove={handleViewerPointerMove}
           className="viewer-container"
         >
           <canvas
