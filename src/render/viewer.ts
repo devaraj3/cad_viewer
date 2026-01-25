@@ -142,13 +142,15 @@ export function createViewer(container: HTMLElement): Viewer {
       new THREE.Vector3(0, 0, 0),
     ])
     const mat = new THREE.LineBasicMaterial({
-      color: 0xffff00,
-      linewidth: 3,
+      color: 0xff0000,
+      linewidth: 4,
       transparent: true,
       opacity: 1.0,
+      depthTest: false,
     })
     edgeHoverLine = new THREE.LineSegments(geom, mat)
     edgeHoverLine.visible = false
+    edgeHoverLine.renderOrder = 9999
     scene.add(edgeHoverLine)
   }
 
@@ -213,7 +215,10 @@ export function createViewer(container: HTMLElement): Viewer {
   }
 
   const measureMaterial = new THREE.LineBasicMaterial({
-    color: 0xffffff,
+    color: 0x000000,
+    linewidth: 2,
+    transparent: true,
+    opacity: 1.0,
     depthTest: false,
     depthWrite: false,
   })
@@ -221,7 +226,7 @@ export function createViewer(container: HTMLElement): Viewer {
   let measureLabel: THREE.Sprite | null = null
 
   const arrowMaterial = new THREE.MeshBasicMaterial({
-    color: 0xffffff,
+    color: 0x000000,
     side: THREE.DoubleSide,
     depthTest: false,
     depthWrite: false,
@@ -404,7 +409,6 @@ export function createViewer(container: HTMLElement): Viewer {
     const size = new THREE.Vector3()
     bbox.getSize(size)
     const diag = size.length() || 1
-    // threshold is a few percent of the model diagonal
     raycaster.params.Line = raycaster.params.Line || {}
     ;(raycaster.params.Line as any).threshold = diag * 0.02
 
@@ -425,9 +429,8 @@ export function createViewer(container: HTMLElement): Viewer {
     const posAttr = geom.getAttribute('position') as THREE.BufferAttribute
     if (!posAttr) return null
 
-    // For LineSegments, hit.index is the index of the first vertex of the segment
-    const vIndex = hit.index !== undefined ? hit.index : 0
-    const segIndex = Math.floor(vIndex / 2)
+    // IMPORTANT: for LineSegments, hit.index is the SEGMENT index, not the vertex index
+    const segIndex = hit.index !== undefined ? hit.index : 0
     const i0 = segIndex * 2
     const i1 = i0 + 1
     if (i1 >= posAttr.count) return null
@@ -619,22 +622,22 @@ export function createViewer(container: HTMLElement): Viewer {
       return
     }
 
-    const geom = edgeHoverLine.geometry as THREE.BufferGeometry
+    let geom = edgeHoverLine.geometry as THREE.BufferGeometry
     let posAttr = geom.getAttribute('position') as THREE.BufferAttribute | null
+
     if (!posAttr || posAttr.count < 2) {
-      // rebuild simple 2-point geometry if needed
-      const newGeom = new THREE.BufferGeometry().setFromPoints([
+      geom.dispose()
+      geom = new THREE.BufferGeometry().setFromPoints([
         new THREE.Vector3(0, 0, 0),
         new THREE.Vector3(0, 0, 0),
       ])
-      edgeHoverLine.geometry.dispose()
-      edgeHoverLine.geometry = newGeom
-      posAttr = newGeom.getAttribute('position') as THREE.BufferAttribute
+      edgeHoverLine.geometry = geom
+      posAttr = geom.getAttribute('position') as THREE.BufferAttribute
     }
 
-    posAttr.setXYZ(0, pick.start.x, pick.start.y, pick.start.z)
-    posAttr.setXYZ(1, pick.end.x, pick.end.y, pick.end.z)
-    posAttr.needsUpdate = true
+    posAttr!.setXYZ(0, pick.start.x, pick.start.y, pick.start.z)
+    posAttr!.setXYZ(1, pick.end.x, pick.end.y, pick.end.z)
+    posAttr!.needsUpdate = true
 
     edgeHoverLine.visible = true
   }
@@ -1060,8 +1063,8 @@ export function createViewer(container: HTMLElement): Viewer {
       canvas.width = textWidth + 20
       canvas.height = fontSize + 20
       ctx.font = `${fontSize}px sans-serif`
-      ctx.fillStyle = 'white'
-      ctx.strokeStyle = 'black'
+      ctx.fillStyle = '#000000'
+      ctx.strokeStyle = '#000000'
       ctx.lineWidth = 4
       ctx.strokeText(text, 10, fontSize)
       ctx.fillText(text, 10, fontSize)
