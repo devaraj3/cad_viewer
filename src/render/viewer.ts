@@ -135,7 +135,7 @@ export function createViewer(container: HTMLElement): Viewer {
       new THREE.Vector3(0, 0, 0),
     ])
     const edgeHoverMat = new THREE.LineBasicMaterial({
-      color: 0x00ffc8,  // bright cyan/green
+      color: FF073A,  // bright red
       linewidth: 30,    // request very thick line (browser may clamp, spheres will help)
       transparent: true,
       opacity: 1.0,
