@@ -24,10 +24,6 @@ export type Viewer = {
   highlightEdgeAtScreenPosition?: (ndcX: number, ndcY: number) => void
   clearEdgeHighlight?: () => void
   measureEdgeAtScreenPosition?: (ndcX: number, ndcY: number) => number | null
-  measureEdgeOrArcAtScreenPosition?: (
-    ndcX: number,
-    ndcY: number
-  ) => EdgeOrArcMeasureResult | null
   setMeasurementSegment: (
     p1: THREE.Vector3 | null,
     p2: THREE.Vector3 | null,
@@ -41,12 +37,6 @@ export type Viewer = {
   setSectionPlanesVisible: (visible: boolean) => void
   resetSectionPlanes: () => void
   attachViewCube?: (canvas: HTMLCanvasElement) => void
-}
-
-export type EdgeOrArcMeasureResult = {
-  edgeLength: number
-  isArc: boolean
-  radius?: number
 }
 
 export function createViewer(container: HTMLElement): Viewer {
@@ -137,19 +127,21 @@ export function createViewer(container: HTMLElement): Viewer {
   renderer.localClippingEnabled = true
 
   {
-    const geom = new THREE.BufferGeometry().setFromPoints([
+    const edgeHoverGeom = new THREE.BufferGeometry().setFromPoints([
       new THREE.Vector3(0, 0, 0),
       new THREE.Vector3(0, 0, 0),
     ])
-    const mat = new THREE.LineBasicMaterial({
-      color: 0xffff00,
-      linewidth: 3,
+    const edgeHoverMat = new THREE.LineBasicMaterial({
+      color: 0xff0000,
+      linewidth: 4,
       transparent: true,
       opacity: 1.0,
+      depthTest: false,
     })
-    edgeHoverLine = new THREE.LineSegments(geom, mat)
+    edgeHoverLine = new THREE.LineSegments(edgeHoverGeom, edgeHoverMat)
     edgeHoverLine.visible = false
-    scene.add(edgeHoverLine)
+    edgeHoverLine.renderOrder = 9999
+    modelRoot.add(edgeHoverLine)
   }
 
   const sectionPlanes: Record<SectionAxis, THREE.Plane> = {
@@ -213,7 +205,10 @@ export function createViewer(container: HTMLElement): Viewer {
   }
 
   const measureMaterial = new THREE.LineBasicMaterial({
-    color: 0xffffff,
+    color: 0x000000,
+    linewidth: 2,
+    transparent: true,
+    opacity: 1.0,
     depthTest: false,
     depthWrite: false,
   })
@@ -221,7 +216,7 @@ export function createViewer(container: HTMLElement): Viewer {
   let measureLabel: THREE.Sprite | null = null
 
   const arrowMaterial = new THREE.MeshBasicMaterial({
-    color: 0xffffff,
+    color: 0x000000,
     side: THREE.DoubleSide,
     depthTest: false,
     depthWrite: false,
@@ -390,7 +385,6 @@ export function createViewer(container: HTMLElement): Viewer {
     end: THREE.Vector3
     length: number
     line: THREE.LineSegments
-    segmentIndex: number
   }
 
   function pickEdgeAtScreenPosition(
@@ -404,9 +398,8 @@ export function createViewer(container: HTMLElement): Viewer {
     const size = new THREE.Vector3()
     bbox.getSize(size)
     const diag = size.length() || 1
-    // threshold is a few percent of the model diagonal
     raycaster.params.Line = raycaster.params.Line || {}
-    ;(raycaster.params.Line as any).threshold = diag * 0.02
+    ;(raycaster.params.Line as any).threshold = diag * 0.03
 
     const pointer = new THREE.Vector2(ndcX, ndcY)
     raycaster.setFromCamera(pointer, activeCamera)
@@ -425,9 +418,8 @@ export function createViewer(container: HTMLElement): Viewer {
     const posAttr = geom.getAttribute('position') as THREE.BufferAttribute
     if (!posAttr) return null
 
-    // For LineSegments, hit.index is the index of the first vertex of the segment
-    const vIndex = hit.index !== undefined ? hit.index : 0
-    const segIndex = Math.floor(vIndex / 2)
+    const vertexIndex = hit.index !== undefined ? hit.index : 0
+    const segIndex = Math.floor(vertexIndex / 2)
     const i0 = segIndex * 2
     const i1 = i0 + 1
     if (i1 >= posAttr.count) return null
@@ -446,167 +438,18 @@ export function createViewer(container: HTMLElement): Viewer {
     const startWorld = startLocal.clone().applyMatrix4(line.matrixWorld)
     const endWorld = endLocal.clone().applyMatrix4(line.matrixWorld)
 
-    const length = startWorld.distanceTo(endWorld)
+    const startModel = startWorld.clone()
+    const endModel = endWorld.clone()
+    modelRoot.worldToLocal(startModel)
+    modelRoot.worldToLocal(endModel)
+
+    const length = startModel.distanceTo(endModel)
 
     return {
-      start: startWorld,
-      end: endWorld,
+      start: startModel,
+      end: endModel,
       length,
       line,
-      segmentIndex: segIndex,
-    }
-  }
-
-  type ArcEstimateResult = {
-    radius: number
-    center: THREE.Vector3
-    isArc: boolean
-  }
-
-  /**
-   * Try to detect if the picked edge belongs to a circular arc.
-   * Uses nearby vertices from the same LineSegments geometry,
-   * chooses the smallest-extent axis as "plane normal",
-   * projects to 2D, and fits a circle.
-   */
-  function estimateArcRadiusFromEdge(
-    pick: EdgePickResult
-  ): ArcEstimateResult | null {
-    const line = pick.line
-    const geom = line.geometry as THREE.BufferGeometry
-    const posAttr = geom.getAttribute('position') as THREE.BufferAttribute
-    if (!posAttr) return null
-
-    const segmentCount = Math.floor(posAttr.count / 2)
-    if (segmentCount < 6) return null
-
-    // Gather a window of segments around the picked one
-    const windowSize = 6
-    const indices: number[] = []
-    const centerSeg = pick.segmentIndex
-    const startSeg = Math.max(0, centerSeg - windowSize)
-    const endSeg = Math.min(segmentCount - 1, centerSeg + windowSize)
-
-    for (let s = startSeg; s <= endSeg; s++) {
-      const i0 = s * 2
-      const i1 = i0 + 1
-      indices.push(i0, i1)
-    }
-
-    // Collect unique world-space points
-    const points: THREE.Vector3[] = []
-    const seen = new Set<string>()
-    const v = new THREE.Vector3()
-
-    for (const i of indices) {
-      if (i >= posAttr.count) continue
-      v.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i))
-      v.applyMatrix4(line.matrixWorld)
-      const key = `${v.x.toFixed(5)},${v.y.toFixed(5)},${v.z.toFixed(5)}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      points.push(v.clone())
-    }
-
-    if (points.length < 6) return null
-
-    // Compute bounding box of these points
-    const bbox = new THREE.Box3()
-    for (const p of points) bbox.expandByPoint(p)
-    const size = new THREE.Vector3()
-    bbox.getSize(size)
-
-    // Choose smallest axis as "plane normal" (points nearly lie in this plane)
-    let normalAxis: 0 | 1 | 2 = 0
-    if (size.y <= size.x && size.y <= size.z) {
-      normalAxis = 1
-    }
-    if (size.z <= size.x && size.z <= size.y) {
-      normalAxis = 2
-    }
-
-    // Project points into 2D plane (the other two axes)
-    const coords: { x: number; y: number }[] = []
-    let coordA: 0 | 1 | 2 = 0
-    let coordB: 0 | 1 | 2 = 1
-
-    if (normalAxis === 0) {
-      coordA = 1
-      coordB = 2 // plane YZ
-    } else if (normalAxis === 1) {
-      coordA = 0
-      coordB = 2 // plane XZ
-    } else {
-      coordA = 0
-      coordB = 1 // plane XY
-    }
-
-    for (const p of points) {
-      coords.push({
-        x: p.getComponent(coordA),
-        y: p.getComponent(coordB),
-      })
-    }
-
-    const n = coords.length
-    if (n < 6) return null
-
-    // Simple 2D circle fit: center = average, radius = average distance, avg error
-    let cx = 0
-    let cy = 0
-    for (const c of coords) {
-      cx += c.x
-      cy += c.y
-    }
-    cx /= n
-    cy /= n
-
-    let radiusSum = 0
-    for (const c of coords) {
-      const dx = c.x - cx
-      const dy = c.y - cy
-      radiusSum += Math.sqrt(dx * dx + dy * dy)
-    }
-    const radius = radiusSum / n
-    if (radius <= 0) return null
-
-    let errSum = 0
-    for (const c of coords) {
-      const dx = c.x - cx
-      const dy = c.y - cy
-      const r = Math.sqrt(dx * dx + dy * dy)
-      errSum += Math.abs(r - radius)
-    }
-    const avgErr = errSum / n
-    const normErr = avgErr / (radius || 1)
-
-    // Require reasonably circular shape
-    const isArc = normErr < 0.2
-    if (!isArc) {
-      return {
-        radius,
-        center: new THREE.Vector3(),
-        isArc: false,
-      }
-    }
-
-    // Lift center back to 3D: use average of original points for normal axis,
-    // and fitted center in the plane axes.
-    const center3D = new THREE.Vector3()
-    let avgNormalCoord = 0
-    for (const p of points) {
-      avgNormalCoord += p.getComponent(normalAxis)
-    }
-    avgNormalCoord /= n
-
-    center3D.setComponent(coordA, cx)
-    center3D.setComponent(coordB, cy)
-    center3D.setComponent(normalAxis, avgNormalCoord)
-
-    return {
-      radius,
-      center: center3D,
-      isArc: true,
     }
   }
 
@@ -645,15 +488,10 @@ export function createViewer(container: HTMLElement): Viewer {
     }
   }
 
-  /**
-   * Pick an edge at the screen position.
-   * If it looks like an arc, estimate radius.
-   * Always draws a dimension between endpoints.
-   */
-  function measureEdgeOrArcAtScreenPosition(
+  function measureEdgeAtScreenPosition(
     ndcX: number,
     ndcY: number
-  ): EdgeOrArcMeasureResult | null {
+  ): number | null {
     const pick = pickEdgeAtScreenPosition(ndcX, ndcY)
     if (!pick) {
       clearEdgeHighlight()
@@ -662,28 +500,7 @@ export function createViewer(container: HTMLElement): Viewer {
 
     setMeasurementSegment(pick.start, pick.end)
 
-    const approxArc = estimateArcRadiusFromEdge(pick)
-    if (!approxArc || !approxArc.isArc || !approxArc.radius || approxArc.radius <= 0) {
-      return {
-        edgeLength: pick.length,
-        isArc: false,
-      }
-    }
-
-    return {
-      edgeLength: pick.length,
-      isArc: true,
-      radius: approxArc.radius,
-    }
-  }
-
-  function measureEdgeAtScreenPosition(
-    ndcX: number,
-    ndcY: number
-  ): number | null {
-    const res = measureEdgeOrArcAtScreenPosition(ndcX, ndcY)
-    if (!res) return null
-    return res.edgeLength
+    return pick.length
   }
 
   type HoleDetectionResult = {
@@ -1060,8 +877,8 @@ export function createViewer(container: HTMLElement): Viewer {
       canvas.width = textWidth + 20
       canvas.height = fontSize + 20
       ctx.font = `${fontSize}px sans-serif`
-      ctx.fillStyle = 'white'
-      ctx.strokeStyle = 'black'
+      ctx.fillStyle = '#000000'
+      ctx.strokeStyle = '#000000'
       ctx.lineWidth = 4
       ctx.strokeText(text, 10, fontSize)
       ctx.fillText(text, 10, fontSize)
@@ -1395,9 +1212,15 @@ export function createViewer(container: HTMLElement): Viewer {
 
     // 3) Create mesh and add to scene
     modelRoot.children.forEach((child) => {
-      disposeObject(child)
+      if (child !== edgeHoverLine) {
+        disposeObject(child)
+      }
     })
     modelRoot.clear()
+    if (edgeHoverLine) {
+      edgeHoverLine.visible = false
+      modelRoot.add(edgeHoverLine)
+    }
     edgePickables.length = 0
 
     const material = baseMetalMaterial.clone()
@@ -1446,12 +1269,17 @@ export function createViewer(container: HTMLElement): Viewer {
 
   function clear() {
     modelRoot.children.forEach((child) => {
-      disposeObject(child)
+      if (child !== edgeHoverLine) {
+        disposeObject(child)
+      }
     })
     modelRoot.clear()
+    if (edgeHoverLine) {
+      edgeHoverLine.visible = false
+      modelRoot.add(edgeHoverLine)
+    }
     modelRoot.position.set(0, 0, 0)
     edgePickables.length = 0
-    if (edgeHoverLine) edgeHoverLine.visible = false
   }
 
   function setView(preset: ViewPreset) {
@@ -1795,7 +1623,6 @@ export function createViewer(container: HTMLElement): Viewer {
     highlightEdgeAtScreenPosition,
     clearEdgeHighlight,
     measureEdgeAtScreenPosition,
-    measureEdgeOrArcAtScreenPosition,
     setMeasurementSegment,
     setMeasurementGraphicsScale,
     getScreenshotDataURL,
