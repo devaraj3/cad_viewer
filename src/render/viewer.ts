@@ -135,18 +135,18 @@ export function createViewer(container: HTMLElement): Viewer {
       new THREE.Vector3(0, 0, 0),
     ])
     const edgeHoverMat = new THREE.LineBasicMaterial({
-      color: 0x00ffc8,   // bright cyan/green
-      linewidth: 6,      // request thick line (may be clamped but we also add spheres)
+      color: 0x00ffc8,  // bright cyan/green
+      linewidth: 10,    // request very thick line (browser may clamp, spheres will help)
       transparent: true,
       opacity: 1.0,
-      depthTest: false,  // always on top
+      depthTest: false,
     })
     edgeHoverLine = new THREE.LineSegments(edgeHoverGeom, edgeHoverMat)
     edgeHoverLine.visible = false
     edgeHoverLine.renderOrder = 9999
     modelRoot.add(edgeHoverLine)
 
-    const sphereGeom = new THREE.SphereGeometry(0.01, 16, 16)
+    const sphereGeom = new THREE.SphereGeometry(1, 16, 16)
     const sphereMat = new THREE.MeshBasicMaterial({
       color: 0x00ffc8,
       transparent: true,
@@ -196,6 +196,7 @@ export function createViewer(container: HTMLElement): Viewer {
   const raycaster = new THREE.Raycaster()
   raycaster.params.Line = raycaster.params.Line || {}
   const pointer = new THREE.Vector2()
+  const _tmpVec = new THREE.Vector3()
 
   let cubeRenderer: THREE.WebGLRenderer | null = null
   let cubeScene: THREE.Scene | null = null
@@ -511,6 +512,23 @@ export function createViewer(container: HTMLElement): Viewer {
     edgeHoverEndSphere.position.copy(pick.end)
     edgeHoverStartSphere.visible = true
     edgeHoverEndSphere.visible = true
+
+    // --- Camera-scaled sphere size: keep visually big at any zoom ---
+    if (activeCamera) {
+      // World position of one endpoint
+      _tmpVec.copy(pick.start).applyMatrix4(modelRoot.matrixWorld)
+
+      const camWorld = new THREE.Vector3()
+      activeCamera.getWorldPosition(camWorld)
+
+      const dist = camWorld.distanceTo(_tmpVec)
+
+      // Scale factor tuned for CAD scale; tweak if needed
+      const scale = dist * 0.03
+
+      edgeHoverStartSphere.scale.setScalar(scale)
+      edgeHoverEndSphere.scale.setScalar(scale)
+    }
   }
 
   function clearEdgeHighlight(): void {
