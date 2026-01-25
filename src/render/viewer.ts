@@ -96,6 +96,8 @@ export function createViewer(container: HTMLElement): Viewer {
   let axesHelper: THREE.AxesHelper | null = null
   const edgePickables: THREE.LineSegments[] = []
   let edgeHoverLine: THREE.LineSegments | null = null
+  let edgeHoverStartSphere: THREE.Mesh | null = null
+  let edgeHoverEndSphere: THREE.Mesh | null = null
 
   const gridSize = 5000      // very large so it feels almost infinite
   const gridDivisions = 400  // more lines for finer grid
@@ -126,22 +128,43 @@ export function createViewer(container: HTMLElement): Viewer {
   scene.add(modelRoot)
   renderer.localClippingEnabled = true
 
+  // Neon-style hover highlight: thick cyan line + endpoint spheres
   {
     const edgeHoverGeom = new THREE.BufferGeometry().setFromPoints([
       new THREE.Vector3(0, 0, 0),
       new THREE.Vector3(0, 0, 0),
     ])
     const edgeHoverMat = new THREE.LineBasicMaterial({
-      color: 0xff0000,
-      linewidth: 4,
+      color: 0x00ffc8,   // bright cyan/green
+      linewidth: 6,      // request thick line (may be clamped but we also add spheres)
       transparent: true,
       opacity: 1.0,
-      depthTest: false,
+      depthTest: false,  // always on top
     })
     edgeHoverLine = new THREE.LineSegments(edgeHoverGeom, edgeHoverMat)
     edgeHoverLine.visible = false
     edgeHoverLine.renderOrder = 9999
     modelRoot.add(edgeHoverLine)
+
+    const sphereGeom = new THREE.SphereGeometry(0.01, 16, 16)
+    const sphereMat = new THREE.MeshBasicMaterial({
+      color: 0x00ffc8,
+      transparent: true,
+      opacity: 1.0,
+      depthTest: false,
+    })
+
+    edgeHoverStartSphere = new THREE.Mesh(sphereGeom, sphereMat)
+    edgeHoverEndSphere = new THREE.Mesh(sphereGeom, sphereMat)
+
+    edgeHoverStartSphere.visible = false
+    edgeHoverEndSphere.visible = false
+
+    edgeHoverStartSphere.renderOrder = 9999
+    edgeHoverEndSphere.renderOrder = 9999
+
+    modelRoot.add(edgeHoverStartSphere)
+    modelRoot.add(edgeHoverEndSphere)
   }
 
   const sectionPlanes: Record<SectionAxis, THREE.Plane> = {
@@ -454,18 +477,20 @@ export function createViewer(container: HTMLElement): Viewer {
   }
 
   function highlightEdgeAtScreenPosition(ndcX: number, ndcY: number): void {
-    if (!edgeHoverLine) return
+    if (!edgeHoverLine || !edgeHoverStartSphere || !edgeHoverEndSphere) return
 
     const pick = pickEdgeAtScreenPosition(ndcX, ndcY)
     if (!pick) {
       edgeHoverLine.visible = false
+      edgeHoverStartSphere.visible = false
+      edgeHoverEndSphere.visible = false
       return
     }
 
     const geom = edgeHoverLine.geometry as THREE.BufferGeometry
     let posAttr = geom.getAttribute('position') as THREE.BufferAttribute | null
+
     if (!posAttr || posAttr.count < 2) {
-      // rebuild simple 2-point geometry if needed
       const newGeom = new THREE.BufferGeometry().setFromPoints([
         new THREE.Vector3(0, 0, 0),
         new THREE.Vector3(0, 0, 0),
@@ -475,16 +500,28 @@ export function createViewer(container: HTMLElement): Viewer {
       posAttr = newGeom.getAttribute('position') as THREE.BufferAttribute
     }
 
-    posAttr.setXYZ(0, pick.start.x, pick.start.y, pick.start.z)
-    posAttr.setXYZ(1, pick.end.x, pick.end.y, pick.end.z)
-    posAttr.needsUpdate = true
+    // Positions are in modelRoot-local space
+    posAttr!.setXYZ(0, pick.start.x, pick.start.y, pick.start.z)
+    posAttr!.setXYZ(1, pick.end.x, pick.end.y, pick.end.z)
+    posAttr!.needsUpdate = true
 
     edgeHoverLine.visible = true
+
+    edgeHoverStartSphere.position.copy(pick.start)
+    edgeHoverEndSphere.position.copy(pick.end)
+    edgeHoverStartSphere.visible = true
+    edgeHoverEndSphere.visible = true
   }
 
   function clearEdgeHighlight(): void {
     if (edgeHoverLine) {
       edgeHoverLine.visible = false
+    }
+    if (edgeHoverStartSphere) {
+      edgeHoverStartSphere.visible = false
+    }
+    if (edgeHoverEndSphere) {
+      edgeHoverEndSphere.visible = false
     }
   }
 
