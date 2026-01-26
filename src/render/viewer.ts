@@ -135,8 +135,8 @@ export function createViewer(container: HTMLElement): Viewer {
       new THREE.Vector3(0, 0, 0),
     ])
     const edgeHoverMat = new THREE.LineBasicMaterial({
-      color: FF073A,  // bright red
-      linewidth: 30,    // request very thick line (browser may clamp, spheres will help)
+      color: 0x00ffc8,  // neon cyan
+      linewidth: 10,    // request very thick line (browser may clamp, spheres will help)
       transparent: true,
       opacity: 1.0,
       depthTest: false,
@@ -524,7 +524,7 @@ export function createViewer(container: HTMLElement): Viewer {
       const dist = camWorld.distanceTo(_tmpVec)
 
       // Scale factor tuned for CAD scale; tweak if needed
-      const scale = dist * 0.03
+      const scale = dist * 0.05
 
       edgeHoverStartSphere.scale.setScalar(scale)
       edgeHoverEndSphere.scale.setScalar(scale)
