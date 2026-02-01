@@ -1,0 +1,95 @@
+Devaraj CAD Viewer Non-Commercial License v1.0
+Copyright (c) 2025 Devaraj. All rights reserved.
+
+1. Definitions
+
+"Software" means the source code and related files in this repository,
+excluding any third-party components that carry their own licenses
+(e.g. Open Cascade Technology, three.js, npm dependencies).
+
+"Non-commercial use" means any use that is not intended for or directed
+toward commercial advantage or monetary compensation. This includes
+personal use, internal evaluation, research, education, and
+experimentation.
+
+"Commercial use" means any use of the Software, in whole or in part,
+in a product, service, or activity that is sold, licensed, rented,
+hosted as a service, or otherwise used to generate revenue or other
+commercial advantage.
+
+2. License Grant (Non-Commercial Only)
+
+Subject to the terms of this License, you are granted a worldwide,
+royalty-free, non-exclusive, non-transferable license to:
+
+  a) use the Software for non-commercial purposes;
+  b) study the Software;
+  c) modify the Software; and
+  d) share unmodified or modified versions of the Software with others
+     for non-commercial purposes, provided that you:
+
+     - include this License in full; and
+     - clearly state any changes you have made.
+
+3. Commercial Use Requires Permission
+
+You are NOT granted any rights to use the Software for Commercial Use.
+
+Any Commercial Use of the Software, in original or modified form,
+requires a separate, prior written agreement with the copyright holder
+(Devaraj). To request such permission, you must contact the copyright
+holder directly.
+
+4. No Sublicensing for Commercial Use
+
+You may not sublicense the Software or any derivative works for
+Commercial Use. Any third party who receives the Software from you
+receives it under the terms of this License only.
+
+5. Contributions
+
+If you submit code, documentation, or other contributions to this
+repository, you agree that:
+
+  a) You have the right to submit the contribution; and
+  b) Your contribution is licensed to the copyright holder under the
+     same terms as this License, so that it can be included in the
+     Software and distributed under this License.
+
+6. Third-Party Components
+
+This Software depends on third-party components (for example, Open
+Cascade Technology, three.js, and other npm packages) that have their
+own licenses. Those licenses govern your use of those components.
+Nothing in this License modifies or supersedes any third-party license.
+
+7. Disclaimer of Warranty
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+8. Limitation of Liability
+
+To the maximum extent permitted by law, the copyright holder shall not
+be liable for any indirect, incidental, special, consequential, or
+punitive damages, or any loss of profits or revenues, whether incurred
+directly or indirectly, arising from the use of or inability to use the
+Software, even if advised of the possibility of such damages.
+
+9. Termination
+
+If you violate any terms of this License, your rights under this
+License will terminate automatically. Upon termination, you must stop
+all use and distribution of the Software, except where continued use
+is allowed under applicable law notwithstanding this limitation.
+
+10. Governing Law
+
+This License shall be governed by and interpreted in accordance with
+the laws of your jurisdiction, without regard to its conflict of
+laws principles.
