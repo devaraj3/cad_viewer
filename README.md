@@ -77,3 +77,41 @@ npm run dev
 
 # build for production (used by Vercel)
 npm run build
+
+---
+
+## Licenses
+
+### Viewer code in this repository
+
+Copyright © 2025 Devaraj.
+
+The code in this repository (React UI, three.js viewer, loaders, worker glue, etc.) is licensed under the **Devaraj CAD Viewer Non-Commercial License**.  
+
+You may:
+
+- Read and study the code.
+- Run it for yourself.
+- Modify it and contribute improvements back to this repository.
+
+You may **not**:
+
+- Use this code, or modified versions of it, in commercial products or services
+  without my prior written permission.
+
+See the `LICENSE` file in this repository for full terms.
+
+### Open Cascade Technology (OCCT)
+
+This project uses **Open Cascade Technology (OCCT)** inside a Web Worker to import
+STEP / IGES / BREP and similar CAD formats.
+
+OCCT is licensed separately under **LGPL 2.1 with exception** by Open Cascade S.A.S.
+
+- Official site: https://dev.opencascade.org  
+- License text: `third_party/OCCT_LICENSE.txt`
+
+### Other dependencies
+
+- **three.js** – MIT License  
+- Other npm packages – each keeps its own license (MIT/ISC/etc.).
