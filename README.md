@@ -77,7 +77,7 @@ npm run dev
 
 # build for production (used by Vercel)
 npm run build
-
+```
 ---
 
 ## Licenses
