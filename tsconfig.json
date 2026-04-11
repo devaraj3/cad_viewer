@@ -10,7 +10,7 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "outDir": "dist",
-    "types": ["react", "react-dom"]       // ✅ add this so JSX errors disappear
+    "types": ["react", "react-dom", "vite/client"]  // vite/client covers CSS/asset imports + import.meta
   },
   "include": ["src", "index.html"],       // 🔄 simpler include, enough for Vite
   "exclude": ["node_modules"]

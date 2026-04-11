@@ -1,181 +1,673 @@
+/* ─── Base ───────────────────────────────────────────────────────────────────── */
+
 .app-root {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: #f1f5f9;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  color: #475569;
+}
+
+/* ─── Full-screen 3-D viewport ───────────────────────────────────────────────── */
+
+.viewer-fullscreen {
+  position: absolute;
+  inset: 0;
+}
+
+/* ─── View cube (corner canvas) ──────────────────────────────────────────────── */
+
+.view-cube {
+  position: absolute;
+  bottom: 16px;
+  right: 16px;
+  width: 80px;
+  height: 80px;
+  pointer-events: auto;
+}
+
+/* ─── Measure hint bar ───────────────────────────────────────────────────────── */
+
+.viewer-measure-hint {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 5px 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 500;
+  pointer-events: none;
+  white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+}
+
+/* ─── Loading overlay ─────────────────────────────────────────────────────────── */
+
+.loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(241, 245, 249, 0.5);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  pointer-events: none;
+}
+
+.loading-card {
   display: flex;
   flex-direction: column;
-  height: 100vh;
-  background: #0b1120;
-  color: #e5e7eb;
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
-
-.app-toolbar {
-  display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 6px 12px;
   gap: 12px;
-  border-bottom: 1px solid #1f2937;
-  background: rgba(15, 23, 42, 0.96);
+  padding: 32px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.1);
+  backdrop-filter: blur(20px);
 }
 
-.app-toolbar-left,
-.app-toolbar-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+.loading-spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid rgba(37, 99, 235, 0.15);
+  border-top-color: #2563eb;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
 }
 
-.toolbar-group {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 8px;
-  border-radius: 999px;
-  background: rgba(31, 41, 55, 0.9);
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
-.toolbar-label {
+.loading-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.loading-subtitle {
   font-size: 11px;
-  color: #9ca3af;
-  white-space: nowrap;
+  color: #64748b;
+  font-weight: 500;
+  margin-top: -6px;
 }
 
-.toolbar-button {
+/* ─── Floating controls overlay (left side) ─────────────────────────────────── */
+
+.controls-overlay {
+  position: absolute;
+  top: 24px;
+  left: 24px;
+  z-index: 10;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  pointer-events: none;
+}
+
+.controls-overlay > * {
+  pointer-events: auto;
+}
+
+/* ─── Controls card (glass panel) ───────────────────────────────────────────── */
+
+.controls-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.85);
+  padding: 16px;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  min-width: 220px;
+  max-width: 248px;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.4) transparent;
+}
+
+.controls-card::-webkit-scrollbar {
+  width: 4px;
+}
+.controls-card::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.4);
+  border-radius: 99px;
+}
+
+/* ─── Divider ────────────────────────────────────────────────────────────────── */
+
+.ctrl-divider {
+  height: 1px;
+  background: rgba(148, 163, 184, 0.3);
+  margin: 0 2px;
+  flex-shrink: 0;
+}
+
+/* ─── Buttons ────────────────────────────────────────────────────────────────── */
+
+.ctrl-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 4px 8px;
-  border-radius: 999px;
-  border: none;
-  background: #374151;
-  color: #e5e7eb;
+  gap: 5px;
+  padding: 6px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  background: #f8fafc;
+  color: #475569;
   font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
-  gap: 4px;
+  transition: all 0.15s;
+  white-space: nowrap;
+  line-height: 1;
 }
 
-.toolbar-button:hover {
-  background: #4b5563;
+.ctrl-btn:hover {
+  background: #ffffff;
+  border-color: rgba(59, 130, 246, 0.4);
+  color: #2563eb;
 }
 
-.toolbar-button.primary {
+.ctrl-btn.active {
   background: #2563eb;
+  color: #ffffff;
+  border-color: #2563eb;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
 }
 
-.toolbar-button.primary:hover {
-  background: #1d4ed8;
+.ctrl-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
-.toolbar-icon {
-  width: 14px;
-  height: 14px;
-  display: inline-block;
+.ctrl-btn-full {
+  width: 100%;
 }
 
-.toolbar-select,
-.toolbar-input {
-  background: #111827;
-  border-radius: 999px;
-  border: 1px solid #374151;
-  color: #e5e7eb;
-  font-size: 12px;
-  padding: 3px 8px;
+.ctrl-btn-dark {
+  background: #0f172a;
+  color: #ffffff;
+  border-color: #0f172a;
 }
 
-.toolbar-input {
-  width: 56px;
-  text-align: center;
+.ctrl-btn-dark:hover {
+  background: #1e293b;
+  border-color: #1e293b;
+  color: #f8fafc;
 }
 
-.toolbar-units {
-  font-size: 11px;
-  color: #d1d5db;
-  padding: 0 4px;
-}
+/* ─── Rows ───────────────────────────────────────────────────────────────────── */
 
-.app-main {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  padding: 8px;
-  gap: 8px;
-  background: #0b1120;
-}
-
-.viewer-container {
-  position: relative;
-  flex: 1;
-  min-height: 0;
-  border-radius: 8px;
-  overflow: hidden;
-  background: #0b1120;
-}
-
-.info-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 220px;
-  max-width: 260px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: rgba(15, 23, 42, 0.96);
-  border: 1px solid #1f2937;
-  font-size: 12px;
-}
-
-.info-heading {
-  font-size: 11px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: #9ca3af;
-}
-
-.info-value {
-  color: #e5e7eb;
-}
-
-.section-toggle-button {
-  position: relative;
-}
-
-.section-popover {
-  position: absolute;
-  top: 110%;
-  right: 0;
-  z-index: 10;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: #020617;
-  border: 1px solid #1f2937;
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
-  min-width: 220px;
-}
-
-.section-popover-row {
+.ctrl-row {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-bottom: 6px;
 }
 
-.section-popover-row label {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 11px;
-  color: #e5e7eb;
-}
+/* ─── Toggle switch (pill) ───────────────────────────────────────────────────── */
 
-.section-slider {
-  flex: 1;
-}
-
-.section-popover-header {
+.toggle-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 6px;
+}
+
+.toggle-label {
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 500;
+}
+
+.toggle-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  width: 36px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: #cbd5e1;
+  border: none;
+  cursor: pointer;
+  transition: background 0.2s;
+  padding: 0;
+}
+
+.toggle-switch.on {
+  background: #2563eb;
+}
+
+.toggle-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: transform 0.2s;
+}
+
+.toggle-switch.on::after {
+  transform: translateX(16px);
+}
+
+/* ─── Select ─────────────────────────────────────────────────────────────────── */
+
+.ctrl-select {
+  background: #f8fafc;
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  border-radius: 8px;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 8px;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.ctrl-select:hover {
+  border-color: rgba(59, 130, 246, 0.4);
+}
+
+/* ─── Color swatches ─────────────────────────────────────────────────────────── */
+
+.color-swatches {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 0;
+}
+
+.color-swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s;
+  padding: 0;
+}
+
+.color-swatch:hover {
+  transform: scale(1.15);
+}
+
+.color-swatch.selected {
+  box-shadow: 0 0 0 2px white, 0 0 0 4px #3b82f6;
+  transform: scale(1.1);
+}
+
+/* ─── Section planes ─────────────────────────────────────────────────────────── */
+
+.section-axis-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.section-axis-row input[type="checkbox"] {
+  accent-color: #2563eb;
+  width: 13px;
+  height: 13px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.section-axis-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #475569;
+  min-width: 16px;
+}
+
+.section-axis-row input[type="range"] {
+  flex: 1;
+  accent-color: #2563eb;
+  height: 4px;
+  cursor: pointer;
+}
+
+/* ─── Measure result box ─────────────────────────────────────────────────────── */
+
+.measure-result {
+  background: rgba(239, 246, 255, 0.7);
+  border-radius: 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(147, 197, 253, 0.5);
+}
+
+.measure-result-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #3b82f6;
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+
+.measure-result-value {
+  font-family: monospace;
+  font-size: 12px;
+  font-weight: 700;
+  color: #1d4ed8;
+}
+
+/* ─── Snapshots grid ─────────────────────────────────────────────────────────── */
+
+.snapshots-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+/* ─── Model bounds card ──────────────────────────────────────────────────────── */
+
+.dims-card {
+  background: rgba(248, 250, 252, 0.7);
+  border-radius: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+.dims-heading {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #94a3b8;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.dims-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  font-family: 'SF Mono', 'Cascadia Code', monospace;
+}
+
+.dims-axis {
+  display: flex;
+  flex-direction: column;
+}
+
+.dims-axis-label {
+  color: #94a3b8;
+  font-size: 10px;
+}
+
+.dims-axis-value {
+  color: #334155;
   font-size: 11px;
-  color: #9ca3af;
+  font-weight: 700;
+}
+
+.dims-unit {
+  margin-top: 4px;
+  font-size: 10px;
+  text-align: right;
+  color: #94a3b8;
+  text-transform: uppercase;
+  font-weight: 500;
+}
+
+/* ─── Export row ─────────────────────────────────────────────────────────────── */
+
+.export-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.export-status {
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.export-status.ok { color: #16a34a; }
+.export-status.err { color: #dc2626; }
+
+/* ─── File name label ────────────────────────────────────────────────────────── */
+
+.file-name-label {
+  font-size: 11px;
+  color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+/* ─── Section header (collapsible) ──────────────────────────────────────────── */
+
+.ctrl-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.ctrl-section-title {
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 500;
+}
+
+.ctrl-section-arrow {
+  font-size: 9px;
+  color: #94a3b8;
+  transition: transform 0.15s;
+  display: inline-block;
+}
+
+.ctrl-section-arrow.open {
+  transform: rotate(90deg);
+}
+
+/* ─── Assembly overlay (right side) ──────────────────────────────────────────── */
+
+.assembly-overlay {
+  position: absolute;
+  top: 24px;
+  right: 24px;
+  z-index: 10;
+  width: 240px;
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  overflow: hidden;
+  color: #334155;
+}
+
+/* ─── Assembly panel (inside overlay) ────────────────────────────────────────── */
+
+.assembly-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  font-size: 12px;
+}
+
+.assembly-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+  flex-shrink: 0;
+}
+
+.assembly-panel-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+
+.assembly-show-all-btn {
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  line-height: 1.4;
+  font-weight: 500;
+}
+
+.assembly-show-all-btn:hover {
+  background: rgba(241, 245, 249, 0.8);
+  color: #334155;
+}
+
+.assembly-panel-empty {
+  padding: 20px 14px;
+  font-size: 11px;
+  color: #94a3b8;
+  text-align: center;
+  line-height: 1.6;
+}
+
+.assembly-part-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.4) transparent;
+}
+
+.assembly-part-list::-webkit-scrollbar {
+  width: 4px;
+}
+.assembly-part-list::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.4);
+  border-radius: 99px;
+}
+
+.assembly-part-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px 3px 0;
+  cursor: default;
+  border-radius: 6px;
+  margin: 1px 4px;
+  min-width: 0;
+  transition: background 0.1s;
+}
+
+.assembly-part-row:hover {
+  background: rgba(241, 245, 249, 0.8);
+}
+
+.assembly-part-row--selected {
+  background: rgba(37, 99, 235, 0.1);
+}
+
+.assembly-part-row--selected:hover {
+  background: rgba(37, 99, 235, 0.15);
+}
+
+.assembly-part-row--hidden .assembly-part-name {
+  opacity: 0.35;
+}
+
+.assembly-expand-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: #94a3b8;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.assembly-expand-btn:hover {
+  color: #475569;
+  background: rgba(148, 163, 184, 0.15);
+}
+
+.assembly-part-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #334155;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  font-size: 12px;
+}
+
+.assembly-part-name:hover {
+  color: #0f172a;
+}
+
+.assembly-part-count {
+  font-size: 10px;
+  color: #94a3b8;
+}
+
+.assembly-part-eye {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 0;
+  opacity: 0;
+  transition: opacity 0.1s, color 0.1s;
+}
+
+.assembly-part-row:hover .assembly-part-eye,
+.assembly-part-row--hidden .assembly-part-eye {
+  opacity: 1;
+}
+
+.assembly-part-eye:hover {
+  color: #475569;
+  background: rgba(148, 163, 184, 0.15);
 }

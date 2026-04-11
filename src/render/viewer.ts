@@ -1,5 +1,26 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
+import type {
+  CadTopologyResult,
+  ExactEdge,
+  ExactFace,
+  ExactVertex,
+  PickedEntity,
+} from '../core/exact-cad-topology'
+
+export function createStainlessSteelMaterial(): THREE.MeshPhysicalMaterial {
+  // Tuned for a realistic stainless-steel appearance with room-env reflections.
+  return new THREE.MeshPhysicalMaterial({
+    color: 0xbfc7cc, // slightly cool-gray stainless tint
+    metalness: 1.0,
+    roughness: 0.22,
+    clearcoat: 0.5,
+    clearcoatRoughness: 0.03,
+    reflectivity: 0.5,
+    envMapIntensity: 1.2,
+  })
+}
 
 type SectionAxis = 'x' | 'y' | 'z'
 
@@ -12,31 +33,104 @@ export type ViewPreset =
   | 'bottom'
   | 'iso'
 
+export type ExactCadSingleEntityMeasurementMode =
+  | 'edge_length'
+  | 'radius'
+  | 'diameter'
+  | 'arc_length'
+  | 'central_angle'
+
+export type ExactCadEdgeDisplayOptions = {
+  showBoundary: boolean
+  showSharp: boolean
+  showTangent: boolean
+  showSeam: boolean
+}
+
 export type Viewer = {
+  // ─── Geometry loading ────────────────────────────────────────────────────────
   loadMeshFromGeometry: (geom: THREE.BufferGeometry) => void
+  replacePrimaryGeometry: (geom: THREE.BufferGeometry, opts?: { refit?: boolean }) => void
+  loadObject3D: (object: THREE.Object3D, options?: { explodeTopLevel?: boolean }) => void
   clear: () => void
+
+  // ─── Topology (exact CAD data, optional) ─────────────────────────────────────
+  setTopology: (topology: CadTopologyResult | null) => void
+  clearTopology: () => void
+
+  // ─── Camera / view ───────────────────────────────────────────────────────────
   setView: (preset: ViewPreset) => void
   setProjection: (mode: 'perspective' | 'orthographic') => void
-  resize: () => void
-  dispose: () => void
+  fitToScreen: (zoom?: number) => void
+  frameObject: (object: THREE.Object3D) => void
+  getActiveCamera: () => THREE.Camera
+  getRendererSize: () => { width: number; height: number }
+  onViewChanged: (cb: () => void) => () => void
+
+  // ─── Controls ────────────────────────────────────────────────────────────────
+  setControlsEnabled: (enabled: boolean) => void
+  setControlsPreset: (preset: 'orbit3d' | 'dxf2d') => void
+
+  // ─── Part isolation / visibility ─────────────────────────────────────────────
+  isolateObject: (object: THREE.Object3D) => void
+  clearIsolation: () => void
+  showAllParts: () => void
+
+  // ─── Material overrides ───────────────────────────────────────────────────────
+  setMaterialProperties: (colorHex: number, wireframe: boolean, xray: boolean) => void
+  setBackgroundColor: (color: string | number) => void
+
+  // ─── Highlight ───────────────────────────────────────────────────────────────
+  setHighlight: (triangles: number[] | null, location?: { x: number; y: number; z: number }) => void
+
+  // ─── Feature edges ────────────────────────────────────────────────────────────
+  setFeatureEdgesEnabled: (enabled: boolean) => void
+  setExactCadEdgeDisplayOptions: (options: Partial<ExactCadEdgeDisplayOptions>) => void
+
+  // ─── Clipping ────────────────────────────────────────────────────────────────
+  setClipping: (value: number | null) => void
+
+  // ─── Picking ─────────────────────────────────────────────────────────────────
   pickAtScreenPosition: (ndcX: number, ndcY: number) => THREE.Vector3 | null
   autoMeasureHoleAtScreenPosition?: (ndcX: number, ndcY: number) => number | null
-  highlightEdgeAtScreenPosition?: (ndcX: number, ndcY: number) => void
-  clearEdgeHighlight?: () => void
-  measureEdgeAtScreenPosition?: (ndcX: number, ndcY: number) => number | null
+  pickMeshAtScreenPosition: (ndcX: number, ndcY: number) => { point: THREE.Vector3; object: THREE.Object3D } | null
+  pickEdgeAtScreenPosition: (ndcX: number, ndcY: number) => { point: THREE.Vector3; object: THREE.Object3D } | null
+  pickMeasurementEntityAtScreenPosition: (ndcX: number, ndcY: number) => PickedEntity | null
+
+  // ─── Measurement ─────────────────────────────────────────────────────────────
+  highlightEdgeAtScreenPosition: (ndcX: number, ndcY: number, pickedEntity?: PickedEntity | null) => void
+  clearEdgeHighlight: () => void
+  measureEdgeAtScreenPosition: (ndcX: number, ndcY: number, pickedEntity?: PickedEntity | null) => number | null
+  setExactCadMeasurementMode: (mode: ExactCadSingleEntityMeasurementMode) => void
   setMeasurementSegment: (
     p1: THREE.Vector3 | null,
     p2: THREE.Vector3 | null,
-    labelText?: string | null
+    labelText?: string | null,
+    style?: 'linear' | 'diameter' | 'radial' | 'generic' | null,
+    labelAnchor?: THREE.Vector3 | null,
+    segmentAnchor?: THREE.Vector3 | null,
   ) => void
   setMeasurementGraphicsScale: (scale: number) => void
+
+  // ─── Screenshot / export ─────────────────────────────────────────────────────
   getScreenshotDataURL: () => string
   getOutlineSnapshotDataURL: () => string
+  projectWorldToScreen: (point: THREE.Vector3) => { x: number; y: number; visible: boolean }
+
+  // ─── Section planes ──────────────────────────────────────────────────────────
   setSectionEnabled: (axis: SectionAxis, enabled: boolean) => void
   setSectionOffset: (axis: SectionAxis, t: number) => void
   setSectionPlanesVisible: (visible: boolean) => void
   resetSectionPlanes: () => void
+
+  // ─── Overlay / UI helpers ─────────────────────────────────────────────────────
+  setOverlayVisible: (visible: boolean) => void
+  setShowViewCube: (visible: boolean) => void
   attachViewCube?: (canvas: HTMLCanvasElement) => void
+
+  // ─── Lifecycle ───────────────────────────────────────────────────────────────
+  resize: () => void
+  dispose: () => void
 }
 
 export function createViewer(container: HTMLElement): Viewer {
@@ -47,14 +141,21 @@ export function createViewer(container: HTMLElement): Viewer {
   })
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.setSize(container.clientWidth, container.clientHeight)
-  renderer.outputEncoding = THREE.sRGBEncoding
-  renderer.toneMapping = THREE.NoToneMapping
-  renderer.physicallyCorrectLights = false
+  renderer.outputColorSpace = THREE.SRGBColorSpace
+  renderer.toneMapping = THREE.ACESFilmicToneMapping
+  renderer.toneMappingExposure = 1.0
   const scene = new THREE.Scene()
   const backgroundColor = new THREE.Color(0xf7f7f7)
   renderer.setClearColor(backgroundColor, 1)
   scene.background = backgroundColor
   container.appendChild(renderer.domElement)
+
+  // Room environment for physically-based reflections (no external HDR required).
+  const pmremGenerator = new THREE.PMREMGenerator(renderer)
+  pmremGenerator.compileEquirectangularShader?.()
+  const roomEnv = new RoomEnvironment()
+  const envRT = pmremGenerator.fromScene(roomEnv as any, 0.04).texture
+  scene.environment = envRT
 
   const aspect = container.clientWidth / Math.max(1, container.clientHeight)
   const persp = new THREE.PerspectiveCamera(50, aspect, 0.1, 10000)
@@ -77,20 +178,12 @@ export function createViewer(container: HTMLElement): Viewer {
   controls.enableDamping = true
   controls.dampingFactor = 0.1
 
-  const ambientLight = new THREE.AmbientLight(0xffffff, 0.45)
-  scene.add(ambientLight)
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x222244, 0.9)
+  scene.add(hemi)
 
-  const hemiLight = new THREE.HemisphereLight(0xffffff, 0xe0e0e0, 0.3)
-  hemiLight.position.set(0, 1, 0)
-  scene.add(hemiLight)
-
-  const keyLight = new THREE.DirectionalLight(0xffffff, 0.9)
-  keyLight.position.set(5, 8, 10)
-  scene.add(keyLight)
-
-  const fillLight = new THREE.DirectionalLight(0xffffff, 0.4)
-  fillLight.position.set(-8, 4, -6)
-  scene.add(fillLight)
+  const dir = new THREE.DirectionalLight(0xffffff, 1.0)
+  dir.position.set(300, 400, 300)
+  scene.add(dir)
 
   let gridHelper: THREE.GridHelper | null = null
   let axesHelper: THREE.AxesHelper | null = null
@@ -206,12 +299,7 @@ export function createViewer(container: HTMLElement): Viewer {
   const cubeRaycaster = new THREE.Raycaster()
   const cubePointer = new THREE.Vector2()
 
-  const baseMetalMaterial = new THREE.MeshStandardMaterial({
-    color: 0xc5cad3,   // light/mid grey, clearly darker than background
-    metalness: 0.0,    // treat as diffuse solid, not full metal (no environment map)
-    roughness: 0.6,    // soft shading, not glossy
-    flatShading: false,
-  })
+  const baseMetalMaterial = createStainlessSteelMaterial()
 
   function disposeObject(obj: THREE.Object3D) {
     obj.traverse((child: any) => {
@@ -411,7 +499,7 @@ export function createViewer(container: HTMLElement): Viewer {
     line: THREE.LineSegments
   }
 
-  function pickEdgeAtScreenPosition(
+  function _pickEdgeSegmentInternal(
     ndcX: number,
     ndcY: number
   ): EdgePickResult | null {
@@ -477,10 +565,10 @@ export function createViewer(container: HTMLElement): Viewer {
     }
   }
 
-  function highlightEdgeAtScreenPosition(ndcX: number, ndcY: number): void {
+  function highlightEdgeAtScreenPosition(ndcX: number, ndcY: number, _pickedEntity?: PickedEntity | null): void {
     if (!edgeHoverLine || !edgeHoverStartSphere || !edgeHoverEndSphere) return
 
-    const pick = pickEdgeAtScreenPosition(ndcX, ndcY)
+    const pick = _pickEdgeSegmentInternal(ndcX, ndcY)
     if (!pick) {
       edgeHoverLine.visible = false
       edgeHoverStartSphere.visible = false
@@ -545,9 +633,10 @@ export function createViewer(container: HTMLElement): Viewer {
 
   function measureEdgeAtScreenPosition(
     ndcX: number,
-    ndcY: number
+    ndcY: number,
+    _pickedEntity?: PickedEntity | null
   ): number | null {
-    const pick = pickEdgeAtScreenPosition(ndcX, ndcY)
+    const pick = _pickEdgeSegmentInternal(ndcX, ndcY)
     if (!pick) {
       clearEdgeHighlight()
       return null
@@ -759,7 +848,10 @@ export function createViewer(container: HTMLElement): Viewer {
   function setMeasurementSegment(
     p1: THREE.Vector3 | null,
     p2: THREE.Vector3 | null,
-    labelText?: string | null
+    labelText?: string | null,
+    _style?: 'linear' | 'diameter' | 'radial' | 'generic' | null,
+    _labelAnchor?: THREE.Vector3 | null,
+    _segmentAnchor?: THREE.Vector3 | null,
   ) {
     if (p1 === null || p2 === null) {
       if (measureLine) {
@@ -769,22 +861,21 @@ export function createViewer(container: HTMLElement): Viewer {
       }
       if (measureLabel) {
         scene.remove(measureLabel)
-        if (measureLabel.material.map) {
-          measureLabel.material.map.dispose()
-        }
-        measureLabel.material.dispose()
+        const lmat = measureLabel.material as THREE.SpriteMaterial
+        if (lmat.map) lmat.map.dispose()
+        lmat.dispose()
         measureLabel = null
       }
       if (measureArrow1) {
         scene.remove(measureArrow1)
         measureArrow1.geometry.dispose()
-        measureArrow1.material.dispose()
+        ;(measureArrow1.material as THREE.Material).dispose()
         measureArrow1 = null
       }
       if (measureArrow2) {
         scene.remove(measureArrow2)
         measureArrow2.geometry.dispose()
-        measureArrow2.material.dispose()
+        ;(measureArrow2.material as THREE.Material).dispose()
         measureArrow2 = null
       }
       return
@@ -800,22 +891,21 @@ export function createViewer(container: HTMLElement): Viewer {
       }
       if (measureLabel) {
         scene.remove(measureLabel)
-        if (measureLabel.material.map) {
-          measureLabel.material.map.dispose()
-        }
-        measureLabel.material.dispose()
+        const lmat = measureLabel.material as THREE.SpriteMaterial
+        if (lmat.map) lmat.map.dispose()
+        lmat.dispose()
         measureLabel = null
       }
       if (measureArrow1) {
         scene.remove(measureArrow1)
         measureArrow1.geometry.dispose()
-        measureArrow1.material.dispose()
+        ;(measureArrow1.material as THREE.Material).dispose()
         measureArrow1 = null
       }
       if (measureArrow2) {
         scene.remove(measureArrow2)
         measureArrow2.geometry.dispose()
-        measureArrow2.material.dispose()
+        ;(measureArrow2.material as THREE.Material).dispose()
         measureArrow2 = null
       }
       return
@@ -913,10 +1003,9 @@ export function createViewer(container: HTMLElement): Viewer {
     if (labelText == null) {
       if (measureLabel) {
         scene.remove(measureLabel)
-        if (measureLabel.material.map) {
-          measureLabel.material.map.dispose()
-        }
-        measureLabel.material.dispose()
+        const lmat = measureLabel.material as THREE.SpriteMaterial
+        if (lmat.map) lmat.map.dispose()
+        lmat.dispose()
         measureLabel = null
       }
       return
@@ -1384,7 +1473,7 @@ export function createViewer(container: HTMLElement): Viewer {
 
     activeCamera.position.copy(pos)
     activeCamera.lookAt(center)
-    activeCamera.updateProjectionMatrix()
+    ;(activeCamera as THREE.PerspectiveCamera).updateProjectionMatrix?.()
 
     if (controls) {
       controls.target.copy(center)
@@ -1643,9 +1732,361 @@ export function createViewer(container: HTMLElement): Viewer {
   window.addEventListener('resize', onResize)
   render()
 
+  // ─── New state ────────────────────────────────────────────────────────────────
+  let _topology: CadTopologyResult | null = null
+  let _exactMeasurementMode: ExactCadSingleEntityMeasurementMode = 'edge_length'
+  const _hiddenObjects = new Set<THREE.Object3D>()
+  let _featureEdgesEnabled = true
+  let _edgeDisplayOptions: ExactCadEdgeDisplayOptions = {
+    showBoundary: true,
+    showSharp: true,
+    showTangent: false,
+    showSeam: false,
+  }
+  let _highlightMesh: THREE.Mesh | null = null
+  const _viewChangeCallbacks = new Set<() => void>()
+  let _viewCubeVisible = true
+
+  // fire whenever the camera moves
+  controls.addEventListener('change', () => {
+    _viewChangeCallbacks.forEach((cb) => cb())
+  })
+
+  // ─── Topology ─────────────────────────────────────────────────────────────────
+  function setTopology(topology: CadTopologyResult | null) {
+    _topology = topology
+  }
+
+  function clearTopology() {
+    _topology = null
+  }
+
+  // ─── Geometry loading (Object3D + replace) ────────────────────────────────────
+  function loadObject3D(object: THREE.Object3D, options?: { explodeTopLevel?: boolean }) {
+    // clear existing, preserving internal hover helpers
+    const helpers = [edgeHoverLine, edgeHoverStartSphere, edgeHoverEndSphere]
+    modelRoot.children.slice().forEach((child: THREE.Object3D) => {
+      if (!helpers.includes(child as any)) {
+        disposeObject(child)
+        modelRoot.remove(child)
+      }
+    })
+    edgePickables.length = 0
+    _hiddenObjects.clear()
+
+    if (options?.explodeTopLevel && object.children.length > 0) {
+      object.children.slice().forEach((child: THREE.Object3D) => modelRoot.add(child))
+    } else {
+      modelRoot.add(object)
+    }
+
+    const finalBox = new THREE.Box3().setFromObject(modelRoot)
+    if (!finalBox.isEmpty()) {
+      const size = new THREE.Vector3()
+      const center = new THREE.Vector3()
+      finalBox.getSize(size)
+      finalBox.getCenter(center)
+      sectionBounds.min.copy(finalBox.min)
+      sectionBounds.max.copy(finalBox.max)
+      sectionBounds.center.copy(center)
+      ;(['x', 'y', 'z'] as SectionAxis[]).forEach((axis) => {
+        sectionPlanes[axis].constant = -sectionPlanes[axis].normal.dot(center)
+      })
+      createOrUpdateSectionPlaneMeshes(size, center)
+      resetSectionPlanes()
+      fitCameraToBox(finalBox, 1.3)
+    }
+  }
+
+  function replacePrimaryGeometry(geom: THREE.BufferGeometry, opts?: { refit?: boolean }) {
+    if (!geom.getAttribute('normal')) geom.computeVertexNormals()
+    let firstMesh: THREE.Mesh | null = null
+    modelRoot.traverse((node: THREE.Object3D) => {
+      if (firstMesh) return
+      if ((node as THREE.Mesh).isMesh) firstMesh = node as THREE.Mesh
+    })
+    const targetMesh = firstMesh as THREE.Mesh | null
+    if (!targetMesh) {
+      loadMeshFromGeometry(geom)
+      return
+    }
+    targetMesh.geometry.dispose()
+    targetMesh.geometry = geom
+    if (opts?.refit !== false) {
+      fitCameraToBox(new THREE.Box3().setFromObject(modelRoot), 1.3)
+    }
+  }
+
+  // ─── Camera / view ────────────────────────────────────────────────────────────
+  function fitToScreen(zoom = 1.0) {
+    const box = new THREE.Box3().setFromObject(modelRoot)
+    if (!box.isEmpty()) fitCameraToBox(box, 1.3 / zoom)
+  }
+
+  function frameObject(object: THREE.Object3D) {
+    const box = new THREE.Box3().setFromObject(object)
+    if (!box.isEmpty()) fitCameraToBox(box, 1.3)
+  }
+
+  function getActiveCamera(): THREE.Camera {
+    return activeCamera
+  }
+
+  function getRendererSize(): { width: number; height: number } {
+    return { width: container.clientWidth, height: container.clientHeight }
+  }
+
+  function onViewChanged(cb: () => void): () => void {
+    _viewChangeCallbacks.add(cb)
+    return () => _viewChangeCallbacks.delete(cb)
+  }
+
+  // ─── Controls ─────────────────────────────────────────────────────────────────
+  function setControlsEnabled(enabled: boolean) {
+    controls.enabled = enabled
+  }
+
+  function setControlsPreset(preset: 'orbit3d' | 'dxf2d') {
+    if (preset === 'dxf2d') {
+      controls.enableRotate = false
+      controls.enablePan = true
+      controls.mouseButtons = {
+        LEFT: THREE.MOUSE.PAN,
+        MIDDLE: THREE.MOUSE.DOLLY,
+        RIGHT: THREE.MOUSE.PAN,
+      }
+    } else {
+      controls.enableRotate = true
+      controls.enablePan = true
+      controls.mouseButtons = {
+        LEFT: THREE.MOUSE.ROTATE,
+        MIDDLE: THREE.MOUSE.DOLLY,
+        RIGHT: THREE.MOUSE.PAN,
+      }
+    }
+  }
+
+  // ─── Part isolation / visibility ─────────────────────────────────────────────
+  function isolateObject(object: THREE.Object3D) {
+    _hiddenObjects.clear()
+    const helpers = [edgeHoverLine, edgeHoverStartSphere, edgeHoverEndSphere]
+    modelRoot.children.forEach((child: THREE.Object3D) => {
+      if (helpers.includes(child as any)) return
+      if (child === object) return
+      child.visible = false
+      _hiddenObjects.add(child)
+    })
+    object.visible = true
+  }
+
+  function clearIsolation() {
+    _hiddenObjects.forEach((obj) => { obj.visible = true })
+    _hiddenObjects.clear()
+  }
+
+  function showAllParts() {
+    modelRoot.traverse((node: THREE.Object3D) => { node.visible = true })
+    _hiddenObjects.clear()
+  }
+
+  // ─── Material overrides ──────────────────────────────────────────────────────
+  function setMaterialProperties(colorHex: number, wireframe: boolean, xray: boolean) {
+    modelRoot.traverse((node: THREE.Object3D) => {
+      const mesh = node as THREE.Mesh
+      if (!mesh.isMesh) return
+      const apply = (mat: THREE.Material) => {
+        const m = mat as THREE.MeshStandardMaterial
+        if (m.color) m.color.setHex(colorHex)
+        m.wireframe = wireframe
+        if (xray) {
+          m.transparent = true
+          m.opacity = 0.25
+          m.depthWrite = false
+        } else {
+          m.transparent = false
+          m.opacity = 1.0
+          m.depthWrite = true
+        }
+        m.needsUpdate = true
+      }
+      if (Array.isArray(mesh.material)) mesh.material.forEach(apply)
+      else if (mesh.material) apply(mesh.material)
+    })
+  }
+
+  function setBackgroundColor(color: string | number) {
+    const c = new THREE.Color(color)
+    renderer.setClearColor(c, 1)
+    scene.background = c
+  }
+
+  // ─── Triangle highlight ──────────────────────────────────────────────────────
+  function setHighlight(triangles: number[] | null, _location?: { x: number; y: number; z: number }) {
+    if (_highlightMesh) {
+      scene.remove(_highlightMesh)
+      _highlightMesh.geometry.dispose()
+      _highlightMesh = null
+    }
+    if (!triangles || triangles.length === 0) return
+
+    const positions: number[] = []
+    let triOffset = 0
+
+    modelRoot.traverse((node: THREE.Object3D) => {
+      const mesh = node as THREE.Mesh
+      if (!mesh.isMesh || !mesh.geometry) return
+      const geom = mesh.geometry
+      const posAttr = geom.getAttribute('position') as THREE.BufferAttribute
+      if (!posAttr) return
+      const index = geom.getIndex()
+      const triCount = index ? index.count / 3 : posAttr.count / 3
+
+      for (const triIndex of triangles) {
+        const local = triIndex - triOffset
+        if (local < 0 || local >= triCount) continue
+        const i0 = index ? index.getX(local * 3)     : local * 3
+        const i1 = index ? index.getX(local * 3 + 1) : local * 3 + 1
+        const i2 = index ? index.getX(local * 3 + 2) : local * 3 + 2
+        const p0 = new THREE.Vector3(posAttr.getX(i0), posAttr.getY(i0), posAttr.getZ(i0)).applyMatrix4(mesh.matrixWorld)
+        const p1 = new THREE.Vector3(posAttr.getX(i1), posAttr.getY(i1), posAttr.getZ(i1)).applyMatrix4(mesh.matrixWorld)
+        const p2 = new THREE.Vector3(posAttr.getX(i2), posAttr.getY(i2), posAttr.getZ(i2)).applyMatrix4(mesh.matrixWorld)
+        positions.push(p0.x, p0.y, p0.z, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z)
+      }
+      triOffset += triCount
+    })
+
+    if (!positions.length) return
+    const geom = new THREE.BufferGeometry()
+    geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0x0088ff,
+      transparent: true,
+      opacity: 0.5,
+      side: THREE.DoubleSide,
+      depthTest: false,
+      depthWrite: false,
+    })
+    _highlightMesh = new THREE.Mesh(geom, mat)
+    _highlightMesh.renderOrder = 998
+    scene.add(_highlightMesh)
+  }
+
+  // ─── Feature edges ────────────────────────────────────────────────────────────
+  function setFeatureEdgesEnabled(enabled: boolean) {
+    _featureEdgesEnabled = enabled
+    modelRoot.traverse((node: THREE.Object3D) => {
+      if ((node.userData as any).__isFeatureEdge) node.visible = enabled
+    })
+  }
+
+  function setExactCadEdgeDisplayOptions(options: Partial<ExactCadEdgeDisplayOptions>) {
+    Object.assign(_edgeDisplayOptions, options)
+    modelRoot.traverse((node: THREE.Object3D) => {
+      const ud = node.userData as any
+      if (ud.__isTangentEdge) node.visible = _featureEdgesEnabled && _edgeDisplayOptions.showTangent
+      if (ud.__isSeamEdge)    node.visible = _featureEdgesEnabled && _edgeDisplayOptions.showSeam
+    })
+  }
+
+  // ─── Clipping ─────────────────────────────────────────────────────────────────
+  function setClipping(value: number | null) {
+    if (value === null) {
+      setSectionEnabled('y', false)
+    } else {
+      setSectionEnabled('y', true)
+      setSectionOffset('y', value)
+    }
+  }
+
+  // ─── Picking ──────────────────────────────────────────────────────────────────
+  function pickMeshAtScreenPosition(ndcX: number, ndcY: number): { point: THREE.Vector3; object: THREE.Object3D } | null {
+    pointer.set(ndcX, ndcY)
+    raycaster.setFromCamera(pointer, activeCamera)
+    const hits = raycaster.intersectObject(modelRoot, true)
+    if (!hits.length) return null
+    return { point: hits[0].point.clone(), object: hits[0].object }
+  }
+
+  function pickEdgeAtScreenPosition(ndcX: number, ndcY: number): { point: THREE.Vector3; object: THREE.Object3D } | null {
+    const result = _pickEdgeSegmentInternal(ndcX, ndcY)
+    if (!result) return null
+    const point = new THREE.Vector3().addVectors(result.start, result.end).multiplyScalar(0.5)
+    point.applyMatrix4(modelRoot.matrixWorld)
+    return { point, object: result.line }
+  }
+
+  function pickMeasurementEntityAtScreenPosition(ndcX: number, ndcY: number): PickedEntity | null {
+    // Try line picking first (works with or without exact topology)
+    const edgePick = _pickEdgeSegmentInternal(ndcX, ndcY)
+    if (edgePick) {
+      const pt = new THREE.Vector3().addVectors(edgePick.start, edgePick.end).multiplyScalar(0.5)
+      pt.applyMatrix4(modelRoot.matrixWorld)
+      // Find the edge in topology if available
+      if (_topology) {
+        const startW = edgePick.start.clone().applyMatrix4(modelRoot.matrixWorld)
+        const endW = edgePick.end.clone().applyMatrix4(modelRoot.matrixWorld)
+        // Match against topology edges by proximity of sample positions
+        let bestEdge: (typeof _topology.edges)[0] | null = null
+        let bestDist = Infinity
+        for (const edge of _topology.edges) {
+          const sp = edge.samplePositions
+          if (sp.length < 6) continue
+          const eStart = new THREE.Vector3(sp[0], sp[1], sp[2])
+          const eEnd = new THREE.Vector3(sp[sp.length - 3], sp[sp.length - 2], sp[sp.length - 1])
+          const d = Math.min(
+            eStart.distanceTo(startW) + eEnd.distanceTo(endW),
+            eStart.distanceTo(endW) + eEnd.distanceTo(startW),
+          )
+          if (d < bestDist) { bestDist = d; bestEdge = edge }
+        }
+        if (bestEdge) {
+          return { kind: 'edge', partId: bestEdge.partId, edgeId: bestEdge.id, point: pt }
+        }
+      }
+      // Fallback: synthetic edge entity
+      return { kind: 'edge', partId: null, edgeId: '__approx__', point: pt }
+    }
+    // Try mesh face pick
+    const meshPick = pickMeshAtScreenPosition(ndcX, ndcY)
+    if (meshPick) {
+      const ud = (meshPick.object.userData as any)
+      const faceId = ud.__cadFaceId ?? '__approx_face__'
+      const partId = ud.__cadPartId ?? null
+      return { kind: 'face', partId, faceId, point: meshPick.point }
+    }
+    return null
+  }
+
+  // ─── Exact measurement mode ───────────────────────────────────────────────────
+  function setExactCadMeasurementMode(mode: ExactCadSingleEntityMeasurementMode) {
+    _exactMeasurementMode = mode
+  }
+
+  // ─── Project world → screen ───────────────────────────────────────────────────
+  function projectWorldToScreen(point: THREE.Vector3): { x: number; y: number; visible: boolean } {
+    const ndc = point.clone().project(activeCamera)
+    const w = container.clientWidth
+    const h = container.clientHeight
+    const x = (ndc.x * 0.5 + 0.5) * w
+    const y = (-ndc.y * 0.5 + 0.5) * h
+    const visible = ndc.z >= -1 && ndc.z <= 1 && x >= 0 && x <= w && y >= 0 && y <= h
+    return { x, y, visible }
+  }
+
+  // ─── View cube visibility ─────────────────────────────────────────────────────
+  function setShowViewCube(visible: boolean) {
+    _viewCubeVisible = visible
+    if (cubeRenderer) {
+      cubeRenderer.domElement.style.display = visible ? '' : 'none'
+    }
+  }
+
   function dispose() {
     window.removeEventListener('resize', onResize)
     renderer.setAnimationLoop(null)
+    try { envRT.dispose() } catch { /* ignore */ }
+    try { pmremGenerator.dispose() } catch { /* ignore */ }
+    try { roomEnv.traverse((o: any) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose?.() }) } catch { /* ignore */ }
     renderer.dispose()
     container.removeChild(renderer.domElement)
     if (cubeRenderer) {
@@ -1667,25 +2108,67 @@ export function createViewer(container: HTMLElement): Viewer {
   }
 
   return {
+    // Geometry loading
     loadMeshFromGeometry,
+    replacePrimaryGeometry,
+    loadObject3D,
     clear,
+    // Topology
+    setTopology,
+    clearTopology,
+    // Camera / view
     setView,
     setProjection,
-    resize,
-    dispose,
+    fitToScreen,
+    frameObject,
+    getActiveCamera,
+    getRendererSize,
+    onViewChanged,
+    // Controls
+    setControlsEnabled,
+    setControlsPreset,
+    // Part isolation
+    isolateObject,
+    clearIsolation,
+    showAllParts,
+    // Materials
+    setMaterialProperties,
+    setBackgroundColor,
+    // Highlight
+    setHighlight,
+    // Feature edges
+    setFeatureEdgesEnabled,
+    setExactCadEdgeDisplayOptions,
+    // Clipping
+    setClipping,
+    // Picking
     pickAtScreenPosition,
     autoMeasureHoleAtScreenPosition,
+    pickMeshAtScreenPosition,
+    pickEdgeAtScreenPosition,
+    pickMeasurementEntityAtScreenPosition,
+    // Measurement
     highlightEdgeAtScreenPosition,
     clearEdgeHighlight,
     measureEdgeAtScreenPosition,
+    setExactCadMeasurementMode,
     setMeasurementSegment,
     setMeasurementGraphicsScale,
+    // Screenshot / export
     getScreenshotDataURL,
     getOutlineSnapshotDataURL,
+    projectWorldToScreen,
+    // Section planes
     setSectionEnabled,
     setSectionOffset,
     setSectionPlanesVisible,
     resetSectionPlanes,
-    attachViewCube
+    // Overlay / UI
+    setOverlayVisible,
+    setShowViewCube,
+    attachViewCube,
+    // Lifecycle
+    resize,
+    dispose,
   }
 }
