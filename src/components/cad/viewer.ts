@@ -7178,45 +7178,79 @@ export function createViewer(container: HTMLElement): Viewer {
   function setView(
     preset: "top" | "front" | "right" | "iso" | "bottom" | "left" | "back",
   ) {
-    const target = controls.target.clone();
-    const rawDist = (activeCamera as any).position?.distanceTo?.(target);
-    const dist =
-      Number.isFinite(rawDist) && rawDist > 1e-3
-        ? rawDist
+    const isFiniteVec3 = (value: THREE.Vector3): boolean =>
+      Number.isFinite(value.x) &&
+      Number.isFinite(value.y) &&
+      Number.isFinite(value.z);
+
+    const resolveStableOrbitTarget = (): THREE.Vector3 => {
+      const modelBoundsBox = new THREE.Box3();
+      let hasModelBounds = false;
+      for (const child of getTopLevelModelChildren()) {
+        const childBounds = new THREE.Box3().setFromObject(child);
+        if (childBounds.isEmpty()) continue;
+        if (!hasModelBounds) {
+          modelBoundsBox.copy(childBounds);
+          hasModelBounds = true;
+        } else {
+          modelBoundsBox.union(childBounds);
+        }
+      }
+      if (hasModelBounds) {
+        const center = modelBoundsBox.getCenter(new THREE.Vector3());
+        if (isFiniteVec3(center)) return center;
+      }
+      const fallbackTarget = controls.target.clone();
+      return isFiniteVec3(fallbackTarget)
+        ? fallbackTarget
+        : new THREE.Vector3(0, 0, 0);
+    };
+
+    const target = resolveStableOrbitTarget();
+    const rawRadius = activeCamera.position.distanceTo(target);
+    const radius =
+      Number.isFinite(rawRadius) && rawRadius > 1e-3
+        ? rawRadius
         : Math.max(modelDiagonal * 0.6, 300);
-    // Keep top/bottom almost exact while avoiding OrbitControls pole singularities.
-    const poleEpsilon = Math.max(dist * 0.0025, 0.25);
-    const up = getViewerViewUpVector(preset);
-    const nextPos = new THREE.Vector3();
-    switch (preset) {
-      case "top":
-        nextPos.copy(target).add(new THREE.Vector3(poleEpsilon, dist, 0));
-        break;
-      case "bottom":
-        nextPos.copy(target).add(new THREE.Vector3(poleEpsilon, -dist, 0));
-        break;
-      case "front":
-        nextPos.copy(target).add(new THREE.Vector3(0, 0, dist));
-        break;
-      case "back":
-        nextPos.copy(target).add(new THREE.Vector3(0, 0, -dist));
-        break;
-      case "right":
-        nextPos.copy(target).add(new THREE.Vector3(dist, 0, 0));
-        break;
-      case "left":
-        nextPos.copy(target).add(new THREE.Vector3(-dist, 0, 0));
-        break;
-      case "iso":
-      default:
-        nextPos.copy(target).add(new THREE.Vector3(dist, dist * 0.6, dist));
-        break;
+
+    // Top/bottom use an intentional off-axis component to avoid OrbitControls pole singularities.
+    const direction = (() => {
+      switch (preset) {
+        case "top":
+          return new THREE.Vector3(0.22, 1, 0.18);
+        case "bottom":
+          return new THREE.Vector3(0.22, -1, -0.18);
+        case "front":
+          return new THREE.Vector3(0, 0, 1);
+        case "back":
+          return new THREE.Vector3(0, 0, -1);
+        case "right":
+          return new THREE.Vector3(1, 0, 0);
+        case "left":
+          return new THREE.Vector3(-1, 0, 0);
+        case "iso":
+        default:
+          return new THREE.Vector3(1, 0.6, 1);
+      }
+    })();
+    if (direction.lengthSq() <= 1e-12) {
+      direction.set(1, 0.6, 1);
     }
-    activeCamera.position.copy(nextPos);
-    activeCamera.up.copy(up);
-    (activeCamera as any).updateProjectionMatrix?.();
-    // Do not call fitToScreen here — keep the exact direction set by the preset.
-    // The user may call fitToScreen separately; controls should reflect new position.
+    direction.normalize();
+    const up = getViewerViewUpVector(preset);
+
+    const syncCameraToPreset = (camera: THREE.Camera) => {
+      camera.position.copy(target).addScaledVector(direction, radius);
+      camera.up.copy(up);
+      camera.lookAt(target);
+      (camera as any).updateProjectionMatrix?.();
+      camera.updateMatrixWorld(true);
+    };
+
+    syncCameraToPreset(persp);
+    syncCameraToPreset(ortho);
+
+    // Keep controls and active camera state fully synchronized after preset snaps.
     controls.target.copy(target);
     controls.update();
     requestUpdateSilhouette?.();
