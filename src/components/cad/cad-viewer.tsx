@@ -238,15 +238,9 @@ function cloneDisplayPartRoot(
   return partObject;
 }
 
-function buildDisplayAssemblySnapshotFromParts(
+function buildDisplayAssemblySnapshotFromSource(
   session: ModelSession,
-  loadedParts: LoadedPart[],
 ): DisplayAssemblySnapshot | null {
-  const loadedPartByKey = new Map<string, LoadedPart>();
-  for (const part of loadedParts) {
-    loadedPartByKey.set(part.key, part);
-  }
-
   const root = new THREE.Group();
   root.name =
     session.sourceObject?.name ||
@@ -255,9 +249,9 @@ function buildDisplayAssemblySnapshotFromParts(
   const partRoots = new Map<string, THREE.Object3D>();
 
   for (const descriptor of session.partMap.values()) {
-    const loadedPart = loadedPartByKey.get(descriptor.key);
-    if (!loadedPart) continue;
-    const partRoot = cloneDisplayPartRoot(loadedPart.object, descriptor);
+    const sourcePart = resolveSourcePartObject(session, descriptor.key);
+    if (!sourcePart) continue;
+    const partRoot = cloneDisplayPartRoot(sourcePart, descriptor);
     root.add(partRoot);
     partRoots.set(descriptor.key, partRoot);
   }
@@ -1115,11 +1109,23 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       setModelSession(next);
     }
 
+    function ensureDisplayAssemblySnapshot(
+      session: ModelSession,
+    ): DisplayAssemblySnapshot | null {
+      const existingSnapshot = displayAssemblySnapshotRef.current;
+      if (existingSnapshot && existingSnapshot.partRoots.size > 0) {
+        return existingSnapshot;
+      }
+      const rebuiltSnapshot = buildDisplayAssemblySnapshotFromSource(session);
+      displayAssemblySnapshotRef.current = rebuiltSnapshot;
+      return rebuiltSnapshot;
+    }
+
     function restoreAssemblyView(session: ModelSession): boolean {
       const viewer = viewerRef.current;
       if (!viewer) return false;
 
-      const snapshot = displayAssemblySnapshotRef.current;
+      const snapshot = ensureDisplayAssemblySnapshot(session);
       if (!snapshot) return false;
       const assemblyDisplay = cloneAssemblyDisplayFromSnapshot(
         session,
@@ -1155,14 +1161,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
         return;
       }
 
-      const latestSnapshot = buildDisplayAssemblySnapshotFromParts(
-        session,
-        parts,
-      );
-      if (latestSnapshot) {
-        displayAssemblySnapshotRef.current = latestSnapshot;
-      }
-      const snapshot = displayAssemblySnapshotRef.current;
+      const snapshot = ensureDisplayAssemblySnapshot(session);
       if (!snapshot) {
         setPartExportMessage(
           "Assembly snapshot is unavailable. Reload the file in Assembly parts mode and try again.",
@@ -1214,7 +1213,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
         activeFileKeyRef.current = fileKey;
         displayAssemblySnapshotRef.current = null;
         let loadedAssemblySession: ModelSession | null = null;
-        let loadedAssemblyParts: LoadedPart[] = [];
+        let loadedAssemblyPartCount = 0;
         const usePartsMode = assemblyMode === "parts";
 
         setPartMenu(null);
@@ -1393,7 +1392,9 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                 });
                 setViewerMode({ kind: "assembly" });
                 loadedAssemblySession = session;
-                loadedAssemblyParts = assemblyDisplay.parts;
+                loadedAssemblyPartCount = assemblyDisplay.parts.length;
+                displayAssemblySnapshotRef.current =
+                  buildDisplayAssemblySnapshotFromSource(session);
                 markStage("cad_parts_mode_loaded");
               } else {
                 const shouldCacheFormedGeometry = showFlatParts === true;
@@ -1478,7 +1479,9 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
               });
               setViewerMode({ kind: "assembly" });
               loadedAssemblySession = session;
-              loadedAssemblyParts = assemblyDisplay.parts;
+              loadedAssemblyPartCount = assemblyDisplay.parts.length;
+              displayAssemblySnapshotRef.current =
+                buildDisplayAssemblySnapshotFromSource(session);
               markStage("mesh_parts_mode_loaded");
             } else {
               setCadTopologyContext(null);
@@ -1540,12 +1543,13 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
           if (zoom !== 1) {
             viewerRef.current?.fitToScreen(zoom);
           }
-          if (loadedAssemblySession && loadedAssemblyParts.length > 0) {
+          if (
+            loadedAssemblySession &&
+            loadedAssemblyPartCount > 0 &&
+            !displayAssemblySnapshotRef.current
+          ) {
             displayAssemblySnapshotRef.current =
-              buildDisplayAssemblySnapshotFromParts(
-                loadedAssemblySession,
-                loadedAssemblyParts,
-              );
+              buildDisplayAssemblySnapshotFromSource(loadedAssemblySession);
           }
           perfLog("load_complete", {
             ext,
@@ -1553,7 +1557,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
             profile: activeProfile,
             totalMs: Number((performance.now() - loadStartedAt).toFixed(2)),
             stageTimes,
-            partCount: loadedAssemblyParts.length,
+            partCount: loadedAssemblyPartCount,
           });
         } catch (err: any) {
           if (isStale()) return;
