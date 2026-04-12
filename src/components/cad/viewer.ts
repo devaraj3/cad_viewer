@@ -7179,50 +7179,45 @@ export function createViewer(container: HTMLElement): Viewer {
     preset: "top" | "front" | "right" | "iso" | "bottom" | "left" | "back",
   ) {
     const target = controls.target.clone();
-    const dist = (activeCamera as any).position?.distanceTo?.(target) ?? 300;
+    const rawDist = (activeCamera as any).position?.distanceTo?.(target);
+    const dist =
+      Number.isFinite(rawDist) && rawDist > 1e-3
+        ? rawDist
+        : Math.max(modelDiagonal * 0.6, 300);
+    // Keep top/bottom almost exact while avoiding OrbitControls pole singularities.
+    const poleEpsilon = Math.max(dist * 0.0025, 0.25);
     const up = getViewerViewUpVector(preset);
+    const nextPos = new THREE.Vector3();
     switch (preset) {
       case "top":
-        (activeCamera as THREE.PerspectiveCamera).position.copy(
-          target.clone().add(new THREE.Vector3(0, dist, 0)),
-        );
+        nextPos.copy(target).add(new THREE.Vector3(poleEpsilon, dist, 0));
         break;
       case "bottom":
-        (activeCamera as THREE.PerspectiveCamera).position.copy(
-          target.clone().add(new THREE.Vector3(0, -dist, 0)),
-        );
+        nextPos.copy(target).add(new THREE.Vector3(poleEpsilon, -dist, 0));
         break;
       case "front":
-        (activeCamera as THREE.PerspectiveCamera).position.copy(
-          target.clone().add(new THREE.Vector3(0, 0, dist)),
-        );
+        nextPos.copy(target).add(new THREE.Vector3(0, 0, dist));
         break;
       case "back":
-        (activeCamera as THREE.PerspectiveCamera).position.copy(
-          target.clone().add(new THREE.Vector3(0, 0, -dist)),
-        );
+        nextPos.copy(target).add(new THREE.Vector3(0, 0, -dist));
         break;
       case "right":
-        (activeCamera as THREE.PerspectiveCamera).position.copy(
-          target.clone().add(new THREE.Vector3(dist, 0, 0)),
-        );
+        nextPos.copy(target).add(new THREE.Vector3(dist, 0, 0));
         break;
       case "left":
-        (activeCamera as THREE.PerspectiveCamera).position.copy(
-          target.clone().add(new THREE.Vector3(-dist, 0, 0)),
-        );
+        nextPos.copy(target).add(new THREE.Vector3(-dist, 0, 0));
         break;
       case "iso":
       default:
-        (activeCamera as THREE.PerspectiveCamera).position.copy(
-          target.clone().add(new THREE.Vector3(dist, dist * 0.6, dist)),
-        );
+        nextPos.copy(target).add(new THREE.Vector3(dist, dist * 0.6, dist));
         break;
     }
+    activeCamera.position.copy(nextPos);
     activeCamera.up.copy(up);
-    (activeCamera as THREE.PerspectiveCamera).updateProjectionMatrix?.();
+    (activeCamera as any).updateProjectionMatrix?.();
     // Do not call fitToScreen here — keep the exact direction set by the preset.
     // The user may call fitToScreen separately; controls should reflect new position.
+    controls.target.copy(target);
     controls.update();
     requestUpdateSilhouette?.();
     scheduleExactCurveFeatureResample("set_view");
