@@ -1,0 +1,605 @@
+.cad-controls-overlay {
+  position: absolute;
+  top: 24px;
+  left: 24px;
+  z-index: 10;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  pointer-events: none;
+}
+
+.cad-controls-overlay > * {
+  pointer-events: auto;
+}
+
+.cad-controls-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 220px;
+  max-width: 250px;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.1);
+  backdrop-filter: blur(10px);
+  color: #475569;
+  font-size: 13px;
+}
+
+.cad-divider {
+  height: 1px;
+  background: rgba(148, 163, 184, 0.35);
+}
+
+.cad-section {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.cad-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cad-row--between {
+  justify-content: space-between;
+}
+
+.cad-row--two {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.cad-row--three {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 6px;
+}
+
+.cad-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+}
+
+.cad-btn {
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.6);
+  background: #f8fafc;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.25;
+  padding: 7px 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.cad-btn:hover {
+  border-color: rgba(59, 130, 246, 0.4);
+  background: #ffffff;
+  color: #1d4ed8;
+}
+
+.cad-btn--wide {
+  width: 100%;
+}
+
+.cad-btn--small {
+  font-size: 11px;
+  padding: 6px 8px;
+}
+
+.cad-btn--flex {
+  flex: 1;
+}
+
+.cad-btn--neutral {
+  border-color: rgba(148, 163, 184, 0.45);
+  background: #f8fafc;
+  color: #475569;
+}
+
+.cad-btn--active {
+  border-color: #2563eb;
+  background: #2563eb;
+  color: #ffffff;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
+}
+
+.cad-btn--disabled,
+.cad-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.cad-select,
+.cad-input {
+  border-radius: 7px;
+  border: 1px solid rgba(148, 163, 184, 0.55);
+  background: #f8fafc;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 8px;
+  outline: none;
+}
+
+.cad-select:hover,
+.cad-input:hover,
+.cad-select:focus,
+.cad-input:focus {
+  border-color: #60a5fa;
+}
+
+.cad-input {
+  width: 84px;
+  text-align: right;
+}
+
+.cad-toggle {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: #cbd5e1;
+  padding: 0;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.cad-toggle--on {
+  background: #2563eb;
+}
+
+.cad-toggle--disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.cad-toggle__thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 0.2s ease;
+}
+
+.cad-toggle--on .cad-toggle__thumb {
+  transform: translateX(16px);
+}
+
+.cad-color-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+}
+
+.cad-color-swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  cursor: pointer;
+  transition: transform 0.15s ease;
+}
+
+.cad-color-swatch:hover {
+  transform: scale(1.08);
+}
+
+.cad-color-swatch--active {
+  box-shadow: 0 0 0 2px #ffffff, 0 0 0 4px #3b82f6;
+}
+
+.cad-range-wrap {
+  padding-top: 4px;
+}
+
+.cad-range {
+  width: 100%;
+  accent-color: #2563eb;
+}
+
+.cad-info-box {
+  border-radius: 8px;
+  border: 1px solid rgba(147, 197, 253, 0.5);
+  background: rgba(239, 246, 255, 0.85);
+  padding: 8px;
+}
+
+.cad-info-label {
+  margin-bottom: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #2563eb;
+}
+
+.cad-info-value {
+  font-family: "SF Mono", "Menlo", "Consolas", monospace;
+  font-size: 12px;
+  font-weight: 700;
+  color: #1d4ed8;
+}
+
+.cad-status {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.cad-status--info {
+  color: #2563eb;
+}
+
+.cad-status--error {
+  color: #e11d48;
+}
+
+.cad-debug {
+  font-size: 10px;
+  color: #64748b;
+  font-family: "SF Mono", "Menlo", "Consolas", monospace;
+}
+
+.cad-dims-card {
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  background: rgba(248, 250, 252, 0.8);
+  padding: 10px;
+}
+
+.cad-dims-title {
+  margin-bottom: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+
+.cad-dims-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.cad-dims-axis {
+  display: flex;
+  flex-direction: column;
+}
+
+.cad-dims-axis-label {
+  font-size: 10px;
+  color: #94a3b8;
+}
+
+.cad-dims-axis-value {
+  font-family: "SF Mono", "Menlo", "Consolas", monospace;
+  font-size: 11px;
+  font-weight: 700;
+  color: #334155;
+}
+
+.cad-dims-unit {
+  margin-top: 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  text-align: right;
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.cad-parts-panel {
+  width: 220px;
+  max-height: 55vh;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.15);
+  backdrop-filter: blur(10px);
+}
+
+.cad-parts-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.cad-parts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.cad-part-row {
+  border-radius: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  background: #f8fafc;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.cad-part-row:hover {
+  border-color: rgba(59, 130, 246, 0.45);
+  background: #ffffff;
+}
+
+.cad-part-row--active {
+  border-color: #2563eb;
+  background: #2563eb;
+  color: #ffffff;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
+}
+
+.cad-part-row-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cad-part-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cad-icon-btn {
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  border-radius: 6px;
+  padding: 4px;
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.cad-icon-btn--enabled {
+  color: #334155;
+  cursor: pointer;
+}
+
+.cad-icon-btn--enabled:hover {
+  color: #1d4ed8;
+  border-color: rgba(59, 130, 246, 0.45);
+}
+
+.cad-icon-btn--disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.cad-icon-sm {
+  width: 14px;
+  height: 14px;
+}
+
+.cad-inline-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cad-part-message {
+  border-radius: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  background: #f8fafc;
+  color: #475569;
+  font-size: 11px;
+  padding: 6px 8px;
+}
+
+.cad-part-selected {
+  border-radius: 6px;
+  border: 1px solid rgba(147, 197, 253, 0.8);
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 6px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cad-loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.1);
+  backdrop-filter: blur(2px);
+  pointer-events: none;
+}
+
+.cad-loading-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.22);
+  padding: 24px 26px;
+}
+
+.cad-loading-icon-wrap {
+  position: relative;
+}
+
+.cad-loading-glow {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.25);
+  filter: blur(12px);
+  animation: cadPulse 1.6s ease-in-out infinite;
+}
+
+.cad-loading-icon {
+  position: relative;
+  z-index: 1;
+  width: 40px;
+  height: 40px;
+  color: #2563eb;
+  animation: cadSpin 0.9s linear infinite;
+}
+
+.cad-loading-text {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.cad-loading-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.cad-loading-subtitle {
+  font-size: 11px;
+  font-weight: 500;
+  color: #64748b;
+}
+
+.cad-error-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.35);
+  backdrop-filter: blur(4px);
+}
+
+.cad-error-card {
+  max-width: min(86%, 460px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+  border-radius: 16px;
+  border: 1px solid rgba(251, 113, 133, 0.35);
+  background: #ffffff;
+  box-shadow: 0 24px 40px rgba(15, 23, 42, 0.22);
+  padding: 24px;
+}
+
+.cad-error-icon-wrap {
+  width: 48px;
+  height: 48px;
+  border-radius: 999px;
+  background: #fef2f2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cad-error-icon {
+  font-size: 24px;
+}
+
+.cad-error-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cad-error-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.cad-error-message {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #64748b;
+}
+
+.cad-error-retry {
+  margin-top: 2px;
+  border-radius: 8px;
+  border: 1px solid #0f172a;
+  background: #0f172a;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+
+.cad-error-retry:hover {
+  background: #1e293b;
+  border-color: #1e293b;
+}
+
+@keyframes cadSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes cadPulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (max-width: 900px) {
+  .cad-controls-overlay {
+    top: 12px;
+    left: 12px;
+    right: 12px;
+    flex-direction: column;
+    max-width: calc(100% - 24px);
+  }
+
+  .cad-controls-card,
+  .cad-parts-panel {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .cad-controls-card {
+    max-height: 44vh;
+  }
+}
