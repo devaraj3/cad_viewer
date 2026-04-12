@@ -113,6 +113,7 @@ export type Viewer = {
   setOverlayVisible: (visible: boolean) => void;
   setShowViewCube: (visible: boolean) => void;
   setShowHomeButton: (visible: boolean) => void;
+  setRenderQualityProfile: (profile: ViewerRenderQualityProfile) => void;
   getActiveCamera: () => THREE.Camera;
   getRendererSize: () => { width: number; height: number };
   onViewChanged: (cb: () => void) => () => void;
@@ -122,6 +123,8 @@ export type Viewer = {
     visible: boolean;
   };
 };
+
+export type ViewerRenderQualityProfile = "normal" | "heavy" | "extreme";
 
 export type ViewerControlsPresetConfig = {
   enableRotate: boolean;
@@ -245,6 +248,48 @@ export type ExactCadSingleEntityMeasurementMode =
 
 const EXACT_CAD_EXTENSIONS = new Set(["step", "stp", "iges", "igs", "brep"]);
 const APPROX_CAD_SHARP_ANGLE_DEG = 30;
+const PERF_DIAGNOSTICS_STORAGE_KEY = "cadViewerPerfDiagnostics";
+
+type ViewerQualitySettings = {
+  rendererDprCap: number;
+  cubeDprCap: number;
+  autoBuildWireframeOverlays: boolean;
+  forceApproximateCadMode: boolean;
+};
+
+const VIEWER_QUALITY_SETTINGS: Record<
+  ViewerRenderQualityProfile,
+  ViewerQualitySettings
+> = {
+  normal: {
+    rendererDprCap: 2,
+    cubeDprCap: 2,
+    autoBuildWireframeOverlays: true,
+    forceApproximateCadMode: false,
+  },
+  heavy: {
+    rendererDprCap: 1.25,
+    cubeDprCap: 1.25,
+    autoBuildWireframeOverlays: false,
+    forceApproximateCadMode: false,
+  },
+  extreme: {
+    rendererDprCap: 1,
+    cubeDprCap: 1,
+    autoBuildWireframeOverlays: false,
+    forceApproximateCadMode: true,
+  },
+};
+
+function isViewerPerfDiagnosticsEnabled(): boolean {
+  if (!import.meta.env.DEV) return false;
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(PERF_DIAGNOSTICS_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
 
 export type ExactCadEdgeDisplayOptions = {
   boundaryEdges: boolean;
@@ -895,12 +940,14 @@ export function getAutoMeasurementRequestForPickedEntity(
   if (circularTarget) {
     const fullCircle = isCircularTargetEffectivelyFullCircle(circularTarget);
     if (circularTarget.edgeIds.length > 1) {
-      console.debug("[CadViewer] Resolved circular feature", {
-        pickedEdgeId: edge.id,
-        mergedCircularEdges: circularTarget.edgeIds.length,
-        isFullCircle: circularTarget.isFullCircle,
-        effectiveFullCircle: fullCircle,
-      });
+      if (isViewerPerfDiagnosticsEnabled()) {
+        console.debug("[CadViewer][perf] Resolved circular feature", {
+          pickedEdgeId: edge.id,
+          mergedCircularEdges: circularTarget.edgeIds.length,
+          isFullCircle: circularTarget.isFullCircle,
+          effectiveFullCircle: fullCircle,
+        });
+      }
     }
     if (fullCircle) {
       return {
@@ -1405,6 +1452,17 @@ export function createViewer(container: HTMLElement): Viewer {
   let controls!: OrbitControls;
   let requestUpdateSilhouette: (() => void) | null = null;
   const viewChangedListeners = new Set<() => void>();
+  const perfDiagnosticsEnabled = isViewerPerfDiagnosticsEnabled();
+  const perfLog = (...args: unknown[]) => {
+    if (!perfDiagnosticsEnabled) return;
+    console.info("[CadViewer][perf]", ...args);
+  };
+  const perfDebug = (...args: unknown[]) => {
+    if (!perfDiagnosticsEnabled) return;
+    console.debug("[CadViewer][perf]", ...args);
+  };
+  let renderQualityProfile: ViewerRenderQualityProfile = "normal";
+  let qualitySettings = VIEWER_QUALITY_SETTINGS[renderQualityProfile];
 
   const emitViewChanged = () => {
     for (const listener of viewChangedListeners) {
@@ -1419,9 +1477,11 @@ export function createViewer(container: HTMLElement): Viewer {
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
     alpha: false,
-    preserveDrawingBuffer: true,
+    preserveDrawingBuffer: false,
   });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setPixelRatio(
+    Math.min(window.devicePixelRatio || 1, qualitySettings.rendererDprCap),
+  );
   renderer.setSize(container.clientWidth, container.clientHeight);
   (renderer as any).outputColorSpace =
     (THREE as any).SRGBColorSpace ?? undefined;
@@ -1530,7 +1590,9 @@ export function createViewer(container: HTMLElement): Viewer {
     alpha: true,
     preserveDrawingBuffer: false,
   });
-  cubeRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  cubeRenderer.setPixelRatio(
+    Math.min(window.devicePixelRatio || 1, qualitySettings.cubeDprCap),
+  );
   cubeRenderer.setSize(cubeCanvas.clientWidth, cubeCanvas.clientHeight, false);
 
   const cubeScene = new THREE.Scene();
@@ -1715,8 +1777,12 @@ export function createViewer(container: HTMLElement): Viewer {
   cubeMesh.add(cornerPatchMesh);
 
   function hideHoverPatches() {
+    const changed = edgePatchMesh.visible || cornerPatchMesh.visible;
     edgePatchMesh.visible = false;
     cornerPatchMesh.visible = false;
+    if (changed) {
+      requestRender("cube_hover_hide_patches");
+    }
   }
 
   function setEdgePatchFromHover(
@@ -1834,6 +1900,7 @@ export function createViewer(container: HTMLElement): Viewer {
     edgeGeom.computeBoundingSphere();
     edgePatchMesh.geometry = edgeGeom;
     edgePatchMesh.visible = true;
+    requestRender("cube_hover_edge_patch");
   }
 
   function setCornerPatchFromSigns(sx: number, sy: number, sz: number) {
@@ -1868,6 +1935,7 @@ export function createViewer(container: HTMLElement): Viewer {
     cornerGeom.computeBoundingSphere();
     cornerPatchMesh.geometry = cornerGeom;
     cornerPatchMesh.visible = true;
+    requestRender("cube_hover_corner_patch");
   }
 
   // Drag-to-rotate state for view cube
@@ -2053,13 +2121,25 @@ export function createViewer(container: HTMLElement): Viewer {
     e.stopPropagation();
   }
 
+  function onCubePointerLeave(e: PointerEvent) {
+    hideHoverPatches();
+    highlightFaces(null);
+    cubeCanvas.style.cursor = "default";
+    try {
+      e.stopPropagation();
+    } catch {
+      /* ignore */
+    }
+    requestRender("cube_pointer_leave");
+  }
+
   const cubeRaycaster = new THREE.Raycaster();
   const cubePointer = new THREE.Vector2();
 
   function updateCubeSize() {
     const cssW = cubeCanvas.clientWidth || cubeSizePx;
     const cssH = cubeCanvas.clientHeight || cubeSizePx;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = Math.min(window.devicePixelRatio || 1, qualitySettings.cubeDprCap);
     cubeRenderer.setPixelRatio(dpr);
     cubeRenderer.setSize(cssW, cssH, false);
   }
@@ -2081,6 +2161,7 @@ export function createViewer(container: HTMLElement): Viewer {
       }
     }
     // store first highlighted face (no external usage currently)
+    requestRender("cube_hover_highlight");
   }
 
   // Helper: map preset name back to face material index (robust, doesn't assume order)
@@ -2201,6 +2282,7 @@ export function createViewer(container: HTMLElement): Viewer {
         persp.updateProjectionMatrix();
         ortho.updateProjectionMatrix();
         controls.update();
+        requestRender("cube_snap_animation");
         if (t < 1) {
           requestAnimationFrame(animate);
         }
@@ -2237,17 +2319,7 @@ export function createViewer(container: HTMLElement): Viewer {
   cubeCanvas.addEventListener("pointerup", onCubePointerUp as any);
   cubeCanvas.addEventListener("pointercancel", onCubePointerCancel as any);
   cubeCanvas.addEventListener("click", onCubeClick as any);
-  // ensure pads are hidden when the pointer leaves the cube canvas
-  cubeCanvas.addEventListener("pointerleave", (e: PointerEvent) => {
-    hideHoverPatches();
-    highlightFaces(null);
-    cubeCanvas.style.cursor = "default";
-    try {
-      e.stopPropagation();
-    } catch {
-      /* ignore */
-    }
-  });
+  cubeCanvas.addEventListener("pointerleave", onCubePointerLeave as any);
 
   // --- end view cube overlay ---
 
@@ -2312,10 +2384,12 @@ export function createViewer(container: HTMLElement): Viewer {
   function onControlsChanged() {
     requestUpdateSilhouette?.();
     emitViewChanged();
+    requestRender("controls_change");
   }
 
   function onControlsInteractionEnd() {
     scheduleExactCurveFeatureResample("controls_end");
+    requestRender("controls_end");
   }
 
   function rebindControls(camera: THREE.Camera) {
@@ -2437,6 +2511,7 @@ export function createViewer(container: HTMLElement): Viewer {
       silhouetteRAFId = null;
       try {
         updateSilhouetteEdges();
+        requestRender("silhouette_update");
       } catch (e) {
         /* ignore errors during silhouette update */
       }
@@ -2778,7 +2853,7 @@ export function createViewer(container: HTMLElement): Viewer {
     }
 
     curveFeatureCount = curveFeatureById.size;
-    console.debug("[CadViewer] Curve features built", {
+    perfDebug("[CadViewer] Curve features built", {
       curveFeatureCount,
       circleFeatureCount,
       arcFeatureCount,
@@ -2830,6 +2905,7 @@ export function createViewer(container: HTMLElement): Viewer {
       const reasonSummary = Array.from(pendingExactCurveResampleReasons).join("|");
       pendingExactCurveResampleReasons.clear();
       rebuildExactCadEdges(`adaptive_resample:${reasonSummary || "unknown"}`);
+      requestRender("exact_curve_resample");
     });
   }
 
@@ -3372,7 +3448,7 @@ export function createViewer(container: HTMLElement): Viewer {
       exactEdgeRenderObjectsById.set(edge.id, line);
     }
 
-    console.debug("[CadViewer] Exact curve adaptive resample", {
+    perfDebug("[CadViewer] Exact curve adaptive resample", {
       exactCadModeActive: isExactCadMode,
       adaptiveResamplingRebuiltCurveFeatures: true,
       rebuildReason: reason,
@@ -3619,6 +3695,7 @@ export function createViewer(container: HTMLElement): Viewer {
     } else {
       updateFeatureEdgesVisibility();
     }
+    requestRender("set_feature_edges_enabled");
   }
 
   function setExactCadEdgeDisplayOptions(
@@ -3660,6 +3737,7 @@ export function createViewer(container: HTMLElement): Viewer {
     if (isExactCadMode || isApproxCadMode) {
       updateEngineeringEdgeVisibility();
     }
+    requestRender("set_exact_edge_display_options");
   }
 
   function setExactCadMeasurementMode(
@@ -3835,6 +3913,13 @@ export function createViewer(container: HTMLElement): Viewer {
 
   function updateWireframeOverlayVisibility() {
     try {
+      if (
+        wireframeEnabled &&
+        wireframeOverlayLines.length === 0 &&
+        modelRoot.children.length > 0
+      ) {
+        rebuildWireframeOverlays();
+      }
       for (const line of wireframeOverlayLines) {
         try {
           line.visible = !!wireframeEnabled;
@@ -3845,6 +3930,7 @@ export function createViewer(container: HTMLElement): Viewer {
     } catch {
       /* ignore */
     }
+    requestRender("wireframe_visibility");
   }
 
   // Legacy/fallback mesh edge overlay path:
@@ -3952,10 +4038,17 @@ export function createViewer(container: HTMLElement): Viewer {
   let modelBounds = { min: 0, max: 0 };
   let modelDiagonal = 0;
   let currentClippingValue: number | null = null;
+  let visibleMeshRaycastTargets: THREE.Object3D[] = [];
+  let visibleMeshTargetsDirty = true;
+
+  function markVisibleMeshRaycastTargetsDirty(): void {
+    visibleMeshTargetsDirty = true;
+  }
 
   function setOverlayVisible(visible: boolean) {
     if (gridHelper) gridHelper.visible = visible;
     if (axesHelper) axesHelper.visible = visible;
+    requestRender("set_overlay_visible");
   }
 
   function setMeasurementGraphicsScale(scale: number) {
@@ -3968,6 +4061,7 @@ export function createViewer(container: HTMLElement): Viewer {
         1,
       );
     }
+    requestRender("set_measurement_graphics_scale");
   }
 
   function fitCameraToBox(box: THREE.Box3, padding = 1.25) {
@@ -4009,6 +4103,7 @@ export function createViewer(container: HTMLElement): Viewer {
     controls.target.copy(center);
     controls.update();
     requestUpdateSilhouette?.();
+    requestRender("fit_camera_to_box");
   }
 
   // function computeBoxOf(object: THREE.Object3D) {
@@ -4021,28 +4116,24 @@ export function createViewer(container: HTMLElement): Viewer {
     ndcX: number,
     ndcY: number,
   ): THREE.Vector3 | null {
-    // Use a fresh NDC vector so we don't interfere with other raycasts
+    const meshTargets = collectVisibleMeshRaycastTargets();
+    if (meshTargets.length === 0) return null;
     const ndc = new THREE.Vector2(ndcX, ndcY);
     raycaster.setFromCamera(ndc, activeCamera);
-    const intersects = raycaster.intersectObjects(modelRoot.children, true);
+    const intersects = raycaster.intersectObjects(meshTargets, true);
     if (intersects.length === 0) return null;
-    // Prefer mesh hits (ignore edge overlays / lines). Find first intersect that's a Mesh.
-    for (const intr of intersects) {
-      const obj = intr.object as any;
-      if (obj && obj.isMesh) {
-        return intr.point.clone();
-      }
-    }
-    return null;
+    return intersects[0].point.clone();
   }
 
   function pickMeshAtScreenPosition(
     ndcX: number,
     ndcY: number,
   ): { point: THREE.Vector3; object: THREE.Object3D } | null {
+    const meshTargets = collectVisibleMeshRaycastTargets();
+    if (meshTargets.length === 0) return null;
     const ndc = new THREE.Vector2(ndcX, ndcY);
     raycaster.setFromCamera(ndc, activeCamera);
-    const intersects = raycaster.intersectObjects(modelRoot.children, true);
+    const intersects = raycaster.intersectObjects(meshTargets, true);
     if (intersects.length === 0) return null;
 
     for (const intr of intersects) {
@@ -4073,7 +4164,9 @@ export function createViewer(container: HTMLElement): Viewer {
     for (const child of children) {
       child.visible = child === targetPart;
     }
+    markVisibleMeshRaycastTargetsDirty();
     requestUpdateSilhouette?.();
+    requestRender("isolate_object");
   }
 
   function clearIsolation(): void {
@@ -4082,7 +4175,9 @@ export function createViewer(container: HTMLElement): Viewer {
       if (child) child.visible = visible;
     });
     resetIsolationSnapshot();
+    markVisibleMeshRaycastTargetsDirty();
     requestUpdateSilhouette?.();
+    requestRender("clear_isolation");
   }
 
   function showAllParts(): void {
@@ -4090,7 +4185,9 @@ export function createViewer(container: HTMLElement): Viewer {
       child.visible = true;
     }
     resetIsolationSnapshot();
+    markVisibleMeshRaycastTargetsDirty();
     requestUpdateSilhouette?.();
+    requestRender("show_all_parts");
   }
 
   function collectExactCadEdgeRaycastTargets(): THREE.LineSegments[] {
@@ -4406,7 +4503,7 @@ export function createViewer(container: HTMLElement): Viewer {
           endpointA,
           endpointB,
         );
-        console.debug("[CadViewer] Exact hover highlight path", {
+        perfDebug("[CadViewer] Exact hover highlight path", {
           exactCadModeActive: isExactCadMode,
           pickedEntityKind: pickedEntity.kind,
           usedWholeFeature: true,
@@ -4423,7 +4520,7 @@ export function createViewer(container: HTMLElement): Viewer {
 
       if (pickedEntity.kind === "curve_feature") {
         clearEdgeHighlight();
-        console.debug("[CadViewer] Exact hover highlight path", {
+        perfDebug("[CadViewer] Exact hover highlight path", {
           exactCadModeActive: isExactCadMode,
           pickedEntityKind: pickedEntity.kind,
           usedWholeFeature: false,
@@ -4436,7 +4533,7 @@ export function createViewer(container: HTMLElement): Viewer {
 
       if (pickedEntity.kind !== "edge") {
         clearEdgeHighlight();
-        console.debug("[CadViewer] Exact hover highlight path", {
+        perfDebug("[CadViewer] Exact hover highlight path", {
           exactCadModeActive: isExactCadMode,
           pickedEntityKind: pickedEntity.kind,
           usedWholeFeature: false,
@@ -4487,7 +4584,7 @@ export function createViewer(container: HTMLElement): Viewer {
           );
         }
         renderEdgeHoverOverlay(wholeEdgePositions, endpointA, endpointB);
-        console.debug("[CadViewer] Exact hover highlight path", {
+        perfDebug("[CadViewer] Exact hover highlight path", {
           exactCadModeActive: isExactCadMode,
           pickedEntityKind: pickedEntity.kind,
           usedWholeFeature: true,
@@ -4511,7 +4608,7 @@ export function createViewer(container: HTMLElement): Viewer {
         segmentHover.endpointA,
         segmentHover.endpointB,
       );
-      console.debug("[CadViewer] Exact hover highlight path", {
+      perfDebug("[CadViewer] Exact hover highlight path", {
         exactCadModeActive: isExactCadMode,
         pickedEntityKind: pickedEntity.kind,
         usedWholeFeature: false,
@@ -4601,7 +4698,7 @@ export function createViewer(container: HTMLElement): Viewer {
     }
 
     if (!pickedEntity) {
-      console.debug("[CadViewer] Exact picker result", {
+      perfDebug("[CadViewer] Exact picker result", {
         exactCadModeActive: isExactCadMode,
         pickedEntityKind: null,
       });
@@ -4615,7 +4712,7 @@ export function createViewer(container: HTMLElement): Viewer {
       edgeId: pickedEntity.kind === "edge" ? pickedEntity.edgeId : null,
       faceId: pickedEntity.kind === "face" ? pickedEntity.faceId : null,
     };
-    console.debug("[CadViewer] Exact picker result", exactLog);
+    perfDebug("[CadViewer] Exact picker result", exactLog);
 
     return pickedEntity;
   }
@@ -4701,6 +4798,9 @@ export function createViewer(container: HTMLElement): Viewer {
   }
 
   function collectVisibleMeshRaycastTargets(): THREE.Object3D[] {
+    if (!visibleMeshTargetsDirty) {
+      return visibleMeshRaycastTargets;
+    }
     const targets: THREE.Object3D[] = [];
     modelRoot.traverse((obj: any) => {
       if (!obj?.isMesh) return;
@@ -4708,7 +4808,9 @@ export function createViewer(container: HTMLElement): Viewer {
       if (!isEffectivelyVisible(obj)) return;
       targets.push(obj as THREE.Object3D);
     });
-    return targets;
+    visibleMeshRaycastTargets = targets;
+    visibleMeshTargetsDirty = false;
+    return visibleMeshRaycastTargets;
   }
 
   function exactCadPointToWorld(
@@ -4788,7 +4890,7 @@ export function createViewer(container: HTMLElement): Viewer {
         pickedEntity && request
           ? resolveMeasurementAnchorEntity(request, pickedEntity)
           : selection.anchorEntity;
-      console.debug("[CadViewer] Exact measurement request", {
+      perfDebug("[CadViewer] Exact measurement request", {
         exactCadModeActive: isExactCadMode,
         measurementMode: exactCadSingleEntityMeasurementMode,
         pickedEntityKind: pickedEntity?.kind ?? null,
@@ -5370,6 +5472,7 @@ export function createViewer(container: HTMLElement): Viewer {
       measureLabelText = null;
     }
     updateMeasurementOverlay();
+    requestRender("set_measurement_label_anchor");
   }
 
   function setMeasurementSegment(
@@ -5389,6 +5492,7 @@ export function createViewer(container: HTMLElement): Viewer {
       measureBaseSegmentStyle = null;
       measureLabelText = null;
       updateMeasurementOverlay();
+      requestRender("set_measurement_segment_clear");
       return;
     }
 
@@ -5411,19 +5515,22 @@ export function createViewer(container: HTMLElement): Viewer {
     measureBaseSegmentStyle = style;
     measureBaseSegmentAnchor = resolvedSegmentAnchor;
     updateMeasurementOverlay();
+    requestRender("set_measurement_segment");
   }
 
   function getScreenshotDataURL(): string {
     const prevGridVisible = gridHelper ? gridHelper.visible : false;
     const prevAxesVisible = axesHelper ? axesHelper.visible : false;
 
-    setOverlayVisible(false);
+    if (gridHelper) gridHelper.visible = false;
+    if (axesHelper) axesHelper.visible = false;
 
-    renderer.render(scene, activeCamera);
+    renderNow("screenshot_capture");
     const dataURL = renderer.domElement.toDataURL("image/png");
 
     if (gridHelper) gridHelper.visible = prevGridVisible;
     if (axesHelper) axesHelper.visible = prevAxesVisible;
+    requestRender("screenshot_restore");
 
     return dataURL;
   }
@@ -5439,7 +5546,8 @@ export function createViewer(container: HTMLElement): Viewer {
       prevLabelColor = (measureLabel.material as any).color.clone();
     }
 
-    setOverlayVisible(false);
+    if (gridHelper) gridHelper.visible = false;
+    if (axesHelper) axesHelper.visible = false;
 
     measureMaterial.color.set(0x000000);
     arrowMaterial.color.set(0x000000);
@@ -5519,7 +5627,7 @@ export function createViewer(container: HTMLElement): Viewer {
     renderer.setClearColor(0xffffff, 1);
     scene.background = null;
 
-    renderer.render(scene, activeCamera);
+    renderNow("outline_snapshot_capture");
 
     const dataURL = renderer.domElement.toDataURL("image/png");
 
@@ -5551,6 +5659,7 @@ export function createViewer(container: HTMLElement): Viewer {
     }
     if (gridHelper) gridHelper.visible = prevGridVisible;
     if (axesHelper) axesHelper.visible = prevAxesVisible;
+    requestRender("outline_snapshot_restore");
 
     return dataURL;
   }
@@ -5592,6 +5701,7 @@ export function createViewer(container: HTMLElement): Viewer {
 
   function clearModelRootChildren() {
     resetIsolationSnapshot();
+    markVisibleMeshRaycastTargetsDirty();
     for (const child of [...modelRoot.children]) {
       if (child === featureEdgesGroup) continue;
       disposeObjectResources(child);
@@ -6736,7 +6846,11 @@ export function createViewer(container: HTMLElement): Viewer {
       }
       // Create feature edges after the model has been positioned and matrices are up-to-date.
       modelRoot.updateWorldMatrix(true, true);
-      rebuildWireframeOverlays();
+      if (wireframeEnabled || qualitySettings.autoBuildWireframeOverlays) {
+        rebuildWireframeOverlays();
+      } else {
+        clearWireframeOverlays();
+      }
       if (isExactCadMode) {
         rebuildExactCadEdges("finalize_primary_geometry_update");
       } else if (isApproxCadMode) {
@@ -6915,7 +7029,7 @@ export function createViewer(container: HTMLElement): Viewer {
     if (cadTopologyContext) {
       currentCadExt = cadTopologyContext.ext.toLowerCase();
       currentCadTopologyAvailability = cadTopologyAvailability;
-      console.debug("[CadViewer] topologyAvailability.exact", {
+      perfDebug("[CadViewer] topologyAvailability.exact", {
         exact: currentCadTopologyAvailability?.exact ?? null,
         reason: currentCadTopologyAvailability?.reason ?? null,
       });
@@ -6929,13 +7043,18 @@ export function createViewer(container: HTMLElement): Viewer {
       const topology = cadTopologyContext.topology;
       const hasTopology = topology !== null;
       const topologyEdgeCount = topology?.edges.length ?? 0;
+      const preferApproximateCadMode = qualitySettings.forceApproximateCadMode;
 
       // Mode rules:
       // - exact CAD mode: topology exists with at least one exact edge.
       // - approx CAD mode: CAD extension with topology unavailable (null).
       // - generic mesh mode: everything else.
-      isExactCadMode = isCadExt && hasTopology && topologyEdgeCount > 0;
-      isApproxCadMode = isCadExt && cadTopologyContext.topology === null;
+      isExactCadMode =
+        isCadExt &&
+        hasTopology &&
+        topologyEdgeCount > 0 &&
+        !preferApproximateCadMode;
+      isApproxCadMode = isCadExt && (cadTopologyContext.topology === null || preferApproximateCadMode);
       if (isExactCadMode) {
         setExactCadMeasurementMode("auto");
         if (currentCadTopologyAvailability?.exact === false) {
@@ -6947,6 +7066,13 @@ export function createViewer(container: HTMLElement): Viewer {
             },
           );
         }
+      }
+      if (isCadExt && hasTopology && preferApproximateCadMode) {
+        perfLog("exact_topology_downgraded_for_performance", {
+          ext: cadExt,
+          topologyEdgeCount,
+          profile: renderQualityProfile,
+        });
       }
     } else {
       clearCadTopology();
@@ -6997,7 +7123,11 @@ export function createViewer(container: HTMLElement): Viewer {
       updateClippingPlanes();
       if (hasAnyMesh) {
         modelRoot.updateWorldMatrix(true, true);
-        rebuildWireframeOverlays();
+        if (wireframeEnabled || qualitySettings.autoBuildWireframeOverlays) {
+          rebuildWireframeOverlays();
+        } else {
+          clearWireframeOverlays();
+        }
         if (isExactCadMode) {
           rebuildExactCadEdges("load_object3d");
         } else if (isApproxCadMode) {
@@ -7014,7 +7144,7 @@ export function createViewer(container: HTMLElement): Viewer {
       updateClippingPlanes();
     }
 
-    console.info("[CadViewer] Load diagnostics", {
+    perfLog("load_diagnostics", {
       ext: currentCadExt,
       hasTopologyContext: !!cadTopologyContext,
       topologyAvailabilityExact: currentCadTopologyAvailability?.exact ?? null,
@@ -7042,6 +7172,7 @@ export function createViewer(container: HTMLElement): Viewer {
     }
     modelRoot.position.set(0, 0, 0);
     emitViewChanged();
+    requestRender("clear_viewer");
   }
 
   function setView(
@@ -7096,6 +7227,7 @@ export function createViewer(container: HTMLElement): Viewer {
     requestUpdateSilhouette?.();
     scheduleExactCurveFeatureResample("set_view");
     emitViewChanged();
+    requestRender("set_view");
   }
 
   function setProjection(mode: "perspective" | "orthographic") {
@@ -7107,11 +7239,15 @@ export function createViewer(container: HTMLElement): Viewer {
     requestUpdateSilhouette?.();
     scheduleExactCurveFeatureResample("set_projection");
     emitViewChanged();
+    requestRender("set_projection");
   }
 
   function resize() {
     const w = container.clientWidth;
     const h = container.clientHeight;
+    renderer.setPixelRatio(
+      Math.min(window.devicePixelRatio || 1, qualitySettings.rendererDprCap),
+    );
     renderer.setSize(w, h);
     const aspect = w / Math.max(1, h);
     persp.aspect = aspect;
@@ -7134,18 +7270,95 @@ export function createViewer(container: HTMLElement): Viewer {
     updateCubeSize();
     scheduleExactCurveFeatureResample("resize");
     emitViewChanged();
+    requestRender("resize");
   }
 
   function setControlsEnabled(enabled: boolean) {
     controls.enabled = !!enabled;
+    requestRender("set_controls_enabled");
   }
 
   function setControlsPreset(preset: "orbit3d" | "dxf2d") {
     applyControlsPreset(preset);
+    requestRender("set_controls_preset");
   }
 
-  const render = () => {
-    controls.update();
+  function setRenderQualityProfile(profile: ViewerRenderQualityProfile): void {
+    const nextProfile: ViewerRenderQualityProfile =
+      profile === "heavy" || profile === "extreme" ? profile : "normal";
+    if (renderQualityProfile === nextProfile) return;
+    renderQualityProfile = nextProfile;
+    qualitySettings = VIEWER_QUALITY_SETTINGS[nextProfile];
+
+    perfLog("quality_profile_changed", {
+      profile: renderQualityProfile,
+      settings: qualitySettings,
+    });
+
+    resize();
+
+    const hasLoadedModel = getTopLevelModelChildren().length > 0;
+    if (!hasLoadedModel) {
+      requestRender("quality_profile_change_empty");
+      return;
+    }
+
+    const isCadExt = !!currentCadExt && EXACT_CAD_EXTENSIONS.has(currentCadExt);
+    const hasTopologyData = edgesById.size > 0;
+    if (isCadExt) {
+      const preferApproximateCadMode = qualitySettings.forceApproximateCadMode;
+      const nextExactMode =
+        hasTopologyData &&
+        edgesById.size > 0 &&
+        !preferApproximateCadMode;
+      const nextApproxMode = !hasTopologyData || preferApproximateCadMode;
+      isExactCadMode = nextExactMode;
+      isApproxCadMode = nextApproxMode;
+      clearFeatureEdges();
+      if (isExactCadMode) {
+        rebuildExactCadEdges("quality_profile_change");
+      } else if (isApproxCadMode) {
+        rebuildApproxCadEngineeringEdges();
+      } else {
+        rebuildFeatureEdges();
+      }
+    }
+
+    if (!qualitySettings.autoBuildWireframeOverlays && !wireframeEnabled) {
+      clearWireframeOverlays();
+    } else if (wireframeEnabled && wireframeOverlayLines.length === 0) {
+      rebuildWireframeOverlays();
+    }
+    requestRender("quality_profile_change");
+  }
+
+  let renderRAFId: number | null = null;
+  const pendingRenderReasons = new Set<string>();
+  let perfRenderWindowStart = performance.now();
+  let perfRenderWindowFrameCount = 0;
+  let perfRenderWindowCostMs = 0;
+  let perfLastRenderAt = performance.now();
+
+  function requestRender(reason = "unspecified"): void {
+    pendingRenderReasons.add(reason);
+    if (renderRAFId !== null) return;
+    renderRAFId = requestAnimationFrame(() => {
+      renderRAFId = null;
+      const reasonSummary =
+        pendingRenderReasons.size > 0
+          ? Array.from(pendingRenderReasons).join("|")
+          : "raf";
+      pendingRenderReasons.clear();
+      const controlsChanged = drawFrame(reasonSummary);
+      if (controlsChanged) {
+        requestRender("controls_damping");
+      }
+    });
+  }
+
+  function drawFrame(reason: string): boolean {
+    const frameStart = performance.now();
+    const controlsChanged = controls.update();
     const camAngle = lastCamQuat.angleTo(activeCamera.quaternion);
     const camPosDelta = lastCamPos.distanceTo(activeCamera.position);
     if (camAngle > camEpsilon || camPosDelta > camEpsilon) {
@@ -7159,7 +7372,6 @@ export function createViewer(container: HTMLElement): Viewer {
     }
     updateMeasurementOverlay();
     renderer.render(scene, activeCamera);
-    // Sync cube rotation to inverse of active camera
     try {
       const inv = activeCamera.quaternion.clone().invert();
       cubeRoot.quaternion.copy(inv);
@@ -7167,12 +7379,47 @@ export function createViewer(container: HTMLElement): Viewer {
       // ignore
     }
     cubeRenderer.render(cubeScene, cubeCamera);
-  };
-  renderer.setAnimationLoop(render);
+
+    const now = performance.now();
+    const frameCostMs = now - frameStart;
+    perfRenderWindowFrameCount += 1;
+    perfRenderWindowCostMs += frameCostMs;
+    perfLastRenderAt = now;
+    if (perfDiagnosticsEnabled && now - perfRenderWindowStart >= 3000) {
+      const windowMs = now - perfRenderWindowStart;
+      perfLog("render_window", {
+        reason,
+        profile: renderQualityProfile,
+        fps: Number(((perfRenderWindowFrameCount * 1000) / windowMs).toFixed(2)),
+        avgFrameMs: Number(
+          (perfRenderWindowCostMs / Math.max(1, perfRenderWindowFrameCount)).toFixed(2),
+        ),
+        idleMsSinceLastFrame: Number((performance.now() - perfLastRenderAt).toFixed(2)),
+      });
+      perfRenderWindowStart = now;
+      perfRenderWindowFrameCount = 0;
+      perfRenderWindowCostMs = 0;
+    }
+    return controlsChanged;
+  }
+
+  function renderNow(reason = "immediate"): void {
+    pendingRenderReasons.add(reason);
+    if (renderRAFId !== null) {
+      cancelAnimationFrame(renderRAFId);
+      renderRAFId = null;
+    }
+    const reasonSummary = Array.from(pendingRenderReasons).join("|");
+    pendingRenderReasons.clear();
+    const controlsChanged = drawFrame(reasonSummary || reason);
+    if (controlsChanged) {
+      requestRender("controls_damping");
+    }
+  }
 
   const onResize = () => resize();
   window.addEventListener("resize", onResize);
-  render();
+  renderNow("initial_frame");
 
   function setMaterialProperties(
     colorHex: number,
@@ -7227,6 +7474,7 @@ export function createViewer(container: HTMLElement): Viewer {
       wireframeEnabled = !!wireframe;
       updateWireframeOverlayVisibility();
     } catch {}
+    requestRender("set_material_properties");
   }
 
   function setClipping(value: number | null) {
@@ -7254,6 +7502,7 @@ export function createViewer(container: HTMLElement): Viewer {
     if (value !== null && renderer.localClippingEnabled === false) {
       renderer.localClippingEnabled = true;
     }
+    requestRender("set_clipping");
   }
 
   function updateClippingPlanes() {
@@ -7270,6 +7519,7 @@ export function createViewer(container: HTMLElement): Viewer {
     fitCameraToBox(box, padding);
     scheduleExactCurveFeatureResample("fit_to_screen");
     emitViewChanged();
+    requestRender("fit_to_screen");
   }
 
   function frameObject(object: THREE.Object3D) {
@@ -7319,6 +7569,7 @@ export function createViewer(container: HTMLElement): Viewer {
     requestUpdateSilhouette?.();
     scheduleExactCurveFeatureResample("frame_object");
     emitViewChanged();
+    requestRender("frame_object");
   }
 
   function getRendererSize(): { width: number; height: number } {
@@ -7368,6 +7619,7 @@ export function createViewer(container: HTMLElement): Viewer {
 
   function setBackgroundColor(color: string | number) {
     renderer.setClearColor(color);
+    requestRender("set_background_color");
   }
 
   // Highlighting for externally provided feature triangles
@@ -7389,7 +7641,10 @@ export function createViewer(container: HTMLElement): Viewer {
       highlightMesh = null;
     }
 
-    if (!triangles || triangles.length === 0) return;
+    if (!triangles || triangles.length === 0) {
+      requestRender("set_highlight_clear");
+      return;
+    }
 
     // Find the main mesh in the model
     const mainMesh = modelRoot.children.find(
@@ -7465,6 +7720,7 @@ export function createViewer(container: HTMLElement): Viewer {
 
         controls.target.lerpVectors(currentTarget, targetPos, eased);
         controls.update();
+        requestRender("highlight_camera_animation");
 
         if (progress < 1) {
           requestAnimationFrame(animateCamera);
@@ -7472,7 +7728,9 @@ export function createViewer(container: HTMLElement): Viewer {
       };
 
       animateCamera();
+      return;
     }
+    requestRender("set_highlight");
   }
 
   function dispose() {
@@ -7542,6 +7800,12 @@ export function createViewer(container: HTMLElement): Viewer {
       } catch {}
       exactCurveResampleRAFId = null;
     }
+    if (renderRAFId !== null) {
+      try {
+        cancelAnimationFrame(renderRAFId);
+      } catch {}
+      renderRAFId = null;
+    }
     pendingExactCurveResampleReasons.clear();
     // dispose feature edge overlays first
     try {
@@ -7571,6 +7835,7 @@ export function createViewer(container: HTMLElement): Viewer {
         onCubePointerCancel as any,
       );
       cubeCanvas.removeEventListener("click", onCubeClick as any);
+      cubeCanvas.removeEventListener("pointerleave", onCubePointerLeave as any);
     } catch {
       /* ignore */
     }
@@ -7678,10 +7943,13 @@ export function createViewer(container: HTMLElement): Viewer {
     setControlsPreset,
     setShowViewCube: (visible: boolean) => {
       cubeWrapper.style.display = visible ? "block" : "none";
+      requestRender("set_show_view_cube");
     },
     setShowHomeButton: (visible: boolean) => {
       homeBtn.style.display = visible ? "flex" : "none";
+      requestRender("set_show_home_button");
     },
+    setRenderQualityProfile,
     getActiveCamera,
     getRendererSize,
     onViewChanged,
