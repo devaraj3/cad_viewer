@@ -99,6 +99,12 @@ type CadTopologyViewerContext = {
   topologyAvailability: CadTopologyAvailability;
 };
 
+type PartsModeTransition = {
+  fileKey: string | null;
+  phase: "idle" | "loading" | "loaded" | "error";
+  partCount: number;
+};
+
 export const CAD_EXTS: ReadonlySet<CADExt> = new Set<CADExt>([
   "step",
   "stp",
@@ -541,6 +547,12 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       useState<WorkerCapabilities>(DEFAULT_WORKER_CAPABILITIES);
     const [renderQualityProfile, setRenderQualityProfile] =
       useState<ViewerRenderQualityProfile>("normal");
+    const [partsModeTransition, setPartsModeTransition] =
+      useState<PartsModeTransition>({
+        fileKey: null,
+        phase: "idle",
+        partCount: 0,
+      });
     const [formedGeom, setFormedGeom] = useState<THREE.BufferGeometry | null>(
       null,
     );
@@ -736,14 +748,24 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       setCadTopologyAvailability(null);
       setCadTopologyEdgeCount(0);
       if (!file) {
+        viewerRef.current?.clear();
+        viewerRef.current?.setMeasurementSegment(null, null, null);
         setPartMenu(null);
         setParts([]);
         activeFileKeyRef.current = null;
         replaceModelSession(null);
+        setIsLoading(false);
+        setError(null);
+        setDimsMM(null);
+        setMeasureMode(false);
+        setMeasureMM(null);
+        setRenderQualityProfile("normal");
+        viewerRef.current?.setRenderQualityProfile("normal");
         setSheetMeta(null);
         setFlatEnabled(false);
         setFlattenError(null);
         setIsUnfolding(false);
+        setPartsModeTransition({ fileKey: null, phase: "idle", partCount: 0 });
         unfoldRequestRef.current += 1;
         clearFlatCache();
         clearFormedCache();
@@ -1188,6 +1210,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
         displayAssemblySnapshotRef.current = null;
         let loadedAssemblySession: ModelSession | null = null;
         let loadedAssemblyParts: LoadedPart[] = [];
+        const usePartsMode = assemblyMode === "parts";
 
         setPartMenu(null);
         setParts([]);
@@ -1197,6 +1220,11 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
         setLoadedDxfDocument(null);
         setDxfPreviewPanelState(createDefaultDxfPreviewPanelState());
         replaceModelSession(null);
+        setPartsModeTransition({
+          fileKey,
+          phase: usePartsMode ? "loading" : "idle",
+          partCount: 0,
+        });
         setIsLoading(true);
         setError(null);
         setDimsMM(null);
@@ -1296,8 +1324,6 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
             if (wasDxfViewRef.current) {
               viewerRef.current?.setProjection("perspective"); wasDxfViewRef.current = false;
             }
-
-            const usePartsMode = assemblyMode === "parts";
             if (isCadExt(ext)) {
               const assembly = await loadCadAssemblyWithTopology(
                 file,
@@ -1355,6 +1381,11 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                 });
                 replaceModelSession(session);
                 setParts(assemblyDisplay.parts);
+                setPartsModeTransition({
+                  fileKey,
+                  phase: "loaded",
+                  partCount: assemblyDisplay.parts.length,
+                });
                 setViewerMode({ kind: "assembly" });
                 loadedAssemblySession = session;
                 loadedAssemblyParts = assemblyDisplay.parts;
@@ -1382,6 +1413,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                 });
                 replaceModelSession(null);
                 setParts([]);
+                setPartsModeTransition({ fileKey, phase: "idle", partCount: 0 });
                 setViewerMode({ kind: "assembly" });
                 displayAssemblySnapshotRef.current = null;
                 markStage("cad_flat_mode_loaded");
@@ -1434,6 +1466,11 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
               });
               replaceModelSession(session);
               setParts(assemblyDisplay.parts);
+              setPartsModeTransition({
+                fileKey,
+                phase: "loaded",
+                partCount: assemblyDisplay.parts.length,
+              });
               setViewerMode({ kind: "assembly" });
               loadedAssemblySession = session;
               loadedAssemblyParts = assemblyDisplay.parts;
@@ -1461,6 +1498,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
               });
               replaceModelSession(null);
               setParts([]);
+              setPartsModeTransition({ fileKey, phase: "idle", partCount: 0 });
               setViewerMode({ kind: "assembly" });
               displayAssemblySnapshotRef.current = null;
               markStage("mesh_single_loaded");
@@ -1516,6 +1554,9 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
           if (isStale()) return;
           console.error("Failed to load file:", err);
           setError(err.message || "Failed to load file");
+          if (usePartsMode) {
+            setPartsModeTransition({ fileKey, phase: "error", partCount: 0 });
+          }
         } finally {
           if (!isStale()) {
             setIsLoading(false);
@@ -1786,7 +1827,11 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       }
     }, [viewerMode, modelSession]);
 
-    const detectedCount = parts.length;
+    const detectedCount = Math.max(
+      parts.length,
+      modelSession?.partMap.size ?? 0,
+      partsModeTransition.partCount,
+    );
     const hasAssembly = detectedCount > 1;
     const supportsAssemblyMode =
       !!file && (isCadExt(currentExt) || isMeshAssemblyExt(currentExt));
@@ -1795,6 +1840,15 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       if (assemblyMode !== "parts") return;
       if (isLoading) return;
       if (!supportsAssemblyMode) return;
+      const activeFileKey = activeFileKeyRef.current;
+      if (!activeFileKey) return;
+      if (partsModeTransition.fileKey !== activeFileKey) return;
+      if (
+        partsModeTransition.phase !== "loaded" &&
+        partsModeTransition.phase !== "error"
+      ) {
+        return;
+      }
       if (detectedCount > 1) return;
 
       setAssemblyMode("flat");
@@ -1803,7 +1857,13 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       setPartMenu(null);
       setSelectedPartKey(null);
       setPartExportMessage(null);
-    }, [assemblyMode, detectedCount, isLoading, supportsAssemblyMode]);
+    }, [
+      assemblyMode,
+      detectedCount,
+      isLoading,
+      supportsAssemblyMode,
+      partsModeTransition,
+    ]);
 
     const baseFlattenEligible =
       showControls && assemblyMode !== "parts" && isCadExt(currentExt);

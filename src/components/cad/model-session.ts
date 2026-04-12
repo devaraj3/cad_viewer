@@ -363,9 +363,7 @@ export function createCadModelSession(
   for (const descriptor of descriptors) {
     partMap.set(descriptor.key, descriptor);
 
-    const sourcePart = buildCadPartObject(descriptor, assembly.meshes, {
-      cloneMeshes: false,
-    });
+    const sourcePart = buildCadPartObject(descriptor, assembly.meshes);
     attachPartMetadata(sourcePart, descriptor);
     sourceRoot.add(sourcePart);
   }
