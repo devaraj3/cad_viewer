@@ -8,7 +8,11 @@ import React, {
 } from "react";
 import * as THREE from "three";
 import * as BufferGeometryUtils from "three/examples/jsm/utils/BufferGeometryUtils.js";
-import { createViewer, Viewer } from "./viewer";
+import {
+  createViewer,
+  Viewer,
+  type ViewerRenderQualityProfile,
+} from "./viewer";
 import {
   analyzeCadSheetMetal,
   DEFAULT_WORKER_CAPABILITIES,
@@ -353,6 +357,92 @@ const FORCE_SHOW_FLATTEN = false;
 const SHOW_SHEET_META_DEBUG = false;
 const MISSING_RUNTIME_TOPOLOGY_WARNING_MESSAGE =
   "Exact CAD topology unavailable in current OCC runtime. Circle/arc measurement is running in approximate mode.";
+const PERF_DIAGNOSTICS_STORAGE_KEY = "cadViewerPerfDiagnostics";
+
+type SceneComplexityStats = {
+  meshCount: number;
+  triangleCount: number;
+  lineSegmentCount: number;
+};
+
+function isCadPerfDiagnosticsEnabled(): boolean {
+  if (!import.meta.env.DEV) return false;
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(PERF_DIAGNOSTICS_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function createCadPerfLogger(enabled: boolean) {
+  return (...args: unknown[]) => {
+    if (!enabled) return;
+    console.info("[CadViewer][perf]", ...args);
+  };
+}
+
+function summarizeObjectComplexity(object: THREE.Object3D): SceneComplexityStats {
+  const stats: SceneComplexityStats = {
+    meshCount: 0,
+    triangleCount: 0,
+    lineSegmentCount: 0,
+  };
+  object.traverse((node: any) => {
+    if (node?.isMesh) {
+      stats.meshCount += 1;
+      const geometry = node.geometry as THREE.BufferGeometry | undefined;
+      if (!geometry) return;
+      const indexCount = geometry.index?.count ?? 0;
+      if (indexCount > 0) {
+        stats.triangleCount += Math.floor(indexCount / 3);
+        return;
+      }
+      const position = geometry.getAttribute("position");
+      if (position?.count) {
+        stats.triangleCount += Math.floor(position.count / 3);
+      }
+      return;
+    }
+    if (node?.isLine || node?.isLineSegments) {
+      const geometry = node.geometry as THREE.BufferGeometry | undefined;
+      if (!geometry) return;
+      const indexCount = geometry.index?.count ?? 0;
+      if (indexCount > 1) {
+        stats.lineSegmentCount += Math.floor(indexCount / 2);
+        return;
+      }
+      const position = geometry.getAttribute("position");
+      if (position?.count) {
+        stats.lineSegmentCount += Math.floor(position.count / 2);
+      }
+    }
+  });
+  return stats;
+}
+
+function resolveViewerQualityProfile(params: {
+  fileSizeBytes: number | null;
+  complexity?: SceneComplexityStats | null;
+}): ViewerRenderQualityProfile {
+  const fileSizeMB = params.fileSizeBytes
+    ? params.fileSizeBytes / (1024 * 1024)
+    : 0;
+  const meshCount = params.complexity?.meshCount ?? 0;
+  const triangleCount = params.complexity?.triangleCount ?? 0;
+
+  if (
+    fileSizeMB >= 180 ||
+    triangleCount >= 1_600_000 ||
+    meshCount >= 2_400
+  ) {
+    return "extreme";
+  }
+  if (fileSizeMB >= 60 || triangleCount >= 650_000 || meshCount >= 900) {
+    return "heavy";
+  }
+  return "normal";
+}
 
 interface CadViewerProps {
   file?: File | string | null;
@@ -449,8 +539,8 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
     const [workerReady, setWorkerReady] = useState(false);
     const [workerCapabilities, setWorkerCapabilities] =
       useState<WorkerCapabilities>(DEFAULT_WORKER_CAPABILITIES);
-    const [assemblyProbeCount, setAssemblyProbeCount] = useState(0);
-    const [isProbingAssembly, setIsProbingAssembly] = useState(false);
+    const [renderQualityProfile, setRenderQualityProfile] =
+      useState<ViewerRenderQualityProfile>("normal");
     const [formedGeom, setFormedGeom] = useState<THREE.BufferGeometry | null>(
       null,
     );
@@ -464,14 +554,20 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
     const snapshotTakenRef = useRef(false);
     const loadRequestRef = useRef(0);
     const unfoldRequestRef = useRef(0);
-    const assemblyProbeReqRef = useRef(0);
     const activeFileKeyRef = useRef<string | null>(null);
     const flatCacheKeyRef = useRef<string | null>(null);
+    const pendingMeasureHoverRef = useRef<{ x: number; y: number } | null>(null);
+    const measureHoverRafRef = useRef<number | null>(null);
     const displayAssemblySnapshotRef = useRef<DisplayAssemblySnapshot | null>(
       null,
     );
     const cadTopologyContextRef = useRef<CadTopologyViewerContext | null>(null);
     const missingRuntimeTopologyWarningLoggedRef = useRef(false);
+    const perfDiagnosticsEnabledRef = useRef(isCadPerfDiagnosticsEnabled());
+    const perfLog = useMemo(
+      () => createCadPerfLogger(perfDiagnosticsEnabledRef.current),
+      [],
+    );
 
     // Synchronize show3D state with previewUrl prop
     useEffect(() => {
@@ -609,7 +705,24 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
     }, [showDxfPreviewPanel, isDxfPreviewExpanded]);
 
     useEffect(() => {
-      setCurrentExt(getFileExt(file) ?? "");
+      const ext = getFileExt(file) ?? "";
+      setCurrentExt(ext);
+      const initialQualityProfile = resolveViewerQualityProfile({
+        fileSizeBytes:
+          file && typeof file !== "string" && Number.isFinite(file.size)
+            ? file.size
+            : null,
+      });
+      setRenderQualityProfile(initialQualityProfile);
+      viewerRef.current?.setRenderQualityProfile(initialQualityProfile);
+      perfLog("file_profile_init", {
+        ext,
+        profile: initialQualityProfile,
+        fileSizeBytes:
+          file && typeof file !== "string" && Number.isFinite(file.size)
+            ? file.size
+            : null,
+      });
       setViewerMode({ kind: "assembly" });
       setSelectedPartKey(null);
       setPartExportMessage(null);
@@ -704,6 +817,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       // Initialize viewer
       viewerRef.current = createViewer(containerRef.current);
       wasDxfViewRef.current = false;
+      viewerRef.current.setRenderQualityProfile(renderQualityProfile);
       viewerRef.current.setMeasurementGraphicsScale(dimScale);
       if (backgroundColor && viewerRef.current.setBackgroundColor) {
         viewerRef.current.setBackgroundColor(backgroundColor);
@@ -764,6 +878,10 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
         replaceModelSession(null);
       };
     }, [autoResize, show3D]);
+
+    useEffect(() => {
+      viewerRef.current?.setRenderQualityProfile(renderQualityProfile);
+    }, [renderQualityProfile]);
 
     // Update Appearance
     useEffect(() => {
@@ -1057,87 +1175,6 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       }
     }
 
-    useEffect(() => {
-      const probeReqId = ++assemblyProbeReqRef.current;
-      const isStale = () => assemblyProbeReqRef.current !== probeReqId;
-
-      if (!file) {
-        setAssemblyProbeCount(0);
-        setIsProbingAssembly(false);
-        return;
-      }
-
-      const ext = getFileExt(file);
-      if (!isCadExt(ext) && !isMeshAssemblyExt(ext)) {
-        setAssemblyProbeCount(0);
-        setIsProbingAssembly(false);
-        return;
-      }
-
-      if (isCadExt(ext) && (!workerReady || !workerRef.current)) {
-        setIsProbingAssembly(false);
-        return;
-      }
-
-      const probe = async () => {
-        setIsProbingAssembly(true);
-        try {
-          if (isCadExt(ext)) {
-            const worker = workerRef.current;
-            if (!worker) {
-              if (!isStale()) setAssemblyProbeCount(0);
-              return;
-            }
-
-            const assembly = await loadCadAssemblyWithTopology(file, worker);
-            const session = createCadModelSession(assembly, {
-              ext,
-              originalName:
-                typeof file === "string"
-                  ? file.split("/").pop() || file
-                  : file.name,
-              originalFile: typeof file === "string" ? undefined : file,
-              originalBytes: assembly.originalBytes,
-            });
-            const meshCount = session.partMap.size;
-            disposeObject3DSafe(assembly.object);
-            disposeObject3DSafe(session.sourceObject);
-            disposeObject3DSafe(session.displayObject);
-
-            if (isStale()) return;
-            setAssemblyProbeCount(meshCount);
-            return;
-          }
-
-          const object = await loadMeshAssemblyAsObject3D(file);
-          const session = createMeshModelSession(object, {
-            ext,
-            originalName:
-              typeof file === "string"
-                ? file.split("/").pop() || file
-                : file.name,
-            originalFile: typeof file === "string" ? undefined : file,
-          });
-          const meshCount = session.partMap.size;
-          disposeObject3DSafe(session.sourceObject);
-          disposeObject3DSafe(session.displayObject);
-          disposeObject3DSafe(object);
-
-          if (isStale()) return;
-          setAssemblyProbeCount(meshCount);
-        } catch {
-          if (isStale()) return;
-          setAssemblyProbeCount(0);
-        } finally {
-          if (!isStale()) {
-            setIsProbingAssembly(false);
-          }
-        }
-      };
-
-      probe();
-    }, [file, workerReady]);
-
     // Load file when it changes
     useEffect(() => {
       if (!file || !viewerRef.current || !workerRef.current) return;
@@ -1173,10 +1210,30 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
         clearFlatCache();
         clearFormedCache();
         viewerRef.current?.setMeasurementSegment(null, null, null);
+        const loadStartedAt = performance.now();
+        const stageTimes: Record<string, number> = {};
+        const markStage = (label: string) => {
+          stageTimes[label] = Number((performance.now() - loadStartedAt).toFixed(2));
+        };
+        const fileSizeBytes =
+          typeof file !== "string" && Number.isFinite(file.size) ? file.size : null;
+        const initialProfile = resolveViewerQualityProfile({
+          fileSizeBytes,
+        });
+        let activeProfile = initialProfile;
+        viewerRef.current?.setRenderQualityProfile(initialProfile);
+        setRenderQualityProfile(initialProfile);
+        perfLog("load_start", {
+          ext,
+          assemblyMode,
+          fileSizeBytes,
+          initialProfile,
+        });
 
         try {
           setCadTopologyContext(null);
           viewerRef.current?.clear();
+          markStage("viewer_cleared");
           if (ext === "dxf") {
             const buf =
               typeof file === "string"
@@ -1189,8 +1246,10 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                     return resp.arrayBuffer();
                   })
                 : await file.arrayBuffer();
+            markStage("dxf_buffer_loaded");
             const dxfUnits = units === "in" ? "inch" : "mm";
             const parsed = parseDxfFromArrayBuffer(buf);
+            markStage("dxf_parsed");
             const scaleToMm =
               dxfUnits === "inch"
                 ? 25.4
@@ -1214,6 +1273,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
               chordalToleranceMm: 0.1,
               edgeThresholdDeg: 25,
             });
+            markStage("dxf_main_object_built");
             const nextDoc: LoadedDxfDocument = {
               ...doc,
               consumedEntityUids: [...builtMain.consumedEntityUids],
@@ -1229,6 +1289,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
             if (viewerRef.current) {
               applyMainDxfObjectToViewer(viewerRef.current, builtMain);
             }
+            markStage("dxf_viewer_applied");
             wasDxfViewRef.current = !builtMain.didBuildSolid;
           } else {
             viewerRef.current?.setControlsPreset("orbit3d");
@@ -1242,11 +1303,25 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                 file,
                 workerRef.current!,
               );
+              markStage("cad_worker_tessellated");
               setCadTopologyContextFromCadLoad(
                 ext,
                 assembly.topology,
                 assembly.topologyAvailability,
               );
+              const cadComplexity = summarizeObjectComplexity(assembly.object);
+              const runtimeProfile = resolveViewerQualityProfile({
+                fileSizeBytes,
+                complexity: cadComplexity,
+              });
+              activeProfile = runtimeProfile;
+              viewerRef.current?.setRenderQualityProfile(runtimeProfile);
+              setRenderQualityProfile(runtimeProfile);
+              perfLog("cad_scene_complexity", {
+                ext,
+                profile: runtimeProfile,
+                ...cadComplexity,
+              });
               if (usePartsMode) {
                 const session = createCadModelSession(assembly, {
                   ext,
@@ -1257,10 +1332,14 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                   originalFile: typeof file === "string" ? undefined : file,
                   originalBytes: assembly.originalBytes,
                 });
-                disposeObject3DSafe(assembly.object);
                 if (isStale()) {
                   disposeObject3DSafe(session.sourceObject);
-                  disposeObject3DSafe(session.displayObject);
+                  if (
+                    session.displayObject &&
+                    session.displayObject !== session.sourceObject
+                  ) {
+                    disposeObject3DSafe(session.displayObject);
+                  }
                   return;
                 }
 
@@ -1279,8 +1358,12 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                 setViewerMode({ kind: "assembly" });
                 loadedAssemblySession = session;
                 loadedAssemblyParts = assemblyDisplay.parts;
+                markStage("cad_parts_mode_loaded");
               } else {
-                const formedCache = buildMergedGeometryFromObject(assembly.object);
+                const shouldCacheFormedGeometry = showFlatParts === true;
+                const formedCache = shouldCacheFormedGeometry
+                  ? buildMergedGeometryFromObject(assembly.object)
+                  : null;
                 if (isStale()) {
                   disposeObject3DSafe(assembly.object);
                   disposeGeometrySafe(formedCache);
@@ -1301,10 +1384,25 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                 setParts([]);
                 setViewerMode({ kind: "assembly" });
                 displayAssemblySnapshotRef.current = null;
+                markStage("cad_flat_mode_loaded");
               }
             } else if (usePartsMode && isMeshAssemblyExt(ext)) {
               const object = await loadMeshAssemblyAsObject3D(file);
+              markStage("mesh_assembly_loaded");
               setCadTopologyContext(null);
+              const meshComplexity = summarizeObjectComplexity(object);
+              const runtimeProfile = resolveViewerQualityProfile({
+                fileSizeBytes,
+                complexity: meshComplexity,
+              });
+              activeProfile = runtimeProfile;
+              viewerRef.current?.setRenderQualityProfile(runtimeProfile);
+              setRenderQualityProfile(runtimeProfile);
+              perfLog("mesh_scene_complexity", {
+                ext,
+                profile: runtimeProfile,
+                ...meshComplexity,
+              });
               const session = createMeshModelSession(object, {
                 ext,
                 originalName:
@@ -1313,10 +1411,14 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                     : file.name,
                 originalFile: typeof file === "string" ? undefined : file,
               });
-              disposeObject3DSafe(object);
               if (isStale()) {
                 disposeObject3DSafe(session.sourceObject);
-                disposeObject3DSafe(session.displayObject);
+                if (
+                  session.displayObject &&
+                  session.displayObject !== session.sourceObject
+                ) {
+                  disposeObject3DSafe(session.displayObject);
+                }
                 return;
               }
 
@@ -1335,21 +1437,33 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
               setViewerMode({ kind: "assembly" });
               loadedAssemblySession = session;
               loadedAssemblyParts = assemblyDisplay.parts;
+              markStage("mesh_parts_mode_loaded");
             } else {
               setCadTopologyContext(null);
               const geom = await loadMeshFile(file, workerRef.current!);
               if (isStale()) return;
-              const formedCache = geom.clone();
-              setDimsFromGeometry(formedCache);
-              viewerRef.current?.loadMeshFromGeometry(formedCache.clone());
+              const runtimeProfile = resolveViewerQualityProfile({
+                fileSizeBytes,
+                complexity: {
+                  meshCount: 1,
+                  triangleCount: Math.floor((geom.index?.count ?? 0) / 3),
+                  lineSegmentCount: 0,
+                },
+              });
+              activeProfile = runtimeProfile;
+              viewerRef.current?.setRenderQualityProfile(runtimeProfile);
+              setRenderQualityProfile(runtimeProfile);
+              setDimsFromGeometry(geom);
+              viewerRef.current?.loadMeshFromGeometry(geom.clone());
               setFormedGeom((prev) => {
                 disposeGeometrySafe(prev);
-                return formedCache;
+                return null;
               });
               replaceModelSession(null);
               setParts([]);
               setViewerMode({ kind: "assembly" });
               displayAssemblySnapshotRef.current = null;
+              markStage("mesh_single_loaded");
             }
 
             if (assemblyMode !== "parts" && isCadExt(ext)) {
@@ -1372,6 +1486,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
           }
 
           if (isStale()) return;
+          markStage("scene_loaded");
           // Reset appearance on new file load
           viewerRef.current?.setMaterialProperties(
             parseInt(materialColor.replace("#", "0x"), 16),
@@ -1389,6 +1504,14 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                 loadedAssemblyParts,
               );
           }
+          perfLog("load_complete", {
+            ext,
+            assemblyMode,
+            profile: activeProfile,
+            totalMs: Number((performance.now() - loadStartedAt).toFixed(2)),
+            stageTimes,
+            partCount: loadedAssemblyParts.length,
+          });
         } catch (err: any) {
           if (isStale()) return;
           console.error("Failed to load file:", err);
@@ -1425,6 +1548,18 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
     }, [autoResize, show3D]);
 
     // Measurement Logic
+    const flushPendingMeasurementHover = () => {
+      measureHoverRafRef.current = null;
+      const pending = pendingMeasureHoverRef.current;
+      pendingMeasureHoverRef.current = null;
+      if (!pending || !viewerRef.current) return;
+      runMeasurementHoverInteraction({
+        viewer: viewerRef.current,
+        ndcX: pending.x,
+        ndcY: pending.y,
+      });
+    };
+
     const handleViewportPointerMove = (
       event: React.PointerEvent<HTMLDivElement>,
     ) => {
@@ -1448,11 +1583,12 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
         }
       }
 
-      runMeasurementHoverInteraction({
-        viewer: viewerRef.current,
-        ndcX: x,
-        ndcY: y,
-      });
+      pendingMeasureHoverRef.current = { x, y };
+      if (measureHoverRafRef.current === null) {
+        measureHoverRafRef.current = requestAnimationFrame(
+          flushPendingMeasurementHover,
+        );
+      }
     };
 
     const handleViewportPointerDown = (
@@ -1605,6 +1741,25 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
     }, [measureMode]);
 
     useEffect(() => {
+      if (measureMode) return;
+      pendingMeasureHoverRef.current = null;
+      if (measureHoverRafRef.current !== null) {
+        cancelAnimationFrame(measureHoverRafRef.current);
+        measureHoverRafRef.current = null;
+      }
+    }, [measureMode]);
+
+    useEffect(() => {
+      return () => {
+        pendingMeasureHoverRef.current = null;
+        if (measureHoverRafRef.current !== null) {
+          cancelAnimationFrame(measureHoverRafRef.current);
+          measureHoverRafRef.current = null;
+        }
+      };
+    }, []);
+
+    useEffect(() => {
       viewerRef.current?.setControlsEnabled?.(true);
     }, [measureMode]);
 
@@ -1631,12 +1786,15 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       }
     }, [viewerMode, modelSession]);
 
-    const detectedCount = Math.max(assemblyProbeCount, parts.length);
+    const detectedCount = parts.length;
     const hasAssembly = detectedCount > 1;
+    const supportsAssemblyMode =
+      !!file && (isCadExt(currentExt) || isMeshAssemblyExt(currentExt));
 
     useEffect(() => {
-      if (isProbingAssembly) return;
       if (assemblyMode !== "parts") return;
+      if (isLoading) return;
+      if (!supportsAssemblyMode) return;
       if (detectedCount > 1) return;
 
       setAssemblyMode("flat");
@@ -1645,7 +1803,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       setPartMenu(null);
       setSelectedPartKey(null);
       setPartExportMessage(null);
-    }, [assemblyMode, detectedCount, isProbingAssembly]);
+    }, [assemblyMode, detectedCount, isLoading, supportsAssemblyMode]);
 
     const baseFlattenEligible =
       showControls && assemblyMode !== "parts" && isCadExt(currentExt);
@@ -2197,10 +2355,10 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
             <div className="cad-controls-card">
               {/* Views: replaced by corner view cube */}
 
-              {hasAssembly && (
+              {supportsAssemblyMode && (
                 <button
                   type="button"
-                  disabled={isProbingAssembly}
+                  disabled={isLoading}
                   onClick={() => {
                     if (assemblyMode === "parts") {
                       setAssemblyMode("flat");
@@ -2215,7 +2373,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                   className={`cad-btn cad-btn--wide ${
                     assemblyMode === "parts" ? "cad-btn--active" : "cad-btn--neutral"
                   } ${
-                    isProbingAssembly
+                    isLoading
                       ? "cad-btn--disabled"
                       : ""
                   }`}

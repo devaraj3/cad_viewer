@@ -112,39 +112,6 @@ function cloneMeshWithResources(source: THREE.Mesh): THREE.Mesh {
   return cloned;
 }
 
-function cloneObject3DWithResources(source: THREE.Object3D): THREE.Object3D {
-  const cloned = source.clone(true);
-  const sourceMeshes: THREE.Mesh[] = [];
-  const clonedMeshes: THREE.Mesh[] = [];
-
-  source.traverse((node) => {
-    if (isExportableMeshNode(node)) {
-      sourceMeshes.push(node);
-    }
-  });
-
-  cloned.traverse((node) => {
-    if (isExportableMeshNode(node)) {
-      clonedMeshes.push(node);
-    }
-  });
-
-  const count = Math.min(sourceMeshes.length, clonedMeshes.length);
-  for (let index = 0; index < count; index++) {
-    const srcMesh = sourceMeshes[index];
-    const dstMesh = clonedMeshes[index];
-    if (srcMesh.geometry) {
-      dstMesh.geometry = srcMesh.geometry.clone();
-    }
-    if (srcMesh.material) {
-      dstMesh.material = cloneMaterialLike(srcMesh.material);
-    }
-    dstMesh.userData = { ...srcMesh.userData };
-  }
-
-  return cloned;
-}
-
 function normalizeMeshIndices(indices: number[], meshCount: number): number[] {
   const deduped = new Set<number>();
   for (const raw of indices) {
@@ -314,11 +281,13 @@ function buildCadPartDescriptors(
 function buildCadPartObject(
   descriptor: CadPartDescriptor,
   sourceMeshes: THREE.Mesh[],
+  options?: { cloneMeshes?: boolean },
 ): THREE.Object3D {
+  const shouldCloneMeshes = options?.cloneMeshes ?? true;
   const partMeshes = descriptor.meshIndices
     .map((meshIndex) => sourceMeshes[meshIndex])
     .filter((mesh): mesh is THREE.Mesh => !!mesh)
-    .map((mesh) => cloneMeshWithResources(mesh));
+    .map((mesh) => (shouldCloneMeshes ? cloneMeshWithResources(mesh) : mesh));
 
   if (partMeshes.length === 1) {
     const mesh = partMeshes[0];
@@ -385,23 +354,20 @@ export function createCadModelSession(
   const descriptors = buildCadPartDescriptors(assembly.root, assembly.meshes);
   const partMap = new Map<string, PartDescriptor>();
   const sourceRoot = new THREE.Group();
-  const displayRoot = new THREE.Group();
   const rootName = normalizePartName(
     assembly.object.name || assembly.root?.name,
     stripFileExtension(options.originalName) || "CAD Assembly",
   );
   sourceRoot.name = rootName;
-  displayRoot.name = rootName;
 
   for (const descriptor of descriptors) {
     partMap.set(descriptor.key, descriptor);
 
-    const sourcePart = buildCadPartObject(descriptor, assembly.meshes);
-    const displayPart = buildCadPartObject(descriptor, assembly.meshes);
+    const sourcePart = buildCadPartObject(descriptor, assembly.meshes, {
+      cloneMeshes: false,
+    });
     attachPartMetadata(sourcePart, descriptor);
-    attachPartMetadata(displayPart, descriptor);
     sourceRoot.add(sourcePart);
-    displayRoot.add(displayPart);
   }
 
   return {
@@ -410,7 +376,6 @@ export function createCadModelSession(
       originalBytes: options.originalBytes ?? assembly.originalBytes,
     }, partMap),
     sourceObject: sourceRoot,
-    displayObject: displayRoot,
     cadRoot: assembly.root,
   };
 }
@@ -419,17 +384,19 @@ export function createMeshModelSession(
   object: THREE.Object3D,
   options: CreateModelSessionOptions,
 ): ModelSession {
-  const sourceObject = cloneObject3DWithResources(object);
-  const displayObject = cloneObject3DWithResources(object);
+  const sourceObject = object;
+  if (!sourceObject.name || sourceObject.name.trim().length === 0) {
+    sourceObject.name = normalizePartName(
+      stripFileExtension(options.originalName),
+      "Mesh Assembly",
+    );
+  }
   const partMap = new Map<string, PartDescriptor>();
 
   const hasTopLevelChildren = sourceObject.children.length > 0;
   const sourcePartRoots = hasTopLevelChildren
     ? sourceObject.children
     : [sourceObject];
-  const displayPartRoots = hasTopLevelChildren
-    ? displayObject.children
-    : [displayObject];
 
   sourcePartRoots.forEach((sourcePartRoot, index) => {
     if (!containsExportableMesh(sourcePartRoot)) return;
@@ -446,16 +413,11 @@ export function createMeshModelSession(
     partMap.set(key, descriptor);
 
     attachPartMetadata(sourcePartRoot, descriptor);
-    const displayPartRoot = displayPartRoots[index];
-    if (displayPartRoot) {
-      attachPartMetadata(displayPartRoot, descriptor);
-    }
   });
 
   return {
     ...buildBaseSession("mesh", options, partMap),
     sourceObject,
-    displayObject,
   };
 }
 

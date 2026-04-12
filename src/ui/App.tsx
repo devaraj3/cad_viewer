@@ -62,7 +62,7 @@ export default function App() {
       <header className="cad-app__header">
         <div className="cad-app__title-wrap">
           <h1>CAD Viewer</h1>
-          <p>Standalone CAD-only viewer migrated from your company CAD module.</p>
+          <p>Standalone CAD-only viewer with migrated advanced CAD capabilities.</p>
         </div>
         <div className="cad-app__actions">
           <label className="cad-app__upload-btn">
