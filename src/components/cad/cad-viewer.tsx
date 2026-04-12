@@ -748,8 +748,12 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       setCadTopologyAvailability(null);
       setCadTopologyEdgeCount(0);
       if (!file) {
-        viewerRef.current?.clear();
-        viewerRef.current?.setMeasurementSegment(null, null, null);
+        const viewer = viewerRef.current;
+        viewer?.clear();
+        viewer?.showAllParts();
+        viewer?.clearIsolation();
+        viewer?.clearEdgeHighlight?.();
+        viewer?.setMeasurementSegment(null, null, null);
         setPartMenu(null);
         setParts([]);
         activeFileKeyRef.current = null;
@@ -766,6 +770,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
         setFlattenError(null);
         setIsUnfolding(false);
         setPartsModeTransition({ fileKey: null, phase: "idle", partCount: 0 });
+        snapshotTakenRef.current = false;
         unfoldRequestRef.current += 1;
         clearFlatCache();
         clearFormedCache();
