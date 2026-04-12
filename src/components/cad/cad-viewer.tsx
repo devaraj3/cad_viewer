@@ -74,6 +74,7 @@ import {
   runMeasurementClickInteraction,
   runMeasurementHoverInteraction,
 } from "./cad-viewer-measurement-interaction";
+import "./cad-viewer.css";
 
 type Units = "mm" | "cm" | "m" | "in";
 type AssemblyLoadMode = "flat" | "parts";
@@ -2194,8 +2195,8 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
 
         {/* Controls Overlay */}
         {showControls && (
-          <div className="absolute top-6 left-6 z-10 flex items-start gap-3">
-            <div className="flex flex-col gap-3 rounded-2xl bg-white/80 p-4 backdrop-blur-xl shadow-[0_8px_30px_rgba(0,0,0,0.08)] border border-slate-200/50 min-w-[220px] text-sm text-slate-600 ring-1 ring-black/[0.02]">
+          <div className="cad-controls-overlay">
+            <div className="cad-controls-card">
               {/* Views: replaced by corner view cube */}
 
               {hasAssembly && (
@@ -2213,24 +2214,64 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                     }
                     setAssemblyMode("parts");
                   }}
-                  className={`rounded-lg border px-3 py-1.5 text-xs font-semibold transition-all ${
-                    assemblyMode === "parts"
-                      ? "bg-blue-600 text-white shadow-md shadow-blue-200 ring-2 ring-blue-500/30 border border-blue-600"
-                      : "bg-slate-50 text-slate-700 border border-blue-200/70 hover:bg-white hover:border-blue-300"
+                  className={`cad-btn cad-btn--wide ${
+                    assemblyMode === "parts" ? "cad-btn--active" : "cad-btn--neutral"
                   } ${
                     isProbingAssembly
-                      ? "cursor-not-allowed opacity-60"
-                      : "cursor-pointer"
+                      ? "cad-btn--disabled"
+                      : ""
                   }`}
                 >
                   Assembly parts
                 </button>
               )}
 
-              <div className="h-px bg-slate-200/60 mx-1" />
+              {hasAssembly && (
+                <div className="cad-row cad-row--three">
+                  <button
+                    type="button"
+                    disabled={!selectedPartKey}
+                    onClick={() => {
+                      const selectedPart = selectedPartKey
+                        ? parts.find((part) => part.key === selectedPartKey) ?? null
+                        : null;
+                      if (!selectedPart) return;
+                      viewerRef.current?.isolateObject(selectedPart.object);
+                      setPartMenu(null);
+                    }}
+                    className={`cad-btn cad-btn--small ${
+                      selectedPartKey ? "cad-btn--neutral" : "cad-btn--disabled"
+                    }`}
+                  >
+                    Isolate
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      viewerRef.current?.showAllParts();
+                      setPartMenu(null);
+                    }}
+                    className="cad-btn cad-btn--small cad-btn--neutral"
+                  >
+                    Show All
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      viewerRef.current?.clearIsolation();
+                      setPartMenu(null);
+                    }}
+                    className="cad-btn cad-btn--small cad-btn--neutral"
+                  >
+                    Clear
+                  </button>
+                </div>
+              )}
+
+              <div className="cad-divider" />
 
               {/* Measurements */}
-              <div className="flex items-center gap-2">
+              <div className="cad-row">
                 <button
                   onClick={() => {
                     const next = !measureMode;
@@ -2240,18 +2281,14 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                       viewerRef.current.setMeasurementSegment(null, null, null);
                     }
                   }}
-                  className={`flex-1 rounded-lg px-3 py-1.5 text-xs font-medium transition-all ${
-                    measureMode
-                      ? "bg-blue-600 text-white shadow-md shadow-blue-200"
-                      : "bg-slate-50 border border-slate-200/60 text-slate-600 hover:bg-white hover:border-blue-200"
-                  }`}
+                  className={`cad-btn cad-btn--flex ${measureMode ? "cad-btn--active" : "cad-btn--neutral"}`}
                 >
                   Measure
                 </button>
                 <select
                   value={units}
                   onChange={(e) => setUnits(e.target.value as Units)}
-                  className="bg-slate-50 border border-slate-200/60 rounded-lg px-2 py-1.5 text-xs font-medium text-slate-700 outline-none hover:border-blue-200 transition-all"
+                  className="cad-select"
                 >
                   <option value="mm">mm</option>
                   <option value="cm">cm</option>
@@ -2261,58 +2298,42 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
               </div>
 
               {measureMode && (
-                <div className="bg-blue-50/50 rounded-lg p-2 border border-blue-100/50">
-                  <div className="text-[10px] uppercase tracking-wider text-blue-500 font-bold mb-1">
+                <div className="cad-info-box">
+                  <div className="cad-info-label">
                     {!measureHasResult(measureMM) && "Click an Edge"}
                     {measureHasResult(measureMM) && "Result"}
                   </div>
                   {measureHasResult(measureMM) && (
-                    <div className="text-blue-700 font-mono text-xs font-bold">
+                    <div className="cad-info-value">
                       {fmt(convert(measureMM!, units))} {units}
                     </div>
                   )}
                 </div>
               )}
 
-              <div className="h-px bg-slate-200/60 mx-1" />
+              <div className="cad-divider" />
 
               {/* Style Controls */}
-              <div className="space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500 text-xs font-medium">
-                    Wireframe
-                  </span>
+              <div className="cad-section">
+                <div className="cad-row cad-row--between">
+                  <span className="cad-label">Wireframe</span>
                   <button
                     onClick={() => setWireframe(!wireframe)}
-                    className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
-                      wireframe ? "bg-blue-600" : "bg-slate-200"
-                    }`}
+                    className={`cad-toggle ${wireframe ? "cad-toggle--on" : ""}`}
                   >
-                    <span
-                      className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                        wireframe ? "translate-x-4" : "translate-x-0"
-                      }`}
-                    />
+                    <span className="cad-toggle__thumb" />
                   </button>
                 </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500 text-xs font-medium">
-                    X-Ray View
-                  </span>
+                <div className="cad-row cad-row--between">
+                  <span className="cad-label">X-Ray View</span>
                   <button
                     onClick={() => setXray(!xray)}
-                    className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
-                      xray ? "bg-blue-600" : "bg-slate-200"
-                    }`}
+                    className={`cad-toggle ${xray ? "cad-toggle--on" : ""}`}
                   >
-                    <span
-                      className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                        xray ? "translate-x-4" : "translate-x-0"
-                      }`}
-                    />
+                    <span className="cad-toggle__thumb" />
                   </button>
                 </div>
-                <div className="flex justify-between items-center pt-1">
+                <div className="cad-color-row">
                   {[
                     "#b8c2ff", // Default Blue
                     "#ef4444", // Red
@@ -2324,11 +2345,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                     <button
                       key={c}
                       onClick={() => setMaterialColor(c)}
-                      className={`h-5 w-5 rounded-full border ring-offset-2 transition-all ${
-                        materialColor === c
-                          ? "ring-2 ring-blue-500 scale-110 border-white"
-                          : "border-slate-200 hover:scale-110"
-                      }`}
+                      className={`cad-color-swatch ${materialColor === c ? "cad-color-swatch--active" : ""}`}
                       style={{ backgroundColor: c }}
                     />
                   ))}
@@ -2337,34 +2354,20 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
 
               {flattenControlVisible && (
                 <>
-                  <div className="h-px bg-slate-200/60 mx-1" />
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-500 text-xs font-medium">
-                        Flatten
-                      </span>
+                  <div className="cad-divider" />
+                  <div className="cad-section">
+                    <div className="cad-row cad-row--between">
+                      <span className="cad-label">Flatten</span>
                       <button
                         disabled={isUnfolding}
                         onClick={() => handleFlatToggle(!flatEnabled)}
-                        className={`relative inline-flex h-5 w-9 flex-shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
-                          flatEnabled ? "bg-blue-600" : "bg-slate-200"
-                        } ${
-                          isUnfolding
-                            ? "cursor-not-allowed opacity-60"
-                            : "cursor-pointer"
-                        }`}
+                        className={`cad-toggle ${flatEnabled ? "cad-toggle--on" : ""} ${isUnfolding ? "cad-toggle--disabled" : ""}`}
                       >
-                        <span
-                          className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                            flatEnabled ? "translate-x-4" : "translate-x-0"
-                          }`}
-                        />
+                        <span className="cad-toggle__thumb" />
                       </button>
                     </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-slate-500 text-xs font-medium">
-                        K-Factor
-                      </span>
+                    <div className="cad-row cad-row--between">
+                      <span className="cad-label">K-Factor</span>
                       <input
                         type="number"
                         min={0}
@@ -2372,13 +2375,11 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                         step={0.01}
                         value={kFactor}
                         onChange={(e) => handleKFactorChange(e.target.value)}
-                        className="w-20 rounded-md border border-slate-200/70 bg-slate-50 px-2 py-1 text-right text-xs font-medium text-slate-700 outline-none focus:border-blue-300"
+                        className="cad-input"
                       />
                     </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-slate-500 text-xs font-medium">
-                        Thickness
-                      </span>
+                    <div className="cad-row cad-row--between">
+                      <span className="cad-label">Thickness</span>
                       <input
                         type="number"
                         min={0}
@@ -2388,21 +2389,17 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                         onChange={(e) =>
                           handleThicknessOverrideChange(e.target.value)
                         }
-                        className="w-20 rounded-md border border-slate-200/70 bg-slate-50 px-2 py-1 text-right text-xs font-medium text-slate-700 outline-none focus:border-blue-300"
+                        className="cad-input"
                       />
                     </div>
                     {isUnfolding && (
-                      <div className="text-[11px] font-medium text-blue-600">
-                        Unfolding...
-                      </div>
+                      <div className="cad-status cad-status--info">Unfolding...</div>
                     )}
                     {flattenError && (
-                      <div className="text-[11px] font-medium text-rose-600">
-                        {flattenError}
-                      </div>
+                      <div className="cad-status cad-status--error">{flattenError}</div>
                     )}
                     {SHOW_SHEET_META_DEBUG && sheetMeta && (
-                      <div className="text-[10px] font-mono text-slate-500">
+                      <div className="cad-debug">
                         {`sheet=${sheetMeta.isSheetMetal ? "true" : "false"} assembly=${
                           sheetMeta.isAssembly ? "true" : "false"
                         } reason=${sheetMeta.reason ?? "none"}`}
@@ -2412,54 +2409,66 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                 </>
               )}
 
-              <div className="h-px bg-slate-200/60 mx-1" />
+              <div className="cad-divider" />
 
               {/* Slicing Controls */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500 text-xs font-medium">
-                    Cross Section
-                  </span>
+              <div className="cad-section">
+                <div className="cad-row cad-row--between">
+                  <span className="cad-label">Cross Section</span>
                   <button
                     onClick={() => setSliceEnabled(!sliceEnabled)}
-                    className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
-                      sliceEnabled ? "bg-blue-600" : "bg-slate-200"
-                    }`}
+                    className={`cad-toggle ${sliceEnabled ? "cad-toggle--on" : ""}`}
                   >
-                    <span
-                      className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                        sliceEnabled ? "translate-x-4" : "translate-x-0"
-                      }`}
-                    />
+                    <span className="cad-toggle__thumb" />
                   </button>
                 </div>
                 {sliceEnabled && (
-                  <div className="px-0.5 pt-1">
+                  <div className="cad-range-wrap">
                     <input
                       type="range"
                       min="0"
                       max="100"
                       value={sliceLevel}
                       onChange={(e) => setSliceLevel(Number(e.target.value))}
-                      className="w-full h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                      className="cad-range"
                     />
                   </div>
                 )}
               </div>
 
-              <div className="h-px bg-slate-200/60 mx-1" />
+              {showDxfPreviewPanel && (
+                <>
+                  <div className="cad-divider" />
+                  <div className="cad-row cad-row--between">
+                    <span className="cad-label">DXF Dimensions</span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setDxfPreviewPanelState((prev) =>
+                          toggleDxfPreviewPanelDimensions(prev),
+                        )
+                      }
+                      className={`cad-btn cad-btn--small ${showDimensions ? "cad-btn--active" : "cad-btn--neutral"}`}
+                    >
+                      {showDimensions ? "On" : "Off"}
+                    </button>
+                  </div>
+                </>
+              )}
+
+              <div className="cad-divider" />
 
               {/* Snapshots */}
-              <div className="grid grid-cols-2 gap-2">
+              <div className="cad-row cad-row--two">
                 <button
                   onClick={() => handleSnapshot("normal")}
-                  className="rounded-lg bg-slate-50 border border-slate-200/60 py-1.5 text-[11px] font-semibold text-slate-600 hover:bg-white hover:border-blue-200 hover:text-blue-600 transition-all"
+                  className="cad-btn cad-btn--small cad-btn--neutral"
                 >
                   Screenshot
                 </button>
                 <button
                   onClick={() => handleSnapshot("outline")}
-                  className="rounded-lg bg-slate-50 border border-slate-200/60 py-1.5 text-[11px] font-semibold text-slate-600 hover:bg-white hover:border-blue-200 hover:text-blue-600 transition-all"
+                  className="cad-btn cad-btn--small cad-btn--neutral"
                 >
                   Outline Snap
                 </button>
@@ -2468,47 +2477,45 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
               {/* Dimensions Info */}
               {dimsMM && (
                 <>
-                  <div className="h-px bg-slate-200/60 mx-1" />
-                  <div className="bg-slate-50/50 rounded-xl p-3 border border-slate-200/40">
-                    <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-2">
+                  <div className="cad-divider" />
+                  <div className="cad-dims-card">
+                    <div className="cad-dims-title">
                       Model Bounds
                     </div>
-                    <div className="grid grid-cols-3 gap-2 text-[11px] font-mono">
-                      <div className="flex flex-col">
-                        <span className="text-slate-400">X</span>
-                        <span className="text-slate-700 font-bold">
+                    <div className="cad-dims-grid">
+                      <div className="cad-dims-axis">
+                        <span className="cad-dims-axis-label">X</span>
+                        <span className="cad-dims-axis-value">
                           {fmt(convert(dimsMM.x, units))}
                         </span>
                       </div>
-                      <div className="flex flex-col">
-                        <span className="text-slate-400">Y</span>
-                        <span className="text-slate-700 font-bold">
+                      <div className="cad-dims-axis">
+                        <span className="cad-dims-axis-label">Y</span>
+                        <span className="cad-dims-axis-value">
                           {fmt(convert(dimsMM.y, units))}
                         </span>
                       </div>
-                      <div className="flex flex-col">
-                        <span className="text-slate-400">Z</span>
-                        <span className="text-slate-700 font-bold">
+                      <div className="cad-dims-axis">
+                        <span className="cad-dims-axis-label">Z</span>
+                        <span className="cad-dims-axis-value">
                           {fmt(convert(dimsMM.z, units))}
                         </span>
                       </div>
                     </div>
-                    <div className="mt-1 text-[10px] text-right text-slate-400 uppercase font-medium">
-                      {units}
-                    </div>
+                    <div className="cad-dims-unit">{units}</div>
                   </div>
                 </>
               )}
             </div>
 
             {assemblyMode === "parts" && parts.length > 0 && (
-              <div className="w-[220px] max-h-[55vh] overflow-hidden flex flex-col gap-2 p-3 rounded-xl bg-white/90 border border-slate-200/70 shadow-[0_10px_24px_rgba(15,23,42,0.12)] backdrop-blur-xl ring-1 ring-black/[0.03]">
-                <div className="text-xs font-bold text-slate-900">
+              <div className="cad-parts-panel">
+                <div className="cad-parts-title">
                   Parts ({parts.length})
                 </div>
                 {viewerMode.kind === "assembly" ? (
                   <>
-                    <div className="flex flex-col gap-1.5 overflow-y-auto pr-1">
+                    <div className="cad-parts-list">
                       {parts.map((part, index) => {
                         const label = getSafePartDisplayName(part.name, index);
                         const exportState = resolvePartExportState(part.key);
@@ -2523,15 +2530,11 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                               viewerRef.current?.isolateObject(part.object);
                               setPartMenu(null);
                             }}
-                            className={`rounded-md px-2 py-1.5 text-xs font-semibold transition-colors ${
-                              selectedPartKey === part.key
-                                ? "bg-blue-600 text-white border border-blue-600 shadow-md shadow-blue-200"
-                                : "bg-slate-50 text-slate-700 border border-slate-200/60 hover:bg-white hover:border-blue-200"
-                            }`}
+                            className={`cad-part-row ${selectedPartKey === part.key ? "cad-part-row--active" : ""}`}
                             title={part.rawName ?? label}
                           >
-                            <div className="flex items-center gap-1.5">
-                              <div className="flex-1 truncate">{label}</div>
+                            <div className="cad-part-row-content">
+                              <div className="cad-part-name">{label}</div>
                               {showExportAction && (
                                 <button
                                   type="button"
@@ -2542,15 +2545,13 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                                     void handleExportSelectedPart(part.key);
                                   }}
                                   disabled={!isExportEnabled}
-                                  className={`rounded-md p-1 transition-colors ${
-                                    isExportEnabled
-                                      ? "bg-white/90 text-slate-700 hover:text-blue-700 hover:bg-white"
-                                      : "bg-slate-100 text-slate-400 cursor-not-allowed"
+                                  className={`cad-icon-btn ${
+                                    isExportEnabled ? "cad-icon-btn--enabled" : "cad-icon-btn--disabled"
                                   }`}
                                   title={exportState.reason}
                                   aria-label={`Export ${label}`}
                                 >
-                                  <Download className="h-3.5 w-3.5" />
+                                  <Download className="cad-icon-sm" />
                                 </button>
                               )}
                             </div>
@@ -2558,7 +2559,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                         );
                       })}
                     </div>
-                    <div className="h-px bg-slate-200/60 my-1" />
+                    <div className="cad-divider" />
                     <button
                       disabled={!selectedPartKey}
                       onClick={() => {
@@ -2568,19 +2569,15 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                         }
                         void openPartView(selectedPartKey);
                       }}
-                      className={`rounded-md px-2 py-1.5 text-[11px] font-semibold transition-colors ${
-                        selectedPartKey
-                          ? "bg-blue-50 text-blue-700 border border-blue-200 hover:bg-white"
-                          : "bg-slate-100 text-slate-400 border border-slate-200/60 cursor-not-allowed"
-                      }`}
+                      className={`cad-btn cad-btn--wide ${selectedPartKey ? "cad-btn--neutral" : "cad-btn--disabled"}`}
                     >
-                      <span className="inline-flex items-center gap-1">
-                        <ExternalLink className="h-3.5 w-3.5" />
+                      <span className="cad-inline-icon">
+                        <ExternalLink className="cad-icon-sm" />
                         Open Selected Part
                       </span>
                     </button>
                     {partExportMessage && (
-                      <div className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-600">
+                      <div className="cad-part-message">
                         {partExportMessage}
                       </div>
                     )}
@@ -2598,18 +2595,18 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                         selectedIndex,
                       );
                       return (
-                        <div className="rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-700 truncate">
+                        <div className="cad-part-selected">
                           {selectedLabel}
                         </div>
                       );
                     })()}
-                    <div className="h-px bg-slate-200/60 my-1" />
+                    <div className="cad-divider" />
                     <button
                       onClick={backToAssemblyView}
-                      className="rounded-md px-2 py-1.5 text-[11px] font-semibold transition-colors bg-slate-50 text-slate-700 border border-slate-200/60 hover:bg-white hover:border-blue-200"
+                      className="cad-btn cad-btn--wide cad-btn--neutral"
                     >
-                      <span className="inline-flex items-center gap-1">
-                        <ArrowLeft className="h-3.5 w-3.5" />
+                      <span className="cad-inline-icon">
+                        <ArrowLeft className="cad-icon-sm" />
                         Back to Assembly
                       </span>
                     </button>
@@ -2627,18 +2624,18 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="absolute inset-0 z-20 flex items-center justify-center bg-slate-900/10 backdrop-blur-sm pointer-events-none"
+              className="cad-loading-overlay"
             >
-              <div className="flex flex-col items-center gap-3 rounded-2xl bg-white/90 p-8 shadow-2xl border border-slate-200/50 backdrop-blur-xl ring-1 ring-black/[0.05]">
-                <div className="relative">
-                  <div className="absolute inset-0 rounded-full bg-blue-500/20 blur-xl animate-pulse" />
-                  <Loader2 className="h-10 w-10 animate-spin text-blue-600 relative z-10" />
+              <div className="cad-loading-card">
+                <div className="cad-loading-icon-wrap">
+                  <div className="cad-loading-glow" />
+                  <Loader2 className="cad-loading-icon" />
                 </div>
-                <div className="flex flex-col items-center gap-1">
-                  <span className="text-sm font-semibold text-slate-900">
+                <div className="cad-loading-text">
+                  <span className="cad-loading-title">
                     Processing Model
                   </span>
-                  <span className="text-[11px] text-slate-500 font-medium">
+                  <span className="cad-loading-subtitle">
                     Preparing 3D environment...
                   </span>
                 </div>
@@ -2653,23 +2650,23 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
-              className="absolute inset-0 z-20 flex items-center justify-center bg-slate-900/40 backdrop-blur-md p-6"
+              className="cad-error-overlay"
             >
-              <div className="flex flex-col items-center gap-4 rounded-2xl bg-white p-8 shadow-2xl border border-red-100 max-w-[80%] text-center">
-                <div className="h-12 w-12 rounded-full bg-red-50 flex items-center justify-center">
-                  <span className="text-2xl">⚠️</span>
+              <div className="cad-error-card">
+                <div className="cad-error-icon-wrap">
+                  <span className="cad-error-icon">⚠️</span>
                 </div>
-                <div className="flex flex-col gap-1">
-                  <h3 className="text-sm font-bold text-slate-900">
+                <div className="cad-error-text">
+                  <h3 className="cad-error-title">
                     Failed to Load Model
                   </h3>
-                  <p className="text-xs text-slate-500 leading-relaxed">
+                  <p className="cad-error-message">
                     {error}
                   </p>
                 </div>
                 <button
                   onClick={() => window.location.reload()}
-                  className="mt-2 rounded-lg bg-slate-900 px-4 py-2 text-xs font-semibold text-white hover:bg-slate-800 transition-colors"
+                  className="cad-error-retry"
                 >
                   Retry
                 </button>
