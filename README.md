@@ -66,18 +66,34 @@ This is intentionally a small, focused architecture so it’s easy to extend.
 
 ---
 
-## Running locally
+## Prerequisites
+
+- Node.js 20+
+- npm
+
+## Setup
 
 ```bash
-# install dependencies
 npm install
-
-# start dev server
+cp .env.example .env.local
 npm run dev
+```
 
-# build for production (used by Vercel)
+## Environment variables
+
+Configure environment variables in `.env.local` (copy from `.env.example`).
+
+| Variable | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `VITE_SENTRY_DSN` | No | Empty (Sentry disabled) | Sentry DSN for client-side error reporting in production builds. |
+
+## Development workflow
+
+```bash
+npm run typecheck
 npm run build
 ```
+
 ---
 
 ## Licenses
