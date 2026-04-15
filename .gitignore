@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+
+# Vite cache
+.vite/
+
+# System files
+.DS_Store
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Internal migration docs
+migration_reports/
+
+# Environment, IDE, and coverage artifacts
+.env
+.env.local
+.env.production
+.vscode/
+.idea/
+coverage/
+*.tsbuildinfo
