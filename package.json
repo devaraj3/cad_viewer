@@ -18,13 +18,13 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-router-dom": "^6.30.3",
-    "three": "0.180.0"
+    "three": "0.184.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
-    "@types/three": "0.180.0",
+    "@types/three": "0.184.0",
     "@vitejs/plugin-react": "^4.2.0",
     "eslint": "^9.39.4",
     "eslint-config-prettier": "^10.1.8",
