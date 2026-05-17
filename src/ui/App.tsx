@@ -51,11 +51,19 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const pendingFile = consumePendingFile();
-    if (pendingFile) {
-      handleFile(pendingFile);
+  const pendingFile = consumePendingFile();
+  if (pendingFile) {
+    const ext = pendingFile.name.split(".").pop()?.trim().toLowerCase() ?? "";
+    if (!isSupportedExt(ext)) {
+      setError(
+        "Unsupported file type. Use STEP/STP/IGES/IGS/BREP, STL/OBJ/3MF/GLTF/GLB, or DXF.",
+      );
+      return;
     }
-  }, [handleFile]);
+    setError(null);
+    setFile(pendingFile);
+  }
+}, [handleFile]);
 
   function onFileChange(event: React.ChangeEvent<HTMLInputElement>): void {
     const next = event.target.files?.[0] ?? null;
