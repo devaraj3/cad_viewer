@@ -11,6 +11,25 @@ import {
   type CadTopologyResult,
 } from "./exact-cad-topology";
 
+type BufferGeometryWithBVH = THREE.BufferGeometry & {
+  computeBoundsTree?: () => unknown;
+  disposeBoundsTree?: () => unknown;
+  boundsTree?: unknown;
+};
+
+function computeGeometryBoundsTree(
+  geometry: THREE.BufferGeometry | null | undefined,
+): void {
+  if (!geometry) return;
+  const withBVH = geometry as BufferGeometryWithBVH;
+  if (withBVH.boundsTree) return;
+  try {
+    withBVH.computeBoundsTree?.();
+  } catch {
+    /* ignore BVH build errors */
+  }
+}
+
 export type {
   ExactVertex,
   ExactEdgeKind,
@@ -194,9 +213,55 @@ export type CadAssemblyLoadResult = {
   ext: CADExt;
 };
 
+export type CadAssemblyCacheMesh = {
+  name: string;
+  partId?: string | null;
+  color?: [number, number, number] | null;
+  positions: Float32Array;
+  normals?: Float32Array;
+  indices: Uint32Array;
+};
+
+export type CadAssemblyCachePayload = {
+  version: 1;
+  ext: CADExt;
+  root: CadAssemblyNode;
+  meshes: CadAssemblyCacheMesh[];
+  topology: CadTopologyResult | null;
+  topologyAvailability: CadTopologyAvailability;
+  sourceBytes: ArrayBuffer;
+};
+
 export type CadAssemblyWithTopologyLoadResult = CadAssemblyLoadResult & {
   topology: CadTopologyResult | null;
   topologyAvailability: CadTopologyAvailability;
+  cachePayload: CadAssemblyCachePayload;
+};
+
+export type CadAssemblyProgressStage = "worker" | "streaming" | "finalizing";
+
+export type CadAssemblyProgressUpdate = {
+  stage: CadAssemblyProgressStage;
+  loaded: number;
+  total: number;
+  percent: number;
+};
+
+export type CadAssemblyProgressiveChunkUpdate = {
+  chunk: THREE.Group;
+  loaded: number;
+  total: number;
+  percent: number;
+};
+
+export type LoadCadAssemblyWithTopologyOptions = {
+  progressive?: {
+    enabled?: boolean;
+    chunkSize?: number;
+    onProgress?: (update: CadAssemblyProgressUpdate) => void;
+    onChunk?: (update: CadAssemblyProgressiveChunkUpdate) => void;
+    shouldAbort?: () => boolean;
+  };
 };
 
 function applyStainlessSteelMaterialOverrides(root: any, doubleSide = false) {
@@ -290,6 +355,7 @@ function mergeFromObject(root: any) {
       // ignore for non-manifold or line-based geometry
     }
   }
+  computeGeometryBoundsTree(merged);
   return merged;
 }
 
@@ -527,192 +593,564 @@ export function resolveNodeMeshes(
   return resolved;
 }
 
+type PendingCadMeshEntry = {
+  sourceIndex: number;
+  name: string;
+  partId: string | null;
+  color: [number, number, number] | null;
+  geometry: THREE.BufferGeometry;
+};
+
+type FinalCadMeshEntry = {
+  sourceIndices: number[];
+  name: string;
+  partId: string | null;
+  color: [number, number, number] | null;
+  geometry: THREE.BufferGeometry;
+};
+
+function normalizePackedColor(
+  raw: TessPartsMesh["color"],
+): [number, number, number] | null {
+  if (!Array.isArray(raw) || raw.length < 3) return null;
+  const r = Number(raw[0]);
+  const g = Number(raw[1]);
+  const b = Number(raw[2]);
+  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) {
+    return null;
+  }
+  return [r, g, b];
+}
+
+function colorMergeKey(color: [number, number, number] | null): string {
+  if (!color) return "none";
+  const [r, g, b] = color;
+  return `${r.toFixed(6)}_${g.toFixed(6)}_${b.toFixed(6)}`;
+}
+
+function buildPendingCadMeshEntry(
+  packed: TessPartsMesh,
+  sourceIndex: number,
+): PendingCadMeshEntry {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    "position",
+    new THREE.BufferAttribute(packed.positions, 3),
+  );
+  geometry.setIndex(new THREE.BufferAttribute(packed.indices, 1));
+  if (packed.normals) {
+    geometry.setAttribute("normal", new THREE.BufferAttribute(packed.normals, 3));
+  } else {
+    try {
+      geometry.computeVertexNormals();
+    } catch {
+      /* ignore */
+    }
+  }
+  return {
+    sourceIndex,
+    name:
+      typeof packed.name === "string" && packed.name.trim().length > 0
+        ? packed.name
+        : `Part ${sourceIndex + 1}`,
+    partId: normalizeCadPartId(packed.partId),
+    color: normalizePackedColor(packed.color),
+    geometry,
+  };
+}
+
+function remapCadRootMeshIndices(
+  root: CadAssemblyNode,
+  sourceToTargetIndex: Map<number, number>,
+): CadAssemblyNode {
+  const remappedMeshes = Array.from(
+    new Set(
+      (Array.isArray(root.meshes) ? root.meshes : [])
+        .map((idx) => sourceToTargetIndex.get(idx))
+        .filter((idx): idx is number => Number.isInteger(idx)),
+    ),
+  ).sort((a, b) => a - b);
+  const remappedChildren = (Array.isArray(root.children) ? root.children : []).map(
+    (child) => remapCadRootMeshIndices(child, sourceToTargetIndex),
+  );
+  return {
+    ...root,
+    meshes: remappedMeshes,
+    children: remappedChildren,
+  };
+}
+
 function buildCadAssemblyScene(
   packedMeshes: TessPartsMesh[],
   rawRoot: unknown,
 ): { object: THREE.Group; root: CadAssemblyNode; meshes: THREE.Mesh[] } {
   const group = new THREE.Group();
-  const meshes: THREE.Mesh[] = [];
+  const pendingEntries: PendingCadMeshEntry[] = packedMeshes.map((packed, index) =>
+    buildPendingCadMeshEntry(packed, index),
+  );
+  const mergeBuckets = new Map<string, PendingCadMeshEntry[]>();
+  const passthroughEntries: PendingCadMeshEntry[] = [];
 
-  for (let i = 0; i < packedMeshes.length; i++) {
-    const packed = packedMeshes[i];
-    const geom = new THREE.BufferGeometry();
+  for (const entry of pendingEntries) {
+    if (!entry.partId) {
+      // Preserve legacy per-mesh semantics when part IDs are unavailable.
+      passthroughEntries.push(entry);
+      continue;
+    }
+    const key = `${entry.partId}::${colorMergeKey(entry.color)}`;
+    const bucket = mergeBuckets.get(key) ?? [];
+    bucket.push(entry);
+    mergeBuckets.set(key, bucket);
+  }
 
-    geom.setAttribute("position", new THREE.BufferAttribute(packed.positions, 3));
-    geom.setIndex(new THREE.BufferAttribute(packed.indices, 1));
-    if (packed.normals) {
-      geom.setAttribute("normal", new THREE.BufferAttribute(packed.normals, 3));
-    } else {
+  const finalEntries: FinalCadMeshEntry[] = passthroughEntries.map((entry) => ({
+    sourceIndices: [entry.sourceIndex],
+    name: entry.name,
+    partId: entry.partId,
+    color: entry.color,
+    geometry: entry.geometry,
+  }));
+
+  for (const bucket of mergeBuckets.values()) {
+    if (bucket.length === 1) {
+      const only = bucket[0];
+      finalEntries.push({
+        sourceIndices: [only.sourceIndex],
+        name: only.name,
+        partId: only.partId,
+        color: only.color,
+        geometry: only.geometry,
+      });
+      continue;
+    }
+
+    const geoms = bucket.map((entry) => entry.geometry);
+    let merged: THREE.BufferGeometry | null = null;
+    try {
+      merged = BufferGeometryUtils.mergeGeometries(geoms, false);
+    } catch {
+      merged = null;
+    }
+
+    if (!merged) {
+      for (const fallback of bucket) {
+        finalEntries.push({
+          sourceIndices: [fallback.sourceIndex],
+          name: fallback.name,
+          partId: fallback.partId,
+          color: fallback.color,
+          geometry: fallback.geometry,
+        });
+      }
+      continue;
+    }
+
+    for (const source of geoms) {
+      if (source === merged) continue;
       try {
-        geom.computeVertexNormals();
+        source.dispose();
       } catch {
         /* ignore */
       }
     }
 
+    const sourceIndices = bucket
+      .map((entry) => entry.sourceIndex)
+      .sort((a, b) => a - b);
+    finalEntries.push({
+      sourceIndices,
+      name: bucket[0]?.name ?? `Part ${sourceIndices[0] + 1}`,
+      partId: bucket[0]?.partId ?? null,
+      color: bucket[0]?.color ?? null,
+      geometry: merged,
+    });
+  }
+
+  finalEntries.sort(
+    (a, b) =>
+      (a.sourceIndices[0] ?? Number.MAX_SAFE_INTEGER) -
+      (b.sourceIndices[0] ?? Number.MAX_SAFE_INTEGER),
+  );
+
+  const meshes: THREE.Mesh[] = [];
+  const sourceToTargetIndex = new Map<number, number>();
+  for (const entry of finalEntries) {
+    computeGeometryBoundsTree(entry.geometry);
     const mat = createStainlessSteelMaterial().clone();
     mat.side = THREE.DoubleSide;
-    const mesh = new THREE.Mesh(geom, mat);
-    mesh.name =
-      typeof packed.name === "string" && packed.name.trim().length > 0
-        ? packed.name
-        : `Part ${i + 1}`;
-    mesh.userData.__cadMeshIndex = i;
-    if (packed.partId) {
-      mesh.userData.__cadPartId = packed.partId;
+    const mesh = new THREE.Mesh(entry.geometry, mat);
+    mesh.name = entry.name;
+    mesh.userData.__cadMeshIndex = entry.sourceIndices[0];
+    mesh.userData.__cadMeshIndices = [...entry.sourceIndices];
+    if (entry.partId) {
+      mesh.userData.__cadPartId = entry.partId;
     }
-    if (packed.color) {
-      mesh.userData.__cadColor = packed.color;
+    if (entry.color) {
+      mesh.userData.__cadColor = entry.color;
+    }
+    const targetIndex = meshes.length;
+    for (const sourceIndex of entry.sourceIndices) {
+      sourceToTargetIndex.set(sourceIndex, targetIndex);
     }
     group.add(mesh);
     meshes.push(mesh);
   }
 
-  const root = normalizeCadRoot(rawRoot, meshes.length);
+  const normalizedRoot = normalizeCadRoot(rawRoot, packedMeshes.length);
+  const root = remapCadRootMeshIndices(normalizedRoot, sourceToTargetIndex);
   if (typeof root.name === "string" && root.name.trim().length > 0) {
     group.name = root.name;
   }
   return { object: group, root, meshes };
 }
 
+function cloneCadAssemblyCacheMeshes(
+  meshes: TessPartsMesh[],
+): CadAssemblyCacheMesh[] {
+  return meshes.map((mesh) => ({
+    name: mesh.name,
+    partId: normalizeCadPartId(mesh.partId),
+    color: normalizePackedColor(mesh.color),
+    positions: new Float32Array(mesh.positions),
+    normals: mesh.normals ? new Float32Array(mesh.normals) : undefined,
+    indices: new Uint32Array(mesh.indices),
+  }));
+}
+
+function copyCadAssemblySourceBytes(sourceBytes: ArrayBuffer): ArrayBuffer {
+  return sourceBytes.slice(0);
+}
+
+function buildCadAssemblyCachePayload(
+  params: {
+    ext: CADExt;
+    root: CadAssemblyNode;
+    meshes: TessPartsMesh[];
+    topology: CadTopologyResult | null;
+    topologyAvailability: CadTopologyAvailability;
+    sourceBytes: ArrayBuffer;
+  },
+): CadAssemblyCachePayload {
+  return {
+    version: 1,
+    ext: params.ext,
+    root: normalizeCadRoot(params.root, params.meshes.length),
+    meshes: cloneCadAssemblyCacheMeshes(params.meshes),
+    topology: normalizeCadTopologyResult(params.topology),
+    topologyAvailability: normalizeCadTopologyAvailability(
+      params.topologyAvailability,
+    ),
+    sourceBytes: copyCadAssemblySourceBytes(params.sourceBytes),
+  };
+}
+
+function buildCadAssemblyFromPackedResult(params: {
+  ext: CADExt;
+  root: unknown;
+  meshes: TessPartsMesh[];
+  topology: CadTopologyResult | null;
+  topologyAvailability: CadTopologyAvailability;
+  sourceBytes: ArrayBuffer;
+}): CadAssemblyWithTopologyLoadResult {
+  const built = buildCadAssemblyScene(params.meshes, params.root);
+  const cachePayload = buildCadAssemblyCachePayload({
+    ext: params.ext,
+    root: built.root,
+    meshes: params.meshes,
+    topology: params.topology,
+    topologyAvailability: params.topologyAvailability,
+    sourceBytes: params.sourceBytes,
+  });
+
+  return {
+    ...built,
+    originalBytes: copyCadAssemblySourceBytes(params.sourceBytes),
+    ext: params.ext,
+    topology: normalizeCadTopologyResult(params.topology),
+    topologyAvailability: normalizeCadTopologyAvailability(
+      params.topologyAvailability,
+    ),
+    cachePayload,
+  };
+}
+
+function buildProgressiveChunkGroup(
+  packedMeshes: TessPartsMesh[],
+  start: number,
+  end: number,
+): THREE.Group {
+  const chunk = new THREE.Group();
+  chunk.name = `cad-progressive-chunk-${start}-${Math.max(start, end - 1)}`;
+
+  for (let meshIndex = start; meshIndex < end; meshIndex += 1) {
+    const packed = packedMeshes[meshIndex];
+    const entry = buildPendingCadMeshEntry(packed, meshIndex);
+    computeGeometryBoundsTree(entry.geometry);
+    const material = createStainlessSteelMaterial().clone();
+    material.side = THREE.DoubleSide;
+    const mesh = new THREE.Mesh(entry.geometry, material);
+    mesh.name = entry.name;
+    mesh.userData.__cadMeshIndex = meshIndex;
+    mesh.userData.__cadMeshIndices = [meshIndex];
+    if (entry.partId) {
+      mesh.userData.__cadPartId = entry.partId;
+    }
+    if (entry.color) {
+      mesh.userData.__cadColor = entry.color;
+    }
+    chunk.add(mesh);
+  }
+
+  return chunk;
+}
+
+function waitForMainThreadTurn(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, 0);
+  });
+}
+
+async function streamProgressiveCadChunks(
+  packedMeshes: TessPartsMesh[],
+  options: LoadCadAssemblyWithTopologyOptions["progressive"] | undefined,
+): Promise<void> {
+  if (!options?.enabled) return;
+  if (typeof options.onChunk !== "function") return;
+  const total = packedMeshes.length;
+  if (total <= 0) return;
+
+  const safeChunkSize =
+    Number.isFinite(options.chunkSize) && (options.chunkSize ?? 0) > 0
+      ? Math.max(1, Math.floor(options.chunkSize ?? 1))
+      : 12;
+
+  for (let start = 0; start < total; start += safeChunkSize) {
+    if (options.shouldAbort?.()) return;
+    const end = Math.min(total, start + safeChunkSize);
+    const chunk = buildProgressiveChunkGroup(packedMeshes, start, end);
+    const loaded = end;
+    const percent = Math.min(90, Math.round((loaded / Math.max(1, total)) * 90));
+    options.onChunk({ chunk, loaded, total, percent });
+    options.onProgress?.({
+      stage: "streaming",
+      loaded,
+      total,
+      percent,
+    });
+    await waitForMainThreadTurn();
+  }
+}
+
+function requestCadWorkerMessage<TResponse>(
+  worker: Worker,
+  message: { id: string } & Record<string, unknown>,
+  transferables: Transferable[],
+): Promise<TResponse> {
+  return new Promise<TResponse>((resolve, reject) => {
+    const handle = (event: MessageEvent<TResponse & { id?: string }>) => {
+      const data = event.data;
+      if (!data || data.id !== message.id) return;
+      worker.removeEventListener("message", handle as any);
+      resolve(data as TResponse);
+    };
+    worker.addEventListener("message", handle as any);
+    try {
+      worker.postMessage(message, transferables);
+    } catch (error) {
+      worker.removeEventListener("message", handle as any);
+      reject(error);
+    }
+  });
+}
+
+export function buildCadAssemblyFromCachePayload(
+  payload: CadAssemblyCachePayload,
+): CadAssemblyWithTopologyLoadResult {
+  const ext = isCADExt(payload.ext) ? payload.ext : "step";
+  const meshes: TessPartsMesh[] = payload.meshes.map((mesh, meshIndex) => ({
+    name:
+      typeof mesh.name === "string" && mesh.name.trim().length > 0
+        ? mesh.name
+        : `Part ${meshIndex + 1}`,
+    partId: normalizeCadPartId(mesh.partId),
+    color: normalizePackedColor(mesh.color),
+    positions:
+      mesh.positions instanceof Float32Array
+        ? mesh.positions
+        : new Float32Array(mesh.positions),
+    normals:
+      mesh.normals instanceof Float32Array
+        ? mesh.normals
+        : mesh.normals
+          ? new Float32Array(mesh.normals)
+          : undefined,
+    indices:
+      mesh.indices instanceof Uint32Array
+        ? mesh.indices
+        : new Uint32Array(mesh.indices),
+  }));
+  const topologyAvailability = normalizeCadTopologyAvailability(
+    payload.topologyAvailability,
+  );
+  const topology = normalizeCadTopologyResult(payload.topology);
+  const sourceBytes =
+    payload.sourceBytes instanceof ArrayBuffer
+      ? copyCadAssemblySourceBytes(payload.sourceBytes)
+      : new ArrayBuffer(0);
+
+  return buildCadAssemblyFromPackedResult({
+    ext,
+    root: payload.root,
+    meshes,
+    topology,
+    topologyAvailability,
+    sourceBytes,
+  });
+}
+
 export async function loadCadAssemblyWithTopology(
   file: File | string,
   worker: Worker,
+  options?: LoadCadAssemblyWithTopologyOptions,
 ): Promise<CadAssemblyWithTopologyLoadResult> {
   const { fileObj, ext } = await resolveInputFile(file);
   if (!isCADExt(ext)) {
     throw new Error("Unsupported CAD assembly format. Try STEP, IGES or BREP.");
   }
 
-  const id = Math.random().toString(36).slice(2);
   const buf = await fileObj.arrayBuffer();
   const sourceBytes = buf.slice(0);
+  const progressiveOptions = options?.progressive;
 
-  return new Promise<CadAssemblyWithTopologyLoadResult>((resolve, reject) => {
-    const handle = (
-      e: MessageEvent<TessWithTopologyOk | TessPartsOk | TessErr | TessFlatOk>,
-    ) => {
-      const data = e.data;
-      if (!data || data.id !== id) return;
-      worker.removeEventListener("message", handle as any);
+  progressiveOptions?.onProgress?.({
+    stage: "worker",
+    loaded: 0,
+    total: 1,
+    percent: 8,
+  });
 
-      if (!data.ok) {
-        const topologyError =
-          "error" in data && typeof data.error === "string"
-            ? data.error
-            : "OpenCascade error";
-        const fallbackId = `${id}_fallback_parts`;
-        const fallbackBuffer = sourceBytes.slice(0);
-        const fallbackHandle = (
-          fallbackEvent: MessageEvent<TessPartsOk | TessErr | TessFlatOk>,
-        ) => {
-          const fallbackData = fallbackEvent.data;
-          if (!fallbackData || fallbackData.id !== fallbackId) return;
-          worker.removeEventListener("message", fallbackHandle as any);
+  const topologyRequestId = Math.random().toString(36).slice(2);
+  const topologyResponse = await requestCadWorkerMessage<
+    TessWithTopologyOk | TessPartsOk | TessErr | TessFlatOk
+  >(
+    worker,
+    {
+      id: topologyRequestId,
+      type: "tessellate_with_topology",
+      payload: { buffer: buf, ext },
+    } as TessWithTopologyReq,
+    [buf],
+  );
 
-          if (!fallbackData.ok) {
-            reject(
-              new Error(
-                `${topologyError} Fallback tessellation failed: ${
-                  "error" in fallbackData &&
-                  typeof fallbackData.error === "string"
-                    ? fallbackData.error
-                    : "OpenCascade error"
-                }`,
-              ),
-            );
-            return;
-          }
+  const emitProgressive = async (meshes: TessPartsMesh[]): Promise<void> => {
+    await streamProgressiveCadChunks(meshes, progressiveOptions);
+  };
 
-          if (!("mode" in fallbackData) || fallbackData.mode !== "parts") {
-            reject(
-              new Error(
-                `${topologyError} Fallback tessellation did not return parts data.`,
-              ),
-            );
-            return;
-          }
-
-          const built = buildCadAssemblyScene(
-            fallbackData.meshes,
-            fallbackData.root,
-          );
-          resolve({
-            ...built,
-            originalBytes: sourceBytes,
-            ext,
-            topology: null,
-            topologyAvailability: {
-              exact: false,
-              reason:
-                topologyError.includes("Missing required OCCT runtime export") ||
-                topologyError.includes("missing_runtime_support")
-                  ? "missing_runtime_support"
-                  : "runtime_error",
-              message: topologyError,
-            },
-          });
-        };
-
-        worker.addEventListener("message", fallbackHandle as any);
-        worker.postMessage(
-          {
-            id: fallbackId,
-            type: "tessellate",
-            payload: {
-              buffer: fallbackBuffer,
-              ext,
-              mode: "parts",
-            },
-          } as TessReq,
-          [fallbackBuffer],
-        );
-        return;
-      }
-
-      if ("type" in data && data.type === "tessellate_with_topology") {
-        const built = buildCadAssemblyScene(data.meshes, data.root);
-        resolve({
-          ...built,
-          originalBytes: sourceBytes,
-          ext,
-          topology: normalizeCadTopologyResult(data.topology),
-          topologyAvailability: normalizeCadTopologyAvailability(
-            data.topologyAvailability,
-          ),
-        });
-        return;
-      }
-
-      if (!("mode" in data) || data.mode !== "parts") {
-        reject(new Error("CAD worker did not return parts data"));
-        return;
-      }
-
-      const built = buildCadAssemblyScene(data.meshes, data.root);
-      resolve({
-        ...built,
-        originalBytes: sourceBytes,
-        ext,
-        topology: null,
-        topologyAvailability: {
-          exact: false,
-          reason: "worker_request_unsupported",
-          message:
-            "Worker responded with tessellated parts only; exact topology request is unsupported by this worker build.",
-        },
-      });
-    };
-
-    worker.addEventListener("message", handle as any);
-    worker.postMessage(
+  if (!topologyResponse.ok) {
+    const topologyError =
+      "error" in topologyResponse && typeof topologyResponse.error === "string"
+        ? topologyResponse.error
+        : "OpenCascade error";
+    const fallbackBuffer = sourceBytes.slice(0);
+    const fallbackResponse = await requestCadWorkerMessage<
+      TessPartsOk | TessErr | TessFlatOk
+    >(
+      worker,
       {
-        id,
-        type: "tessellate_with_topology",
-        payload: { buffer: buf, ext },
-      } as TessWithTopologyReq,
-      [buf],
+        id: `${topologyRequestId}_fallback_parts`,
+        type: "tessellate",
+        payload: {
+          buffer: fallbackBuffer,
+          ext,
+          mode: "parts",
+        },
+      } as TessReq,
+      [fallbackBuffer],
     );
+
+    if (!fallbackResponse.ok) {
+      const fallbackError =
+        "error" in fallbackResponse && typeof fallbackResponse.error === "string"
+          ? fallbackResponse.error
+          : "OpenCascade error";
+      throw new Error(
+        `${topologyError} Fallback tessellation failed: ${fallbackError}`,
+      );
+    }
+    if (!("mode" in fallbackResponse) || fallbackResponse.mode !== "parts") {
+      throw new Error(
+        `${topologyError} Fallback tessellation did not return parts data.`,
+      );
+    }
+
+    const topologyAvailability: CadTopologyAvailability = {
+      exact: false,
+      reason:
+        topologyError.includes("Missing required OCCT runtime export") ||
+        topologyError.includes("missing_runtime_support")
+          ? "missing_runtime_support"
+          : "runtime_error",
+      message: topologyError,
+    };
+    await emitProgressive(fallbackResponse.meshes);
+    progressiveOptions?.onProgress?.({
+      stage: "finalizing",
+      loaded: fallbackResponse.meshes.length,
+      total: fallbackResponse.meshes.length,
+      percent: 95,
+    });
+    return buildCadAssemblyFromPackedResult({
+      ext,
+      root: fallbackResponse.root,
+      meshes: fallbackResponse.meshes,
+      topology: null,
+      topologyAvailability,
+      sourceBytes,
+    });
+  }
+
+  if ("type" in topologyResponse && topologyResponse.type === "tessellate_with_topology") {
+    await emitProgressive(topologyResponse.meshes);
+    progressiveOptions?.onProgress?.({
+      stage: "finalizing",
+      loaded: topologyResponse.meshes.length,
+      total: topologyResponse.meshes.length,
+      percent: 95,
+    });
+    return buildCadAssemblyFromPackedResult({
+      ext,
+      root: topologyResponse.root,
+      meshes: topologyResponse.meshes,
+      topology: topologyResponse.topology,
+      topologyAvailability: topologyResponse.topologyAvailability,
+      sourceBytes,
+    });
+  }
+
+  if (!("mode" in topologyResponse) || topologyResponse.mode !== "parts") {
+    throw new Error("CAD worker did not return parts data");
+  }
+
+  const topologyAvailability: CadTopologyAvailability = {
+    exact: false,
+    reason: "worker_request_unsupported",
+    message:
+      "Worker responded with tessellated parts only; exact topology request is unsupported by this worker build.",
+  };
+  await emitProgressive(topologyResponse.meshes);
+  progressiveOptions?.onProgress?.({
+    stage: "finalizing",
+    loaded: topologyResponse.meshes.length,
+    total: topologyResponse.meshes.length,
+    percent: 95,
+  });
+  return buildCadAssemblyFromPackedResult({
+    ext,
+    root: topologyResponse.root,
+    meshes: topologyResponse.meshes,
+    topology: null,
+    topologyAvailability,
+    sourceBytes,
   });
 }
 
@@ -869,6 +1307,7 @@ export async function unfoldCadSheetMetal(
         flat.setAttribute("position", new THREE.BufferAttribute(positions, 3));
         flat.setIndex(new THREE.BufferAttribute(indices, 1));
         flat.computeVertexNormals();
+        computeGeometryBoundsTree(flat);
 
         resolve({
           flat,
@@ -1067,6 +1506,7 @@ export async function loadMeshFile(
         );
         geom.setIndex(new THREE.BufferAttribute(data.indices, 1));
         geom.computeVertexNormals();
+        computeGeometryBoundsTree(geom);
         resolve(geom);
       };
 

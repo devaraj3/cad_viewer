@@ -278,6 +278,35 @@ function buildOcctParams(
   };
 }
 
+function resolveAdaptiveDeflections(byteLength: number): {
+  linearDeflection: number;
+  angularDeflection: number;
+} {
+  const linearDeflection =
+    byteLength > 30_000_000
+      ? 0.8
+      : byteLength > 10_000_000
+        ? 0.35
+        : byteLength > 2_000_000
+          ? 0.12
+          : 0.04;
+
+  const angularDeflection = linearDeflection * 0.7;
+  return { linearDeflection, angularDeflection };
+}
+
+function resolveEffectiveDeflections(
+  byteLength: number,
+  linearDeflection?: number,
+  angularDeflection?: number,
+): { linearDeflection: number; angularDeflection: number } {
+  const adaptive = resolveAdaptiveDeflections(byteLength);
+  return {
+    linearDeflection: linearDeflection ?? adaptive.linearDeflection,
+    angularDeflection: angularDeflection ?? adaptive.angularDeflection,
+  };
+}
+
 function isArrayLikeNumber(x: unknown): x is ArrayLike<number> {
   if (!x || typeof x !== "object") return false;
   const maybeArrayLike = x as { length?: unknown };
@@ -810,13 +839,18 @@ ctx.onmessage = async (e: MessageEvent<any>) => {
       const effectiveMode: "flat" | "parts" = mode ?? "flat";
       const u8 = new Uint8Array(buffer);
       const mod = await init();
+      const effectiveDeflections = resolveEffectiveDeflections(
+        buffer.byteLength,
+        linearDeflection,
+        angularDeflection,
+      );
 
       const res = readCadResult(
         mod,
         ext,
         u8,
-        linearDeflection,
-        angularDeflection,
+        effectiveDeflections.linearDeflection,
+        effectiveDeflections.angularDeflection,
       );
 
       if (!res || !res.success) {
@@ -893,6 +927,11 @@ ctx.onmessage = async (e: MessageEvent<any>) => {
 
       const mod = await init();
       const sourceBytes = new Uint8Array(req.buffer);
+      const effectiveDeflections = resolveEffectiveDeflections(
+        req.buffer.byteLength,
+        req.linearDeflection,
+        req.angularDeflection,
+      );
       const topologySupport = resolveTopologyRuntimeSupport(mod);
       if (
         !topologySupport.exactCadTopology ||
@@ -911,11 +950,11 @@ ctx.onmessage = async (e: MessageEvent<any>) => {
       const topologyExtractionResult = topologyFn(sourceBytes, {
         inputExt: req.ext,
         ext: req.ext,
-        linearDeflection: req.linearDeflection,
-        angularDeflection: req.angularDeflection,
+        linearDeflection: effectiveDeflections.linearDeflection,
+        angularDeflection: effectiveDeflections.angularDeflection,
         mesh: {
-          linearDeflection: req.linearDeflection ?? 0.001,
-          angularDeflection: req.angularDeflection ?? 0.5,
+          linearDeflection: effectiveDeflections.linearDeflection,
+          angularDeflection: effectiveDeflections.angularDeflection,
         },
       });
       if (!topologyExtractionResult || topologyExtractionResult.success === false) {

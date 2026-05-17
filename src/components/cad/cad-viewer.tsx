@@ -15,6 +15,7 @@ import {
 } from "./viewer";
 import {
   analyzeCadSheetMetal,
+  buildCadAssemblyFromCachePayload,
   DEFAULT_WORKER_CAPABILITIES,
   getWorkerCapabilities,
   loadCadAssemblyWithTopology,
@@ -26,9 +27,14 @@ import {
   type CadTopologyResult,
   type WorkerCapabilities,
 } from "./mesh-loader";
+import {
+  buildCadGeometryCacheKey,
+  getCachedCadAssembly,
+  setCachedCadAssembly,
+} from "../../utils/geometryCache";
 import { parseDxfFromArrayBuffer } from "./dxf";
 import { motion, AnimatePresence } from "framer-motion";
-import { ArrowLeft, Download, ExternalLink, Loader2 } from "lucide-react";
+import { ArrowLeft, Download, ExternalLink } from "lucide-react";
 import { getSafePartDisplayName } from "./part-display-name";
 import {
   createCadModelSession,
@@ -76,6 +82,7 @@ import {
   runMeasurementClickInteraction,
   runMeasurementHoverInteraction,
 } from "./cad-viewer-measurement-interaction";
+import LoadingOverlay from "../../ui/LoadingOverlay";
 import "./cad-viewer.css";
 
 type Units = "mm" | "cm" | "m" | "in";
@@ -115,6 +122,36 @@ export const CAD_EXTS: ReadonlySet<CADExt> = new Set<CADExt>([
 
 export const MESH_ASSEMBLY_EXTS: ReadonlySet<MeshAssemblyExt> =
   new Set<MeshAssemblyExt>(["obj", "3mf", "gltf", "glb"]);
+
+type BufferGeometryWithBVH = THREE.BufferGeometry & {
+  computeBoundsTree?: () => unknown;
+  disposeBoundsTree?: () => unknown;
+  boundsTree?: unknown;
+};
+
+function computeGeometryBoundsTree(
+  geometry: THREE.BufferGeometry | null | undefined,
+): void {
+  if (!geometry) return;
+  const withBVH = geometry as BufferGeometryWithBVH;
+  if (withBVH.boundsTree) return;
+  try {
+    withBVH.computeBoundsTree?.();
+  } catch {
+    /* ignore BVH build errors */
+  }
+}
+
+function disposeGeometryBoundsTree(
+  geometry: THREE.BufferGeometry | null | undefined,
+): void {
+  if (!geometry) return;
+  try {
+    (geometry as BufferGeometryWithBVH).disposeBoundsTree?.();
+  } catch {
+    /* ignore BVH disposal errors */
+  }
+}
 
 function buildMergedGeometryFromObject(
   object: THREE.Object3D,
@@ -170,8 +207,172 @@ function buildMergedGeometryFromObject(
       /* ignore */
     }
   }
+  computeGeometryBoundsTree(merged);
 
   return merged;
+}
+
+function readMaterialColorHex(material: unknown, key: string): string | null {
+  const value = (material as any)?.[key];
+  if (!value || typeof value !== "object") return null;
+  if (typeof (value as any).getHexString !== "function") return null;
+  try {
+    return (value as any).getHexString();
+  } catch {
+    return null;
+  }
+}
+
+function readMaterialTextureUuid(material: unknown, key: string): string | null {
+  const value = (material as any)?.[key];
+  if (!value || typeof value !== "object") return null;
+  if (!("isTexture" in (value as any))) return null;
+  const uuid = (value as any).uuid;
+  return typeof uuid === "string" ? uuid : "texture";
+}
+
+function buildMaterialMergeKey(material: THREE.Material): string {
+  const anyMat = material as any;
+  return JSON.stringify({
+    type: material.type,
+    side: material.side,
+    transparent: material.transparent,
+    opacity: material.opacity,
+    depthTest: material.depthTest,
+    depthWrite: material.depthWrite,
+    wireframe: anyMat.wireframe === true,
+    color: readMaterialColorHex(anyMat, "color"),
+    emissive: readMaterialColorHex(anyMat, "emissive"),
+    metalness:
+      typeof anyMat.metalness === "number" && Number.isFinite(anyMat.metalness)
+        ? anyMat.metalness
+        : null,
+    roughness:
+      typeof anyMat.roughness === "number" && Number.isFinite(anyMat.roughness)
+        ? anyMat.roughness
+        : null,
+    map: readMaterialTextureUuid(anyMat, "map"),
+    normalMap: readMaterialTextureUuid(anyMat, "normalMap"),
+    alphaMap: readMaterialTextureUuid(anyMat, "alphaMap"),
+    metalnessMap: readMaterialTextureUuid(anyMat, "metalnessMap"),
+    roughnessMap: readMaterialTextureUuid(anyMat, "roughnessMap"),
+  });
+}
+
+function buildMergedCadDisplayObjectByMaterial(
+  object: THREE.Object3D,
+): THREE.Object3D | null {
+  type MergeBucket = {
+    material: THREE.Material;
+    geometries: THREE.BufferGeometry[];
+    partIds: Set<string>;
+  };
+
+  const root = new THREE.Group();
+  root.name = object.name || "CAD Assembly";
+  const buckets = new Map<string, MergeBucket>();
+
+  object.updateWorldMatrix(true, true);
+  object.traverse((node: any) => {
+    if (!node?.isMesh) return;
+
+    const mesh = node as THREE.Mesh;
+    const sourceGeometry = mesh.geometry as THREE.BufferGeometry | undefined;
+    if (!sourceGeometry) return;
+
+    const worldBakedGeometry = sourceGeometry.clone();
+    worldBakedGeometry.applyMatrix4(mesh.matrixWorld);
+
+    const sourceMaterial = mesh.material;
+    if (!sourceMaterial || Array.isArray(sourceMaterial)) {
+      const bakedMaterial = Array.isArray(sourceMaterial)
+        ? sourceMaterial.map((mat) => mat.clone())
+        : new THREE.MeshStandardMaterial({
+            color: 0xbfc7cc,
+            metalness: 1,
+            roughness: 0.22,
+            side: THREE.DoubleSide,
+          });
+      const bakedMesh = new THREE.Mesh(worldBakedGeometry, bakedMaterial as any);
+      bakedMesh.name = mesh.name;
+      bakedMesh.frustumCulled = true;
+      bakedMesh.userData = { ...mesh.userData };
+      computeGeometryBoundsTree(worldBakedGeometry);
+      root.add(bakedMesh);
+      return;
+    }
+
+    const bucketKey = buildMaterialMergeKey(sourceMaterial);
+    let bucket = buckets.get(bucketKey);
+    if (!bucket) {
+      bucket = {
+        material: sourceMaterial.clone(),
+        geometries: [],
+        partIds: new Set<string>(),
+      };
+      buckets.set(bucketKey, bucket);
+    }
+    bucket.geometries.push(worldBakedGeometry);
+    const partId =
+      typeof mesh.userData?.__cadPartId === "string"
+        ? mesh.userData.__cadPartId.trim()
+        : "";
+    if (partId) bucket.partIds.add(partId);
+  });
+
+  for (const bucket of buckets.values()) {
+    const geoms = bucket.geometries;
+    if (geoms.length === 0) continue;
+
+    let merged: THREE.BufferGeometry | null = null;
+    try {
+      merged =
+        geoms.length === 1 ? geoms[0] : BufferGeometryUtils.mergeGeometries(geoms, false);
+    } catch {
+      merged = null;
+    }
+    if (!merged) {
+      for (const geom of geoms) {
+        try {
+          geom.dispose();
+        } catch {
+          /* ignore */
+        }
+      }
+      continue;
+    }
+
+    for (const geom of geoms) {
+      if (geom === merged) continue;
+      try {
+        geom.dispose();
+      } catch {
+        /* ignore */
+      }
+    }
+
+    if (!merged.getAttribute("normal")) {
+      try {
+        merged.computeVertexNormals();
+      } catch {
+        /* ignore */
+      }
+    }
+    computeGeometryBoundsTree(merged);
+    merged.computeBoundingBox();
+    merged.computeBoundingSphere();
+
+    const mergedMesh = new THREE.Mesh(merged, bucket.material);
+    mergedMesh.frustumCulled = true;
+    if (bucket.partIds.size === 1) {
+      const partId = Array.from(bucket.partIds)[0];
+      if (partId) mergedMesh.userData.__cadPartId = partId;
+    }
+    root.add(mergedMesh);
+  }
+
+  if (root.children.length === 0) return null;
+  return root;
 }
 
 function applyPartMetadata(object: THREE.Object3D, descriptor: PartDescriptor): void {
@@ -500,6 +701,10 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
     const workerRef = useRef<Worker | null>(null);
     const wasDxfViewRef = useRef(false);
     const [isLoading, setIsLoading] = useState(false);
+    const [loadProgress, setLoadProgress] = useState(0);
+    const [loadStage, setLoadStage] = useState("");
+    const [loadFileName, setLoadFileName] = useState("");
+    const [loadFileSize, setLoadFileSize] = useState(0);
     const [error, setError] = useState<string | null>(null);
     const [show3D, setShow3D] = useState(!previewUrl);
     const [loadedDxfDocument, setLoadedDxfDocument] =
@@ -560,6 +765,10 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
     const snapshotTakenRef = useRef(false);
     const loadRequestRef = useRef(0);
     const unfoldRequestRef = useRef(0);
+    const progressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const loadingHideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+      null,
+    );
     const activeFileKeyRef = useRef<string | null>(null);
     const flatCacheKeyRef = useRef<string | null>(null);
     const pendingMeasureHoverRef = useRef<{ x: number; y: number } | null>(null);
@@ -585,6 +794,19 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
         setAssemblyMode(assemblyLoadModeProp);
       }
     }, [assemblyLoadModeProp]);
+
+    useEffect(() => {
+      return () => {
+        if (progressTimerRef.current) {
+          clearInterval(progressTimerRef.current);
+          progressTimerRef.current = null;
+        }
+        if (loadingHideTimeoutRef.current) {
+          clearTimeout(loadingHideTimeoutRef.current);
+          loadingHideTimeoutRef.current = null;
+        }
+      };
+    }, []);
 
     const isDxfFile = currentExt === "dxf";
     const showDxfPreviewPanel =
@@ -993,6 +1215,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
     ) {
       if (!geom) return;
       try {
+        disposeGeometryBoundsTree(geom);
         geom.dispose();
       } catch {
         /* ignore */
@@ -1000,6 +1223,37 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
     }
 
     function disposeObject3DSafe(obj: THREE.Object3D | null | undefined) {
+      const disposeTextureLike = (value: unknown) => {
+        if (!value || typeof value !== "object") return;
+        if (Array.isArray(value)) {
+          value.forEach((entry) => disposeTextureLike(entry));
+          return;
+        }
+        if ((value as any).isTexture === true) {
+          try {
+            (value as THREE.Texture).dispose();
+          } catch {
+            /* ignore */
+          }
+        }
+      };
+
+      const disposeMaterialSafe = (material: THREE.Material | null | undefined) => {
+        if (!material) return;
+        try {
+          Object.values(material as any).forEach((entry) => {
+            disposeTextureLike(entry);
+          });
+        } catch {
+          /* ignore */
+        }
+        try {
+          material.dispose();
+        } catch {
+          /* ignore */
+        }
+      };
+
       if (!obj) return;
       obj.traverse((child) => {
         const mesh = child as THREE.Mesh;
@@ -1010,20 +1264,12 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
         const { material } = mesh;
         if (Array.isArray(material)) {
           material.forEach((mat) => {
-            try {
-              mat.dispose();
-            } catch {
-              /* ignore */
-            }
+            disposeMaterialSafe(mat);
           });
           return;
         }
 
-        try {
-          material?.dispose();
-        } catch {
-          /* ignore */
-        }
+        disposeMaterialSafe(material);
       });
     }
 
@@ -1229,6 +1475,22 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
           phase: usePartsMode ? "loading" : "idle",
           partCount: 0,
         });
+        if (progressTimerRef.current) {
+          clearInterval(progressTimerRef.current);
+          progressTimerRef.current = null;
+        }
+        if (loadingHideTimeoutRef.current) {
+          clearTimeout(loadingHideTimeoutRef.current);
+          loadingHideTimeoutRef.current = null;
+        }
+        const nextFileName =
+          typeof file === "string" ? file.split("/").pop() || file : file.name;
+        const nextFileSize =
+          typeof file !== "string" && Number.isFinite(file.size) ? file.size : 0;
+        setLoadFileName(nextFileName);
+        setLoadFileSize(nextFileSize);
+        setLoadProgress(0);
+        setLoadStage("Reading file");
         setIsLoading(true);
         setError(null);
         setDimsMM(null);
@@ -1255,6 +1517,25 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
         let activeProfile = initialProfile;
         viewerRef.current?.setRenderQualityProfile(initialProfile);
         setRenderQualityProfile(initialProfile);
+        const STAGES: [number, number, string][] = [
+          [12, 600, "Reading file"],
+          [28, 1200, "Parsing geometry"],
+          [52, 2000, "Tessellating surfaces"],
+          [74, 1800, "Building mesh"],
+          [88, 1000, "Optimising normals"],
+          [95, 800, "Preparing render"],
+        ];
+        let stageIdx = 0;
+        let currentPct = 0;
+        const timer = setInterval(() => {
+          if (stageIdx >= STAGES.length) return;
+          const [target, , label] = STAGES[stageIdx];
+          setLoadStage(label);
+          currentPct = Math.min(currentPct + 1, target);
+          setLoadProgress(currentPct);
+          if (currentPct >= target) stageIdx += 1;
+        }, 60);
+        progressTimerRef.current = timer;
         perfLog("load_start", {
           ext,
           assemblyMode,
@@ -1329,11 +1610,102 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
               viewerRef.current?.setProjection("perspective"); wasDxfViewRef.current = false;
             }
             if (isCadExt(ext)) {
-              const assembly = await loadCadAssemblyWithTopology(
-                file,
-                workerRef.current!,
-              );
-              markStage("cad_worker_tessellated");
+              const sourceFile = typeof file === "string" ? null : file;
+              const cadCacheKey =
+                sourceFile === null
+                  ? null
+                  : buildCadGeometryCacheKey(
+                      sourceFile.name,
+                      sourceFile.size,
+                      sourceFile.lastModified,
+                    );
+              let assembly: Awaited<
+                ReturnType<typeof loadCadAssemblyWithTopology>
+              > | null = null;
+              let usedCadCache = false;
+              const progressivePreviewRoot = new THREE.Group();
+              progressivePreviewRoot.name = "Progressive CAD Preview";
+              let progressivePreviewMounted = false;
+
+              const mountProgressivePreview = () => {
+                if (progressivePreviewMounted) return;
+                const viewer = viewerRef.current;
+                if (!viewer) return;
+                viewer.loadObject3D(progressivePreviewRoot, {
+                  explodeTopLevel: false,
+                });
+                viewer.setMaterialProperties(
+                  parseInt(materialColor.replace("#", "0x"), 16),
+                  wireframe,
+                  xray,
+                );
+                progressivePreviewMounted = true;
+              };
+
+              if (cadCacheKey) {
+                setLoadStage("Checking geometry cache");
+                const cachedAssembly = await getCachedCadAssembly(cadCacheKey);
+                if (cachedAssembly && cachedAssembly.ext === ext) {
+                  assembly = buildCadAssemblyFromCachePayload(cachedAssembly);
+                  usedCadCache = true;
+                  markStage("cad_cache_hit");
+                  setLoadStage("Using cached geometry");
+                  setLoadProgress((prev) => Math.max(prev, 70));
+                  perfLog("cad_cache_hit", {
+                    ext,
+                    fileName: sourceFile?.name ?? null,
+                    fileSize: sourceFile?.size ?? null,
+                  });
+                } else {
+                  perfLog("cad_cache_miss", {
+                    ext,
+                    fileName: sourceFile?.name ?? null,
+                    fileSize: sourceFile?.size ?? null,
+                  });
+                }
+              }
+
+              if (!assembly) {
+                assembly = await loadCadAssemblyWithTopology(file, workerRef.current!, {
+                  progressive: {
+                    enabled: true,
+                    chunkSize: 12,
+                    shouldAbort: isStale,
+                    onChunk: ({ chunk, loaded, total, percent }) => {
+                      if (isStale()) {
+                        disposeObject3DSafe(chunk);
+                        return;
+                      }
+                      mountProgressivePreview();
+                      progressivePreviewRoot.add(chunk);
+                      viewerRef.current?.requestRender?.("cad_progressive_chunk");
+                      setLoadStage(`Streaming CAD parts (${loaded}/${total})`);
+                      setLoadProgress((prev) => Math.max(prev, percent));
+                    },
+                    onProgress: ({ stage, percent }) => {
+                      if (isStale()) return;
+                      if (stage === "worker") {
+                        setLoadStage("Tessellating CAD");
+                      } else if (stage === "streaming") {
+                        setLoadStage("Streaming CAD parts");
+                      } else {
+                        setLoadStage("Finalizing CAD scene");
+                      }
+                      setLoadProgress((prev) => Math.max(prev, percent));
+                    },
+                  },
+                });
+                markStage("cad_worker_tessellated");
+                if (cadCacheKey) {
+                  void setCachedCadAssembly(cadCacheKey, assembly.cachePayload);
+                }
+              }
+
+              if (isStale()) {
+                disposeObject3DSafe(assembly.object);
+                return;
+              }
+
               setCadTopologyContextFromCadLoad(
                 ext,
                 assembly.topology,
@@ -1350,6 +1722,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
               perfLog("cad_scene_complexity", {
                 ext,
                 profile: runtimeProfile,
+                cache: usedCadCache ? "hit" : "miss",
                 ...cadComplexity,
               });
               if (usePartsMode) {
@@ -1395,24 +1768,33 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                 loadedAssemblyPartCount = assemblyDisplay.parts.length;
                 displayAssemblySnapshotRef.current =
                   buildDisplayAssemblySnapshotFromSource(session);
-                markStage("cad_parts_mode_loaded");
+                markStage(usedCadCache ? "cad_parts_mode_loaded_cache" : "cad_parts_mode_loaded");
               } else {
+                const flatDisplayObject =
+                  buildMergedCadDisplayObjectByMaterial(assembly.object) ??
+                  assembly.object;
                 const shouldCacheFormedGeometry = showFlatParts === true;
                 const formedCache = shouldCacheFormedGeometry
-                  ? buildMergedGeometryFromObject(assembly.object)
+                  ? buildMergedGeometryFromObject(flatDisplayObject)
                   : null;
                 if (isStale()) {
+                  if (flatDisplayObject !== assembly.object) {
+                    disposeObject3DSafe(flatDisplayObject);
+                  }
                   disposeObject3DSafe(assembly.object);
                   disposeGeometrySafe(formedCache);
                   return;
                 }
 
-                setDimsFromObject(assembly.object);
-                attachCadTopologyContext(assembly.object);
+                setDimsFromObject(flatDisplayObject);
+                attachCadTopologyContext(flatDisplayObject);
                 logCadTopologyLoadPath("load_cad_flat_mode");
-                viewerRef.current?.loadObject3D(assembly.object, {
+                viewerRef.current?.loadObject3D(flatDisplayObject, {
                   explodeTopLevel: false,
                 });
+                if (flatDisplayObject !== assembly.object) {
+                  disposeObject3DSafe(assembly.object);
+                }
                 setFormedGeom((prev) => {
                   disposeGeometrySafe(prev);
                   return formedCache;
@@ -1422,7 +1804,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                 setPartsModeTransition({ fileKey, phase: "idle", partCount: 0 });
                 setViewerMode({ kind: "assembly" });
                 displayAssemblySnapshotRef.current = null;
-                markStage("cad_flat_mode_loaded");
+                markStage(usedCadCache ? "cad_flat_mode_loaded_cache" : "cad_flat_mode_loaded");
               }
             } else if (usePartsMode && isMeshAssemblyExt(ext)) {
               const object = await loadMeshAssemblyAsObject3D(file);
@@ -1567,14 +1949,36 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
             setPartsModeTransition({ fileKey, phase: "error", partCount: 0 });
           }
         } finally {
+          if (progressTimerRef.current === timer) {
+            clearInterval(timer);
+            progressTimerRef.current = null;
+          }
           if (!isStale()) {
-            setIsLoading(false);
+            setLoadProgress(100);
+            setLoadStage("Complete");
+            const hideTimeout = setTimeout(() => {
+              if (!isStale()) {
+                setIsLoading(false);
+              }
+              if (loadingHideTimeoutRef.current === hideTimeout) {
+                loadingHideTimeoutRef.current = null;
+              }
+            }, 200);
+            loadingHideTimeoutRef.current = hideTimeout;
           }
         }
       };
 
       load();
       return () => {
+        if (progressTimerRef.current) {
+          clearInterval(progressTimerRef.current);
+          progressTimerRef.current = null;
+        }
+        if (loadingHideTimeoutRef.current) {
+          clearTimeout(loadingHideTimeoutRef.current);
+          loadingHideTimeoutRef.current = null;
+        }
         loadRequestRef.current += 1;
         unfoldRequestRef.current += 1;
       };
@@ -2842,32 +3246,14 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
           </div>
         )}
 
-        {/* Loading Overlay */}
-        <AnimatePresence>
-          {isLoading && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="cad-loading-overlay"
-            >
-              <div className="cad-loading-card">
-                <div className="cad-loading-icon-wrap">
-                  <div className="cad-loading-glow" />
-                  <Loader2 className="cad-loading-icon" />
-                </div>
-                <div className="cad-loading-text">
-                  <span className="cad-loading-title">
-                    Processing Model
-                  </span>
-                  <span className="cad-loading-subtitle">
-                    Preparing 3D environment...
-                  </span>
-                </div>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+        {isLoading && (
+          <LoadingOverlay
+            fileName={loadFileName}
+            fileSize={loadFileSize}
+            progress={loadProgress}
+            stage={loadStage}
+          />
+        )}
         {/* Error Overlay */}
         <AnimatePresence>
           {error && (
