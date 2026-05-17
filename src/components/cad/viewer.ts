@@ -4,6 +4,11 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import * as BufferGeometryUtils from "three/examples/jsm/utils/BufferGeometryUtils.js";
+import {
+  acceleratedRaycast,
+  computeBoundsTree,
+  disposeBoundsTree,
+} from "three-mesh-bvh";
 import { Line2 } from "three/examples/jsm/lines/Line2.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
@@ -31,6 +36,50 @@ import type {
 } from "./exact-cad-topology";
 // Line rendering helpers (thick, pixel-correct lines)
 // We use simple THREE.LineSegments + THREE.EdgesGeometry for legacy/fallback mesh feature edges.
+
+type BufferGeometryWithBVH = THREE.BufferGeometry & {
+  computeBoundsTree?: () => unknown;
+  disposeBoundsTree?: () => unknown;
+  boundsTree?: unknown;
+};
+
+const bufferGeometryPrototype =
+  THREE.BufferGeometry.prototype as BufferGeometryWithBVH;
+bufferGeometryPrototype.computeBoundsTree = computeBoundsTree;
+bufferGeometryPrototype.disposeBoundsTree = disposeBoundsTree;
+(THREE.Mesh.prototype as unknown as { raycast: typeof acceleratedRaycast }).raycast =
+  acceleratedRaycast;
+
+function computeGeometryBoundsTree(
+  geometry: THREE.BufferGeometry | null | undefined,
+): void {
+  if (!geometry) return;
+  const withBVH = geometry as BufferGeometryWithBVH;
+  if (withBVH.boundsTree) return;
+  try {
+    withBVH.computeBoundsTree?.();
+  } catch {
+    /* ignore BVH build errors */
+  }
+}
+
+function disposeGeometryBoundsTree(
+  geometry: THREE.BufferGeometry | null | undefined,
+): void {
+  if (!geometry) return;
+  try {
+    (geometry as BufferGeometryWithBVH).disposeBoundsTree?.();
+  } catch {
+    /* ignore BVH disposal errors */
+  }
+}
+
+function buildBoundsTreeForObjectMeshes(root: THREE.Object3D): void {
+  root.traverse((child: any) => {
+    if (!child?.isMesh) return;
+    computeGeometryBoundsTree(child.geometry as THREE.BufferGeometry | undefined);
+  });
+}
 
 export type Viewer = {
   loadMeshFromGeometry: (geom: THREE.BufferGeometry) => void;
@@ -116,6 +165,7 @@ export type Viewer = {
   getActiveCamera: () => THREE.Camera;
   getRendererSize: () => { width: number; height: number };
   onViewChanged: (cb: () => void) => () => void;
+  requestRender: (reason?: string) => void;
   projectWorldToScreen: (point: THREE.Vector3) => {
     x: number;
     y: number;
@@ -261,8 +311,8 @@ const VIEWER_QUALITY_SETTINGS: Record<
   ViewerQualitySettings
 > = {
   normal: {
-    rendererDprCap: 2,
-    cubeDprCap: 2,
+    rendererDprCap: 1.5,
+    cubeDprCap: 1.5,
     autoBuildWireframeOverlays: true,
     forceApproximateCadMode: false,
   },
@@ -1477,6 +1527,7 @@ export function createViewer(container: HTMLElement): Viewer {
     antialias: true,
     alpha: false,
     preserveDrawingBuffer: false,
+    powerPreference: "high-performance",
   });
   renderer.setPixelRatio(
     Math.min(window.devicePixelRatio || 1, qualitySettings.rendererDprCap),
@@ -1486,7 +1537,8 @@ export function createViewer(container: HTMLElement): Viewer {
     (THREE as any).SRGBColorSpace ?? undefined;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.0; // realistic exposure for ACES filmic
-  renderer.setClearColor(0xffffff);
+  renderer.setClearColor(0xf0f2f5);
+  renderer.shadowMap.enabled = false;
   renderer.localClippingEnabled = true;
   container.appendChild(renderer.domElement);
   // Ensure container can host absolutely positioned overlays (view cube)
@@ -2439,7 +2491,7 @@ export function createViewer(container: HTMLElement): Viewer {
   let gridHelper: THREE.GridHelper | null = null;
   let axesHelper: THREE.AxesHelper | null = null;
 
-  gridHelper = new THREE.GridHelper(1000, 50, 0xcccccc, 0xeeeeee);
+  gridHelper = new THREE.GridHelper(1000, 50, 0x9ca3af, 0xd1d5db);
   gridHelper.position.y = 0;
   scene.add(gridHelper);
 
@@ -3762,7 +3814,10 @@ export function createViewer(container: HTMLElement): Viewer {
       // Remove and dispose lines we previously created
       for (const ln of featureEdgeLines) {
         try {
-          if (ln.geometry) ln.geometry.dispose();
+          if (ln.geometry) {
+            disposeGeometryBoundsTree(ln.geometry);
+            ln.geometry.dispose();
+          }
         } catch {
           /* ignore */
         }
@@ -3850,7 +3905,10 @@ export function createViewer(container: HTMLElement): Viewer {
     try {
       for (const line of wireframeOverlayLines) {
         try {
-          if (line.geometry) line.geometry.dispose();
+          if (line.geometry) {
+            disposeGeometryBoundsTree(line.geometry);
+            line.geometry.dispose();
+          }
         } catch {
           /* ignore */
         }
@@ -5623,7 +5681,7 @@ export function createViewer(container: HTMLElement): Viewer {
     const prevModelVisibleForCube = modelRoot.visible;
     modelRoot.visible = false;
 
-    renderer.setClearColor(0xffffff, 1);
+    renderer.setClearColor(0xf0f2f5, 1);
     scene.background = null;
 
     renderNow("outline_snapshot_capture");
@@ -5633,7 +5691,10 @@ export function createViewer(container: HTMLElement): Viewer {
     scene.remove(edgesGroup);
     edgesGroup.traverse((obj: any) => {
       const asAny = obj as any;
-      if (asAny.geometry) asAny.geometry.dispose();
+      if (asAny.geometry) {
+        disposeGeometryBoundsTree(asAny.geometry);
+        asAny.geometry.dispose();
+      }
       if (asAny.material) {
         if (Array.isArray(asAny.material)) {
           asAny.material.forEach((m: any) => m.dispose());
@@ -5678,18 +5739,56 @@ export function createViewer(container: HTMLElement): Viewer {
   }
 
   function disposeObjectResources(object: THREE.Object3D) {
+    const disposeTextureLike = (value: unknown) => {
+      if (!value || typeof value !== "object") return;
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          disposeTextureLike(item);
+        }
+        return;
+      }
+      if ((value as any).isTexture === true) {
+        try {
+          (value as THREE.Texture).dispose();
+        } catch {
+          /* ignore */
+        }
+      }
+    };
+    const disposeMaterialResources = (
+      material: THREE.Material | undefined | null,
+    ) => {
+      if (!material) return;
+      try {
+        Object.values(material as any).forEach((entry) => {
+          disposeTextureLike(entry);
+        });
+      } catch {
+        /* ignore */
+      }
+      try {
+        material.dispose();
+      } catch {
+        /* ignore */
+      }
+    };
     try {
       object.traverse((obj: any) => {
-        if (obj.geometry) obj.geometry.dispose();
+        if (obj.geometry) {
+          try {
+            disposeGeometryBoundsTree(obj.geometry);
+            obj.geometry.dispose();
+          } catch {
+            /* ignore */
+          }
+        }
         if (obj.material) {
           if (Array.isArray(obj.material)) {
             obj.material.forEach((m: any) => {
-              if (m.map) m.map.dispose();
-              m.dispose();
+              disposeMaterialResources(m);
             });
           } else {
-            if (obj.material.map) obj.material.map.dispose();
-            obj.material.dispose();
+            disposeMaterialResources(obj.material);
           }
         }
       });
@@ -6891,6 +6990,7 @@ export function createViewer(container: HTMLElement): Viewer {
     if (!mesh) return;
 
     recenterGeometryAtOrigin(geom);
+    computeGeometryBoundsTree(geom);
 
     // Geometry replacement path is always mesh/fallback mode for now.
     clearCadTopology();
@@ -6903,6 +7003,7 @@ export function createViewer(container: HTMLElement): Viewer {
     mesh.geometry = geom;
     if (prevGeom && prevGeom !== geom) {
       try {
+        disposeGeometryBoundsTree(prevGeom);
         prevGeom.dispose();
       } catch {
         /* ignore */
@@ -6910,6 +7011,7 @@ export function createViewer(container: HTMLElement): Viewer {
     }
 
     finalizePrimaryGeometryUpdate(mesh, { refit: opts?.refit !== false });
+    requestRender("replace_primary_geometry");
   }
 
   function loadMeshFromGeometry(geom: THREE.BufferGeometry) {
@@ -6931,6 +7033,9 @@ export function createViewer(container: HTMLElement): Viewer {
     // Determine if we should use Mesh or LineSegments
     // If it has normals, it's likely a mesh.
     const hasNormals = !!geom.getAttribute("normal");
+    if (hasNormals) {
+      computeGeometryBoundsTree(geom);
+    }
 
     let object: THREE.Object3D;
     if (hasNormals) {
@@ -6952,6 +7057,7 @@ export function createViewer(container: HTMLElement): Viewer {
     modelRoot.add(object);
 
     finalizePrimaryGeometryUpdate(object, { refit: true });
+    requestRender("load_mesh_from_geometry");
   }
 
   function applyDxfSolidMaterialOverrides(object: THREE.Object3D) {
@@ -7088,6 +7194,7 @@ export function createViewer(container: HTMLElement): Viewer {
     if (isDxfSolid) {
       applyDxfSolidMaterialOverrides(object);
     }
+    buildBoundsTreeForObjectMeshes(object);
 
     modelRoot.add(object);
     if (explodeTopLevel && object.children.length > 0) {
@@ -7158,6 +7265,7 @@ export function createViewer(container: HTMLElement): Viewer {
     });
 
     emitViewChanged();
+    requestRender("load_object3d_complete");
   }
 
   function clear() {
@@ -7664,6 +7772,7 @@ export function createViewer(container: HTMLElement): Viewer {
       } else {
         scene.remove(highlightMesh);
       }
+      disposeGeometryBoundsTree(highlightMesh.geometry);
       highlightMesh.geometry.dispose();
       (highlightMesh.material as THREE.Material).dispose();
       highlightMesh = null;
@@ -7877,7 +7986,10 @@ export function createViewer(container: HTMLElement): Viewer {
 
     // dispose cube materials/geometry
     cubeRoot.traverse((obj: any) => {
-      if (obj.geometry) obj.geometry.dispose();
+      if (obj.geometry) {
+        disposeGeometryBoundsTree(obj.geometry);
+        obj.geometry.dispose();
+      }
       if (obj.material) {
         if (Array.isArray(obj.material)) {
           obj.material.forEach((mm: any) => {
@@ -7894,7 +8006,10 @@ export function createViewer(container: HTMLElement): Viewer {
     // dispose modelRoot children (meshes, measurement graphics, highlights, etc.)
     try {
       modelRoot.traverse((obj: any) => {
-        if (obj.geometry) obj.geometry.dispose();
+        if (obj.geometry) {
+          disposeGeometryBoundsTree(obj.geometry);
+          obj.geometry.dispose();
+        }
         if (obj.material) {
           if (Array.isArray(obj.material)) {
             obj.material.forEach((m: any) => {
@@ -7919,7 +8034,10 @@ export function createViewer(container: HTMLElement): Viewer {
     }
     try {
       roomEnv.traverse((o: any) => {
-        if (o.geometry) o.geometry.dispose();
+        if (o.geometry) {
+          disposeGeometryBoundsTree(o.geometry);
+          o.geometry.dispose();
+        }
         if (o.material) {
           if (Array.isArray(o.material)) {
             o.material.forEach((m: any) => m.dispose());
@@ -7981,6 +8099,7 @@ export function createViewer(container: HTMLElement): Viewer {
     getActiveCamera,
     getRendererSize,
     onViewChanged,
+    requestRender,
     projectWorldToScreen,
   };
 }
