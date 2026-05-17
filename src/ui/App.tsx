@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, startTransition } from "react";
 import { consumePendingFile } from "../fileStore";
 import { CAD_EXTS, CadViewer, MESH_ASSEMBLY_EXTS } from "../components/cad/cad-viewer";
 import "./App.css";
@@ -51,19 +51,12 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-  const pendingFile = consumePendingFile();
-  if (pendingFile) {
-    const ext = pendingFile.name.split(".").pop()?.trim().toLowerCase() ?? "";
-    if (!isSupportedExt(ext)) {
-      setError(
-        "Unsupported file type. Use STEP/STP/IGES/IGS/BREP, STL/OBJ/3MF/GLTF/GLB, or DXF.",
-      );
-      return;
-    }
-    setError(null);
-    setFile(pendingFile);
-  }
-}, [handleFile]);
+  const pendingFile = consumePendingFile()
+  if (!pendingFile) return
+  startTransition(() => {
+    handleFile(pendingFile)
+  })
+}, [handleFile]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function onFileChange(event: React.ChangeEvent<HTMLInputElement>): void {
     const next = event.target.files?.[0] ?? null;
