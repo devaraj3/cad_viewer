@@ -1,0 +1,24 @@
+# CAD Viewer
+
+> Free, browser-based 3D CAD viewer supporting STEP, IGES, STL, OBJ, 3MF, BREP, GLB, and DXF files — no install, no account, no subscription.
+
+CAD Viewer is an open-source, in-browser CAD file viewer built on the OpenCascade (OCCT) engine. It runs entirely client-side and requires no software installation or account signup.
+
+## Features
+- 3D viewing for CAD and mesh formats
+- Measurement tools
+- Section/cross-section controls
+- Snapshot capture (normal and outline)
+- Assembly/part-focused workflows
+- DXF preview support
+
+## Supported formats
+- CAD solids: STEP, STP, IGES, IGS, BREP
+- Mesh/assembly formats: STL, OBJ, 3MF, GLTF, GLB
+- 2D drawing format: DXF
+
+## Pricing
+Free to use, no subscription required.
+
+## Live app
+https://cadviewer.xyz/
