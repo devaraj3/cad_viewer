@@ -1,6 +1,7 @@
 import { motion } from "framer-motion";
 import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { Head } from "vite-react-ssg";
 import { setPendingFile } from "../fileStore";
 import AnimatedBackground from "./AnimatedBackground";
 import styles from "./Landing.module.css";
@@ -40,121 +41,142 @@ export default function Landing() {
   };
 
   return (
-    <div
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
-      style={{
-        colorScheme: "dark",
-        position: "relative",
-        overflow: "hidden",
-        width: "100vw",
-        height: "100vh",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        outline: isDragging ? "2px solid #3b82f6" : "2px solid transparent",
-        outlineOffset: "-4px",
-        transition: "outline 0.15s ease",
-      }}
-    >
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".step,.stp,.iges,.igs,.stl,.obj,.3mf,.glb,.gltf,.brep,.dxf"
-        style={{ display: "none" }}
-        onChange={(e) => {
-          const file = e.target.files?.[0];
-          if (file) {
-            setPendingFile(file);
-            navigate("/viewer");
-          }
-        }}
-      />
-
-      {/* LAYER 0: animated canvas — must be first child */}
-      <AnimatedBackground />
-
-      {/* LAYER 1: subtle vignette — darkens ONLY the edges, NOT the centre */}
-      {/* The centre (where animation is most visible) must stay transparent */}
+    <>
+      <Head>
+        <title>
+          CAD Viewer — View STEP, IGES, STL & OBJ Files in Your Browser
+        </title>
+        <meta
+          name="description"
+          content="Free browser-based CAD viewer. Drop a STEP, IGES, STL, OBJ, 3MF, BREP, GLB, or DXF file to orbit, pan, measure edges, apply section planes, and export snapshots — no install, works offline."
+        />
+        <link rel="canonical" href="https://cadviewer.xyz/" />
+      </Head>
       <div
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
         style={{
-          position: "absolute",
-          inset: 0,
-          background:
-            "radial-gradient(ellipse 100% 90% at 50% 48%, rgba(8,12,20,0.55) 0%, rgba(8,12,20,0.72) 55%, rgba(8,12,20,0.92) 100%)",
-          pointerEvents: "none",
-          zIndex: 1,
-        }}
-      />
-
-      {/* LAYER 2: hero content — must be above canvas and vignette */}
-      <div
-        style={{
+          colorScheme: "dark",
           position: "relative",
-          zIndex: 2,
-          width: "100%",
-          height: "100%",
+          overflow: "hidden",
+          width: "100vw",
+          height: "100vh",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
+          outline: isDragging ? "2px solid #3b82f6" : "2px solid transparent",
+          outlineOffset: "-4px",
+          transition: "outline 0.15s ease",
         }}
       >
-        <motion.section
-          className={styles.hero}
-          initial={{ opacity: 0, y: 24 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5, ease: "easeOut" }}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".step,.stp,.iges,.igs,.stl,.obj,.3mf,.glb,.gltf,.brep,.dxf"
+          style={{ display: "none" }}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) {
+              setPendingFile(file);
+              navigate("/viewer");
+            }
+          }}
+        />
+
+        {/* LAYER 0: animated canvas — must be first child */}
+        <AnimatedBackground />
+
+        {/* LAYER 1: subtle vignette — darkens ONLY the edges, NOT the centre */}
+        {/* The centre (where animation is most visible) must stay transparent */}
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            background:
+              "radial-gradient(ellipse 100% 90% at 50% 48%, rgba(8,12,20,0.55) 0%, rgba(8,12,20,0.72) 55%, rgba(8,12,20,0.92) 100%)",
+            pointerEvents: "none",
+            zIndex: 1,
+          }}
+        />
+
+        {/* LAYER 2: hero content — must be above canvas and vignette */}
+        <div
+          style={{
+            position: "relative",
+            zIndex: 2,
+            width: "100%",
+            height: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
         >
-          <p className={styles.eyebrow}>Browser-based · No install · Offline-capable</p>
-          <h1 className={styles.headline}>View your CAD parts in the browser.</h1>
-          <p className={styles.subheadline}>
-            Drop a STEP, IGES, STL, OBJ, 3MF, BREP, or GLB file and orbit, measure, and snapshot in seconds.
-          </p>
-
-          <div className={styles.pillRow}>
-            {FEATURE_PILLS.map((pill) => (
-              <span key={pill} className={styles.pill}>
-                {pill}
-              </span>
-            ))}
-          </div>
-
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            style={{
-              background: "#3b82f6",
-              color: "#ffffff",
-              border: "none",
-              borderRadius: "8px",
-              padding: "0.75rem 2rem",
-              fontSize: "1rem",
-              fontWeight: 600,
-              cursor: "pointer",
-              transition: "background 0.15s ease, transform 0.15s ease",
-            }}
-            onMouseEnter={(e) => {
-              (e.currentTarget as HTMLButtonElement).style.background = "#2563eb";
-              (e.currentTarget as HTMLButtonElement).style.transform =
-                "translateY(-1px)";
-            }}
-            onMouseLeave={(e) => {
-              (e.currentTarget as HTMLButtonElement).style.background = "#3b82f6";
-              (e.currentTarget as HTMLButtonElement).style.transform =
-                "translateY(0)";
-            }}
+          <motion.section
+            className={styles.hero}
+            initial={{ opacity: 0, y: 24 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5, ease: "easeOut" }}
           >
-            Upload CAD File
-          </button>
+            <p className={styles.eyebrow}>
+              Browser-based · No install · Offline-capable
+            </p>
+            <h1 className={styles.headline}>
+              View your CAD parts in the browser.
+            </h1>
+            <p className={styles.subheadline}>
+              Drop a STEP, IGES, STL, OBJ, 3MF, BREP, or GLB file and orbit,
+              measure, and snapshot in seconds.
+            </p>
 
-          <a className={styles.ghostLink} href="/viewer">
-            or drag a file anywhere on the page
-          </a>
+            <div className={styles.pillRow}>
+              {FEATURE_PILLS.map((pill) => (
+                <span key={pill} className={styles.pill}>
+                  {pill}
+                </span>
+              ))}
+            </div>
 
-          <p className={styles.supported}>Supported: STEP · IGES · STL · OBJ · 3MF · BREP · GLB · DXF</p>
-        </motion.section>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              style={{
+                background: "#3b82f6",
+                color: "#ffffff",
+                border: "none",
+                borderRadius: "8px",
+                padding: "0.75rem 2rem",
+                fontSize: "1rem",
+                fontWeight: 600,
+                cursor: "pointer",
+                transition: "background 0.15s ease, transform 0.15s ease",
+              }}
+              onMouseEnter={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.background =
+                  "#2563eb";
+                (e.currentTarget as HTMLButtonElement).style.transform =
+                  "translateY(-1px)";
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.background =
+                  "#3b82f6";
+                (e.currentTarget as HTMLButtonElement).style.transform =
+                  "translateY(0)";
+              }}
+            >
+              Upload CAD File
+            </button>
+
+            <a className={styles.ghostLink} href="/viewer">
+              or drag a file anywhere on the page
+            </a>
+
+            <p className={styles.supported}>
+              Supported: STEP · IGES · STL · OBJ · 3MF · BREP · GLB · DXF
+            </p>
+          </motion.section>
+        </div>
       </div>
-    </div>
+    </>
   );
 }

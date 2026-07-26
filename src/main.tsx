@@ -1,6 +1,5 @@
-import React from "react";
-import ReactDOM from "react-dom/client";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { ClientOnly, Head, ViteReactSSG } from "vite-react-ssg";
+import type { RouteRecord } from "vite-react-ssg";
 import App from "./ui/App";
 import Landing from "./pages/Landing";
 
@@ -27,14 +26,20 @@ function NotFound() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<Landing />} />
-        <Route path="/viewer" element={<App />} />
-        <Route path="*" element={<NotFound />} />
-      </Routes>
-    </BrowserRouter>
-  </React.StrictMode>,
-);
+export const routes: RouteRecord[] = [
+  { path: "/", element: <Landing /> },
+  {
+    path: "/viewer",
+    element: (
+      <>
+        <Head>
+          <title>CAD Viewer — 3D Viewer</title>
+        </Head>
+        <ClientOnly>{() => <App />}</ClientOnly>
+      </>
+    ),
+  },
+  { path: "*", element: <NotFound /> },
+];
+
+export const createRoot = ViteReactSSG({ routes });
