@@ -1,0 +1,15 @@
+<IfModule mod_rewrite.c>
+RewriteEngine On
+
+# If a real file or directory already matches the request, serve it as-is
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# If appending .html to the request matches a real file, serve that (e.g. /viewer -> viewer.html)
+RewriteCond %{REQUEST_FILENAME}.html -f
+RewriteRule ^(.*)$ $1.html [L]
+
+# Otherwise, fall back to the main app shell so client-side routing can show a proper 404
+RewriteRule ^ index.html [L]
+</IfModule>
