@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "lint": "eslint .",
-    "build": "vite-react-ssg build",
+    "build": "node scripts/generate-sitemap.mjs && vite-react-ssg build",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview"
   },
