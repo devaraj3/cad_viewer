@@ -1,0 +1,16 @@
+name: Notify IndexNow
+on:
+  push:
+    branches: [main]
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+      - name: Wait for deployment to go live
+        run: sleep 180
+      - name: Ping IndexNow
+        run: node scripts/notify-indexnow.mjs

@@ -1,0 +1,8 @@
+[
+  {
+    "_comment": "Whenever you add a new route to main.tsx's routes array, add a matching entry here too — this file drives sitemap.xml and IndexNow generation automatically."
+  },
+  { "path": "/", "changefreq": "weekly", "priority": 1.0 },
+  { "path": "/viewer", "changefreq": "monthly", "priority": 0.8 },
+  { "path": "/guides/split-step-assembly", "changefreq": "monthly", "priority": 0.9 }
+]
