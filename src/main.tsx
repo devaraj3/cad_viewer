@@ -2,6 +2,7 @@ import { ClientOnly, Head, ViteReactSSG } from "vite-react-ssg";
 import type { RouteRecord } from "vite-react-ssg";
 import App from "./ui/App";
 import Landing from "./pages/Landing";
+import SplitStepAssembly from "./pages/guides/SplitStepAssembly";
 
 function NotFound() {
   return (
@@ -28,6 +29,7 @@ function NotFound() {
 
 export const routes: RouteRecord[] = [
   { path: "/", element: <Landing /> },
+  { path: "/guides/split-step-assembly", Component: SplitStepAssembly },
   {
     path: "/viewer",
     element: (

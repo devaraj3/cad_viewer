@@ -171,6 +171,10 @@ export default function Landing() {
               or drag a file anywhere on the page
             </a>
 
+            <a className={styles.guideLink} href="/guides/split-step-assembly">
+              Need to split an assembly into parts? Read the guide →
+            </a>
+
             <p className={styles.supported}>
               Supported: STEP · IGES · STL · OBJ · 3MF · BREP · GLB · DXF
             </p>
