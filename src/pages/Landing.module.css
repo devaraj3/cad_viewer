@@ -86,6 +86,17 @@
   text-decoration: none;
 }
 
+.guideLink {
+  margin-top: 0.5rem;
+  color: #93c5fd;
+  font-size: 0.85rem;
+  text-decoration: none;
+}
+
+.guideLink:hover {
+  color: #3b82f6;
+}
+
 .supported {
   margin: 0.3rem 0 0;
   color: #4b5563;

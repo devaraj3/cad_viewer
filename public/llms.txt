@@ -20,5 +20,8 @@ CAD Viewer is an open-source, in-browser CAD file viewer built on the OpenCascad
 ## Pricing
 Free to use, no subscription required.
 
+## Guides
+- How to Split a STEP Assembly Into Separate Part Files (Free, Online): https://cadviewer.xyz/guides/split-step-assembly
+
 ## Live app
 https://cadviewer.xyz/
