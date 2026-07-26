@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "lint": "eslint .",
-    "build": "vite build",
+    "build": "vite-react-ssg build",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview"
   },
@@ -35,6 +35,7 @@
     "prettier": "^3.8.3",
     "typescript": "^5.4.0",
     "typescript-eslint": "^8.58.2",
-    "vite": "^5.0.0"
+    "vite": "^5.0.0",
+    "vite-react-ssg": "0.7.0"
   }
 }
