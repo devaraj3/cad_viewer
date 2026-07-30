@@ -5,6 +5,7 @@ import { Head } from "vite-react-ssg";
 import { setPendingFile } from "../fileStore";
 import AnimatedBackground from "./AnimatedBackground";
 import styles from "./Landing.module.css";
+import TriangleMark from "./TriangleMark";
 
 const FEATURE_PILLS = [
   "Orbit & Pan",
@@ -57,7 +58,7 @@ export default function Landing() {
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         style={{
-          colorScheme: "dark",
+          colorScheme: "light",
           position: "relative",
           overflow: "hidden",
           width: "100vw",
@@ -87,20 +88,20 @@ export default function Landing() {
         {/* LAYER 0: animated canvas — must be first child */}
         <AnimatedBackground />
 
-        {/* LAYER 1: subtle vignette — darkens ONLY the edges, NOT the centre */}
-        {/* The centre (where animation is most visible) must stay transparent */}
+        {/* LAYER 1: soft fog — dims the grid/scan behind the hero content, */}
+        {/* stays visible in the empty margins around it */}
         <div
           style={{
             position: "absolute",
             inset: 0,
             background:
-              "radial-gradient(ellipse 100% 90% at 50% 48%, rgba(8,12,20,0.55) 0%, rgba(8,12,20,0.72) 55%, rgba(8,12,20,0.92) 100%)",
+              "radial-gradient(circle at 50% 50%, #f7f8fa 0%, #f7f8fa 45%, rgba(247,248,250,0) 100%)",
             pointerEvents: "none",
             zIndex: 1,
           }}
         />
 
-        {/* LAYER 2: hero content — must be above canvas and vignette */}
+        {/* LAYER 2: hero content — must be above canvas and fog */}
         <div
           style={{
             position: "relative",
@@ -118,6 +119,8 @@ export default function Landing() {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5, ease: "easeOut" }}
           >
+            <TriangleMark size={108} />
+
             <p className={styles.eyebrow}>
               Browser-based · No install · Offline-capable
             </p>

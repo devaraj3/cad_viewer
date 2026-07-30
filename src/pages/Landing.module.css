@@ -2,8 +2,8 @@
   width: 100vw;
   height: 100vh;
   overflow: hidden;
-  background: #0d0f12;
-  color: #ffffff;
+  background: #f7f8fa;
+  color: #12161c;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -21,7 +21,7 @@
 
 .eyebrow {
   margin: 0;
-  color: #6b7280;
+  color: #8891a0;
   font-family: "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   font-size: 0.75rem;
   letter-spacing: 0.12em;
@@ -30,7 +30,7 @@
 
 .headline {
   margin: 0;
-  color: #ffffff;
+  color: #12161c;
   font-size: 2.5rem;
   line-height: 1.15;
   font-weight: 700;
@@ -38,7 +38,7 @@
 
 .subheadline {
   margin: 0;
-  color: #9ca3af;
+  color: #5b6472;
   font-size: 1.1rem;
   line-height: 1.55;
   max-width: 800px;
@@ -53,9 +53,9 @@
 }
 
 .pill {
-  border: 1px solid #374151;
-  background: #1a1d24;
-  color: #d1d5db;
+  border: 1px solid #d7dce3;
+  background: #eef1f5;
+  color: #3d4451;
   border-radius: 999px;
   padding: 0.3rem 0.85rem;
   font-size: 0.8rem;
@@ -81,25 +81,25 @@
 
 .ghostLink {
   margin-top: -0.1rem;
-  color: #6b7280;
+  color: #8891a0;
   font-size: 0.8rem;
   text-decoration: none;
 }
 
 .guideLink {
   margin-top: 0.5rem;
-  color: #93c5fd;
+  color: #3b82f6;
   font-size: 0.85rem;
   text-decoration: none;
 }
 
 .guideLink:hover {
-  color: #3b82f6;
+  color: #2563eb;
 }
 
 .supported {
   margin: 0.3rem 0 0;
-  color: #4b5563;
+  color: #8891a0;
   font-size: 0.75rem;
 }
 

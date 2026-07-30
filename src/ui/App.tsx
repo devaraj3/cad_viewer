@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState, startTransition } from "react";
+import { Link } from "react-router-dom";
 import { consumePendingFile } from "../fileStore";
 import { CAD_EXTS, CadViewer, MESH_ASSEMBLY_EXTS } from "../components/cad/cad-viewer";
+import TriangleMark from "../pages/TriangleMark";
 import "./App.css";
 
 const ACCEPTED_FORMATS = [
@@ -107,8 +109,10 @@ export default function App() {
     >
       <header className="cad-app__header">
         <div className="cad-app__title-wrap">
-          <h1>CAD Viewer</h1>
-          <p>Standalone CAD-only viewer with migrated advanced CAD capabilities.</p>
+          <Link to="/" className="cad-app__brand-link">
+            <TriangleMark size={28} />
+            <h1>CAD Viewer</h1>
+          </Link>
         </div>
         <div className="cad-app__actions">
           <label className="cad-app__upload-btn">
