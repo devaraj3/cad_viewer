@@ -32,14 +32,36 @@ export default function AnimatedBackground() {
 
       // ── Background ───────────────────────────────────────────────────────
       context.clearRect(0, 0, W, H)
-      context.fillStyle = '#080c14'
+      context.fillStyle = '#f7f8fa'
       context.fillRect(0, 0, W, H)
 
       // ── Grid config ──────────────────────────────────────────────────────
       const CELL      = 72      // px between grid lines
-      const BASE      = 0.22   // base grid line opacity  ← more visible than before
-      const PEAK      = 0.92   // opacity when scan is exactly on the line
+      const BASE      = 0.14   // base grid line opacity — quiet idle grid
+      const PEAK      = 0.46   // opacity when scan is exactly on the line — gentle ambient shift
       const BAND      = 110    // px radius of scan influence
+
+      // Idle grid lines are a light, low-contrast gray; lines lit by the scan
+      // shift to the brand accent blue rather than just brightening the gray.
+      const BASE_RGB: [number, number, number] = [226, 229, 234] // #e2e5ea
+      const PEAK_RGB: [number, number, number] = [59, 130, 246]  // #3b82f6
+
+      // Mix idle gray → accent blue by intensity f (0 = idle, 1 = scan center)
+      function mixColor(f: number): [number, number, number] {
+        return [
+          BASE_RGB[0] + (PEAK_RGB[0] - BASE_RGB[0]) * f,
+          BASE_RGB[1] + (PEAK_RGB[1] - BASE_RGB[1]) * f,
+          BASE_RGB[2] + (PEAK_RGB[2] - BASE_RGB[2]) * f,
+        ]
+      }
+
+      // Same mix, but derives f from an alpha value already interpolated
+      // between BASE and PEAK (used for the gradient stops below).
+      function rgbaForAlpha(alpha: number): string {
+        const f = Math.max(0, Math.min(1, (alpha - BASE) / (PEAK - BASE)))
+        const [r, g, b] = mixColor(f)
+        return `rgba(${r.toFixed(1)},${g.toFixed(1)},${b.toFixed(1)},${alpha.toFixed(3)})`
+      }
 
       // Scan position: sweeps 0 → H, period ~7 s (420 frames @ 60 fps)
       const PERIOD = 420
@@ -57,8 +79,9 @@ export default function AnimatedBackground() {
         const f     = factor(Math.abs(y - scanY))
         const alpha = BASE + (PEAK - BASE) * f
         const width = 0.65 + f * 1.0   // thickens from 0.65 to 1.65 at scan center
+        const [r, g, b] = mixColor(f)
 
-        context.strokeStyle = `rgba(59,130,246,${alpha.toFixed(3)})`
+        context.strokeStyle = `rgba(${r.toFixed(1)},${g.toFixed(1)},${b.toFixed(1)},${alpha.toFixed(3)})`
         context.lineWidth   = width
         context.beginPath()
         context.moveTo(0, y)
@@ -73,7 +96,7 @@ export default function AnimatedBackground() {
       for (let x = 0; x <= W; x += CELL) {
 
         // Full-height base line
-        context.strokeStyle = `rgba(59,130,246,${BASE})`
+        context.strokeStyle = `rgba(${BASE_RGB[0]},${BASE_RGB[1]},${BASE_RGB[2]},${BASE})`
         context.lineWidth   = 0.65
         context.beginPath()
         context.moveTo(x, 0)
@@ -90,11 +113,11 @@ export default function AnimatedBackground() {
           const midT  = (scanY - segTop) / segH   // 0..1 where scanY falls
 
           const g = context.createLinearGradient(0, segTop, 0, segBot)
-          g.addColorStop(0,                       `rgba(59,130,246,${BASE})`)
-          g.addColorStop(Math.max(0, midT - 0.4), `rgba(59,130,246,${(BASE + PEAK * 0.3).toFixed(3)})`)
-          g.addColorStop(midT,                    `rgba(59,130,246,${PEAK})`)
-          g.addColorStop(Math.min(1, midT + 0.4), `rgba(59,130,246,${(BASE + PEAK * 0.3).toFixed(3)})`)
-          g.addColorStop(1,                       `rgba(59,130,246,${BASE})`)
+          g.addColorStop(0,                       rgbaForAlpha(BASE))
+          g.addColorStop(Math.max(0, midT - 0.4), rgbaForAlpha(BASE + PEAK * 0.3))
+          g.addColorStop(midT,                    rgbaForAlpha(PEAK))
+          g.addColorStop(Math.min(1, midT + 0.4), rgbaForAlpha(BASE + PEAK * 0.3))
+          g.addColorStop(1,                       rgbaForAlpha(BASE))
 
           context.strokeStyle = g
           context.lineWidth   = 1.2   // slightly thicker at illuminated segment
@@ -105,10 +128,10 @@ export default function AnimatedBackground() {
         }
       }
 
-      // ── Soft radial vignette — darkens corners only ──────────────────────
+      // ── Soft radial vignette — grounds the edges only ────────────────────
       const vg = context.createRadialGradient(W / 2, H / 2, H * 0.25, W / 2, H / 2, H * 0.82)
-      vg.addColorStop(0, 'rgba(8,12,20,0)')
-      vg.addColorStop(1, 'rgba(8,12,20,0.55)')
+      vg.addColorStop(0, 'rgba(226,229,234,0)')
+      vg.addColorStop(1, 'rgba(226,229,234,0.55)')
       context.fillStyle = vg
       context.fillRect(0, 0, W, H)
 
