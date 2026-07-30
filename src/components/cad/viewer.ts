@@ -7350,6 +7350,7 @@ export function createViewer(container: HTMLElement): Viewer {
       camera.position.copy(target).addScaledVector(direction, radius);
       camera.up.copy(up);
       camera.lookAt(target);
+      camera.up.set(0, 1, 0);
       (camera as any).updateProjectionMatrix?.();
       camera.updateMatrixWorld(true);
     };
