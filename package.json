@@ -17,7 +17,7 @@
     "lucide-react": "^0.544.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-router-dom": "^6.30.3",
+    "react-router-dom": "^6.30.4",
     "three": "0.180.0",
     "three-mesh-bvh": "^0.9.10"
   },
@@ -41,7 +41,7 @@
   "overrides": {
     "js-yaml": "^4.3.0",
     "postcss": "^8.5.18",
-    "brace-expansion": "^1.1.16",
+    "brace-expansion": "^1.1.17",
     "@typescript-eslint/typescript-estree": {
       "minimatch": {
         "brace-expansion": "^5.0.8"
