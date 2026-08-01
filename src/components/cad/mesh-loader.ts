@@ -359,6 +359,26 @@ function mergeFromObject(root: any) {
   return merged;
 }
 
+function objectHasRenderableGeometry(object: THREE.Object3D): boolean {
+  let found = false;
+  object.traverse((node: any) => {
+    if (found) return;
+    if ((node.isMesh || node.isLine || node.isLineSegments) && node.geometry) {
+      found = true;
+    }
+  });
+  return found;
+}
+
+// Mirrors createMeshModelSession's part grouping, usable before a session exists.
+export function countMeshAssemblyParts(root: THREE.Object3D): number {
+  const partRoots = root.children.length > 0 ? root.children : [root];
+  const count = partRoots.filter((child) =>
+    objectHasRenderableGeometry(child),
+  ).length;
+  return count > 0 ? count : 1;
+}
+
 async function loadMeshOnMainThread(file: File, ext: string) {
   if (ext === "stl") {
     const buf = await file.arrayBuffer();
@@ -370,14 +390,18 @@ async function loadMeshOnMainThread(file: File, ext: string) {
     const text = await file.text();
     const loader = new OBJLoader();
     const root = loader.parse(text);
-    return mergeFromObject(root);
+    const geom = mergeFromObject(root);
+    geom.userData.__meshAssemblyPartCount = countMeshAssemblyParts(root);
+    return geom;
   }
 
   if (ext === "3mf") {
     const buf = await file.arrayBuffer();
     const loader = new ThreeMFLoader();
     const root = loader.parse(buf as ArrayBuffer);
-    return mergeFromObject(root);
+    const geom = mergeFromObject(root);
+    geom.userData.__meshAssemblyPartCount = countMeshAssemblyParts(root);
+    return geom;
   }
 
   if (ext === "gltf" || ext === "glb") {
@@ -387,6 +411,7 @@ async function loadMeshOnMainThread(file: File, ext: string) {
       const { scene } = await loader.loadAsync(url);
       const geom = mergeFromObject(scene);
       if (!geom) throw new Error("No mesh data found in glTF scene");
+      geom.userData.__meshAssemblyPartCount = countMeshAssemblyParts(scene);
       return geom;
     } finally {
       URL.revokeObjectURL(url);
