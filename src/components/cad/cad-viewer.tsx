@@ -740,6 +740,8 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       useState<CadTopologyAvailability | null>(null);
     const [cadTopologyEdgeCount, setCadTopologyEdgeCount] = useState(0);
     const [sheetMeta, setSheetMeta] = useState<SheetMetalMeta | null>(null);
+    const [meshAssemblyPreviewPartCount, setMeshAssemblyPreviewPartCount] =
+      useState<number | null>(null);
     const [flatEnabled, setFlatEnabled] = useState(false);
     const [workerReady, setWorkerReady] = useState(false);
     const [workerCapabilities, setWorkerCapabilities] =
@@ -982,6 +984,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
         setRenderQualityProfile("normal");
         viewerRef.current?.setRenderQualityProfile("normal");
         setSheetMeta(null);
+        setMeshAssemblyPreviewPartCount(null);
         setFlatEnabled(false);
         setFlattenError(null);
         setIsUnfolding(false);
@@ -1497,6 +1500,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
         setMeasureMode(false);
         setMeasureMM(null);
         setSheetMeta(null);
+        setMeshAssemblyPreviewPartCount(null);
         setFlatEnabled(false);
         setFlattenError(null);
         setIsUnfolding(false);
@@ -1869,6 +1873,14 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
               setCadTopologyContext(null);
               const geom = await loadMeshFile(file, workerRef.current!);
               if (isStale()) return;
+              if (isMeshAssemblyExt(ext)) {
+                const rawPartCount = geom.userData?.__meshAssemblyPartCount;
+                setMeshAssemblyPreviewPartCount(
+                  typeof rawPartCount === "number" && Number.isFinite(rawPartCount)
+                    ? rawPartCount
+                    : 1,
+                );
+              }
               const runtimeProfile = resolveViewerQualityProfile({
                 fileSizeBytes,
                 complexity: {
@@ -2248,6 +2260,11 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
     const hasAssembly = detectedCount > 1;
     const supportsAssemblyMode =
       !!file && (isCadExt(currentExt) || isMeshAssemblyExt(currentExt));
+    const assemblyDetected =
+      sheetMeta?.isAssembly === true ||
+      (meshAssemblyPreviewPartCount !== null &&
+        meshAssemblyPreviewPartCount > 1) ||
+      hasAssembly;
 
     useEffect(() => {
       if (assemblyMode !== "parts") return;
@@ -2828,7 +2845,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
             <div className="cad-controls-card">
               {/* Views: replaced by corner view cube */}
 
-              {supportsAssemblyMode && (
+              {assemblyDetected && (
                 <button
                   type="button"
                   disabled={isLoading}
