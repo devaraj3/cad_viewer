@@ -112,6 +112,10 @@ type PartsModeTransition = {
   partCount: number;
 };
 
+// Wireframe density is locked in at 25% / 65% (see state defaults below).
+// Flip to true to re-expose the tuning sliders in the sidebar.
+const SHOW_WIREFRAME_DENSITY_CONTROLS = false;
+
 export const CAD_EXTS: ReadonlySet<CADExt> = new Set<CADExt>([
   "step",
   "stp",
@@ -1042,6 +1046,18 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
 
     // Appearance State
     const [wireframe, setWireframe] = useState(false);
+    const [flatSurfaceDensityPercent, setFlatSurfaceDensityPercentState] =
+      useState(25);
+    const flatSurfaceDensityLatestRef = useRef(25);
+    const flatSurfaceDensityRebuildTimeoutRef = useRef<ReturnType<
+      typeof setTimeout
+    > | null>(null);
+    const [curvedSurfaceDetailPercent, setCurvedSurfaceDetailPercentState] =
+      useState(65);
+    const curvedSurfaceDetailLatestRef = useRef(65);
+    const curvedSurfaceDetailRebuildTimeoutRef = useRef<ReturnType<
+      typeof setTimeout
+    > | null>(null);
     const [xray, setXray] = useState(false);
     const [materialColor, setMaterialColor] = useState("#b8c2ff");
     const [sliceEnabled, setSliceEnabled] = useState(false);
@@ -2970,6 +2986,123 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                     <span className="cad-toggle__thumb" />
                   </button>
                 </div>
+                {wireframe && SHOW_WIREFRAME_DENSITY_CONTROLS && (
+                  <>
+                    <div className="cad-row cad-row--between">
+                      <span className="cad-label">Flat Surface Density</span>
+                      <span className="cad-label">
+                        {flatSurfaceDensityPercent}%
+                      </span>
+                    </div>
+                    <div className="cad-range-wrap">
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        value={flatSurfaceDensityPercent}
+                        onChange={(e) => {
+                          // Avoid rebuilding on every intermediate slider
+                          // value while dragging: the displayed percent
+                          // updates live but the wireframe rebuild is
+                          // deferred to drag-end (with a debounce fallback
+                          // for non-pointer changes).
+                          const percent = Number(e.target.value);
+                          setFlatSurfaceDensityPercentState(percent);
+                          flatSurfaceDensityLatestRef.current = percent;
+                          if (flatSurfaceDensityRebuildTimeoutRef.current) {
+                            clearTimeout(
+                              flatSurfaceDensityRebuildTimeoutRef.current,
+                            );
+                          }
+                          flatSurfaceDensityRebuildTimeoutRef.current =
+                            setTimeout(() => {
+                              viewerRef.current?.setFlatSurfaceDensityPercent(
+                                flatSurfaceDensityLatestRef.current,
+                              );
+                            }, 300);
+                        }}
+                        onPointerUp={() => {
+                          if (flatSurfaceDensityRebuildTimeoutRef.current) {
+                            clearTimeout(
+                              flatSurfaceDensityRebuildTimeoutRef.current,
+                            );
+                            flatSurfaceDensityRebuildTimeoutRef.current = null;
+                          }
+                          viewerRef.current?.setFlatSurfaceDensityPercent(
+                            flatSurfaceDensityLatestRef.current,
+                          );
+                        }}
+                        onKeyUp={() => {
+                          if (flatSurfaceDensityRebuildTimeoutRef.current) {
+                            clearTimeout(
+                              flatSurfaceDensityRebuildTimeoutRef.current,
+                            );
+                            flatSurfaceDensityRebuildTimeoutRef.current = null;
+                          }
+                          viewerRef.current?.setFlatSurfaceDensityPercent(
+                            flatSurfaceDensityLatestRef.current,
+                          );
+                        }}
+                        className="cad-range"
+                      />
+                    </div>
+                    <div className="cad-row cad-row--between">
+                      <span className="cad-label">Curved Surface Detail</span>
+                      <span className="cad-label">
+                        {curvedSurfaceDetailPercent}%
+                      </span>
+                    </div>
+                    <div className="cad-range-wrap">
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        value={curvedSurfaceDetailPercent}
+                        onChange={(e) => {
+                          const percent = Number(e.target.value);
+                          setCurvedSurfaceDetailPercentState(percent);
+                          curvedSurfaceDetailLatestRef.current = percent;
+                          if (curvedSurfaceDetailRebuildTimeoutRef.current) {
+                            clearTimeout(
+                              curvedSurfaceDetailRebuildTimeoutRef.current,
+                            );
+                          }
+                          curvedSurfaceDetailRebuildTimeoutRef.current =
+                            setTimeout(() => {
+                              viewerRef.current?.setCurvedSurfaceDetailPercent(
+                                curvedSurfaceDetailLatestRef.current,
+                              );
+                            }, 300);
+                        }}
+                        onPointerUp={() => {
+                          if (curvedSurfaceDetailRebuildTimeoutRef.current) {
+                            clearTimeout(
+                              curvedSurfaceDetailRebuildTimeoutRef.current,
+                            );
+                            curvedSurfaceDetailRebuildTimeoutRef.current =
+                              null;
+                          }
+                          viewerRef.current?.setCurvedSurfaceDetailPercent(
+                            curvedSurfaceDetailLatestRef.current,
+                          );
+                        }}
+                        onKeyUp={() => {
+                          if (curvedSurfaceDetailRebuildTimeoutRef.current) {
+                            clearTimeout(
+                              curvedSurfaceDetailRebuildTimeoutRef.current,
+                            );
+                            curvedSurfaceDetailRebuildTimeoutRef.current =
+                              null;
+                          }
+                          viewerRef.current?.setCurvedSurfaceDetailPercent(
+                            curvedSurfaceDetailLatestRef.current,
+                          );
+                        }}
+                        className="cad-range"
+                      />
+                    </div>
+                  </>
+                )}
                 <div className="cad-row cad-row--between">
                   <span className="cad-label">X-Ray View</span>
                   <button
