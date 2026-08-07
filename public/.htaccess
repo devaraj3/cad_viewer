@@ -13,3 +13,9 @@ RewriteRule ^(.*)$ $1.html [L]
 # Otherwise, fall back to the main app shell so client-side routing can show a proper 404
 RewriteRule ^ index.html [L]
 </IfModule>
+
+<IfModule mod_headers.c>
+  <FilesMatch "\.(js|css)$">
+    Header set Cache-Control "public, max-age=31536000, immutable"
+  </FilesMatch>
+</IfModule>
