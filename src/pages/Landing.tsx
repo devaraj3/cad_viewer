@@ -102,7 +102,7 @@ export default function Landing() {
         />
 
         {/* LAYER 2: hero content — must be above canvas and fog */}
-        <div
+        <main
           style={{
             position: "relative",
             zIndex: 2,
@@ -144,7 +144,7 @@ export default function Landing() {
               type="button"
               onClick={() => fileInputRef.current?.click()}
               style={{
-                background: "#3b82f6",
+                background: "#2563eb",
                 color: "#ffffff",
                 border: "none",
                 borderRadius: "8px",
@@ -156,13 +156,13 @@ export default function Landing() {
               }}
               onMouseEnter={(e) => {
                 (e.currentTarget as HTMLButtonElement).style.background =
-                  "#2563eb";
+                  "#1d4ed8";
                 (e.currentTarget as HTMLButtonElement).style.transform =
                   "translateY(-1px)";
               }}
               onMouseLeave={(e) => {
                 (e.currentTarget as HTMLButtonElement).style.background =
-                  "#3b82f6";
+                  "#2563eb";
                 (e.currentTarget as HTMLButtonElement).style.transform =
                   "translateY(0)";
               }}
@@ -182,7 +182,7 @@ export default function Landing() {
               Supported: STEP · IGES · STL · OBJ · 3MF · BREP · GLB · DXF
             </p>
           </motion.section>
-        </div>
+        </main>
       </div>
     </>
   );
