@@ -1,8 +1,28 @@
+import { lazy, Suspense } from "react";
 import { ClientOnly, Head, ViteReactSSG } from "vite-react-ssg";
 import type { RouteRecord } from "vite-react-ssg";
-import App from "./ui/App";
 import Landing from "./pages/Landing";
 import SplitStepAssembly from "./pages/guides/SplitStepAssembly";
+
+const App = lazy(() => import("./ui/App"));
+
+function ViewerLoading() {
+  return (
+    <div
+      style={{
+        background: "#e2e8f0",
+        height: "100vh",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        fontFamily: "monospace",
+        color: "#64748b",
+      }}
+    >
+      Loading viewer…
+    </div>
+  );
+}
 
 function NotFound() {
   return (
@@ -37,7 +57,13 @@ export const routes: RouteRecord[] = [
         <Head>
           <title>CAD Viewer — 3D Viewer</title>
         </Head>
-        <ClientOnly>{() => <App />}</ClientOnly>
+        <ClientOnly>
+          {() => (
+            <Suspense fallback={<ViewerLoading />}>
+              <App />
+            </Suspense>
+          )}
+        </ClientOnly>
       </>
     ),
   },

@@ -163,7 +163,7 @@ export default function SplitStepAssembly() {
           {JSON.stringify(FAQ_JSON_LD)}
         </script>
       </Head>
-      <div className={styles.page}>
+      <main className={styles.page}>
         <article className={styles.article}>
           <section className={styles.section}>
             <Link to="/" className={styles.breadcrumb}>
@@ -303,7 +303,7 @@ export default function SplitStepAssembly() {
             </div>
           </section>
         </article>
-      </div>
+      </main>
     </>
   );
 }

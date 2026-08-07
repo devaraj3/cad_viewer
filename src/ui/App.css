@@ -448,12 +448,12 @@ a {
   font-weight: 600;
   color: #ffffff;
   border: none;
-  background: #3b82f6;
+  background: #2563eb;
   cursor: pointer;
 }
 
 .cad-app__upload-btn:hover {
-  background: #2563eb;
+  background: #1d4ed8;
 }
 
 .cad-app__upload-btn input {
