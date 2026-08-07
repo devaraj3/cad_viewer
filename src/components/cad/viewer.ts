@@ -150,6 +150,8 @@ export type Viewer = {
     wireframe: boolean,
     xray: boolean,
   ) => void;
+  setFlatSurfaceDensityPercent: (percent: number) => void;
+  setCurvedSurfaceDetailPercent: (percent: number) => void;
   setClipping: (value: number | null) => void;
   fitToScreen: (zoom?: number) => void;
   frameObject: (object: THREE.Object3D) => void;
@@ -2660,6 +2662,11 @@ export function createViewer(container: HTMLElement): Viewer {
 
   // Wireframe overlay state (per-mesh overlays for all visible meshes)
   let wireframeEnabled = false;
+  // Flat-region edges (triangulation diagonals on planar faces) and
+  // curved-region edges (holes/fillets/cylinder walls) are thinned by two
+  // independent voxel-dedup passes, each with its own density slider.
+  let flatSurfaceDensityPercent = 25;
+  let curvedSurfaceDetailPercent = 65;
   const wireframeOverlayGroup = new THREE.Group();
   wireframeOverlayGroup.name = "wireframeOverlayGroup";
   const wireframeOverlayLines: THREE.LineSegments[] = [];
@@ -3932,6 +3939,392 @@ export function createViewer(container: HTMLElement): Viewer {
     }
   }
 
+  type WireEdgeSegment = {
+    ax: number;
+    ay: number;
+    az: number;
+    bx: number;
+    by: number;
+    bz: number;
+  };
+
+  // Voxel-spatial dedup: bucket each segment's midpoint into a grid cell
+  // sized relative to the mesh's own bounding diagonal, keep at most one
+  // segment per occupied cell. Thins dense regions and sparse regions each
+  // proportional to their own local density (unlike array-order/stride
+  // thinning, which ignores 3D spatial structure).
+  function voxelDedupSegments(
+    segments: WireEdgeSegment[],
+    percent: number,
+    diagonal: number,
+  ): WireEdgeSegment[] {
+    if (segments.length === 0) return [];
+    const keepFraction = Math.max(0, Math.min(1, percent / 100));
+    const cellSize = diagonal / (12 + keepFraction * 388) || 1e-6;
+    const seen = new Set<string>();
+    const kept: WireEdgeSegment[] = [];
+    for (const seg of segments) {
+      const cx = Math.floor((seg.ax + seg.bx) / 2 / cellSize);
+      const cy = Math.floor((seg.ay + seg.by) / 2 / cellSize);
+      const cz = Math.floor((seg.az + seg.bz) / 2 / cellSize);
+      const key = `${cx}_${cy}_${cz}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      kept.push(seg);
+    }
+    return kept;
+  }
+
+  // Curved edges (hole rims, fillets, countersinks) form connected chains
+  // in real mesh topology, so thinning them as a flat list of disconnected
+  // segments (voxel-dedup) breaks loops into scattered fragments. This
+  // traces each connected chain by walking shared endpoints in path order,
+  // then keeps every Nth vertex along that path - preserving the loop/arc
+  // shape instead of sampling by spatial position.
+  type ChainPoint = { x: number; y: number; z: number };
+
+  function traceCurvedChains(
+    segments: WireEdgeSegment[],
+  ): { points: ChainPoint[]; closed: boolean }[] {
+    const precision = 1e5; // quantize to 5 decimal places to match shared vertices
+    const vKey = (x: number, y: number, z: number) =>
+      `${Math.round(x * precision)}_${Math.round(y * precision)}_${Math.round(z * precision)}`;
+
+    const adjacency = new Map<string, number[]>();
+    const addAdj = (key: string, segIdx: number) => {
+      let list = adjacency.get(key);
+      if (!list) {
+        list = [];
+        adjacency.set(key, list);
+      }
+      list.push(segIdx);
+    };
+    const startKeys: string[] = new Array(segments.length);
+    const endKeys: string[] = new Array(segments.length);
+    segments.forEach((seg, idx) => {
+      const k0 = vKey(seg.ax, seg.ay, seg.az);
+      const k1 = vKey(seg.bx, seg.by, seg.bz);
+      startKeys[idx] = k0;
+      endKeys[idx] = k1;
+      addAdj(k0, idx);
+      addAdj(k1, idx);
+    });
+
+    const otherEnd = (
+      segIdx: number,
+      fromKey: string,
+    ): { key: string; point: ChainPoint } => {
+      const seg = segments[segIdx];
+      if (startKeys[segIdx] === fromKey) {
+        return { key: endKeys[segIdx], point: { x: seg.bx, y: seg.by, z: seg.bz } };
+      }
+      return { key: startKeys[segIdx], point: { x: seg.ax, y: seg.ay, z: seg.az } };
+    };
+
+    const visited = new Array(segments.length).fill(false);
+
+    // At a junction (e.g. where a rim loop meets a radial tie-line into the
+    // hole), several unvisited segments can share the current vertex. Pick
+    // the one that continues most nearly straight ahead (closest direction
+    // to how we arrived) rather than an arbitrary one - that keeps the walk
+    // on the rim loop instead of veering off down a tie-line, which is what
+    // was fragmenting loops into short 2-4 point chains.
+    const pickNextAt = (
+      key: string,
+      fromPoint: ChainPoint,
+      dirHint: ChainPoint | null,
+    ): number => {
+      const list = adjacency.get(key);
+      if (!list) return -1;
+      let best = -1;
+      let bestScore = -Infinity;
+      for (const idx of list) {
+        if (visited[idx]) continue;
+        if (!dirHint) return idx; // no direction yet - take the first candidate
+        const { point } = otherEnd(idx, key);
+        const dx = point.x - fromPoint.x;
+        const dy = point.y - fromPoint.y;
+        const dz = point.z - fromPoint.z;
+        const len = Math.hypot(dx, dy, dz) || 1e-9;
+        const score =
+          (dx * dirHint.x + dy * dirHint.y + dz * dirHint.z) / len;
+        if (score > bestScore) {
+          bestScore = score;
+          best = idx;
+        }
+      }
+      return best;
+    };
+
+    const dirBetween = (from: ChainPoint, to: ChainPoint): ChainPoint => {
+      const dx = to.x - from.x;
+      const dy = to.y - from.y;
+      const dz = to.z - from.z;
+      const len = Math.hypot(dx, dy, dz) || 1e-9;
+      return { x: dx / len, y: dy / len, z: dz / len };
+    };
+
+    const chains: { points: ChainPoint[]; closed: boolean }[] = [];
+
+    for (let i = 0; i < segments.length; i++) {
+      if (visited[i]) continue;
+      visited[i] = true;
+      const seg = segments[i];
+      const startKey = startKeys[i];
+      let points: ChainPoint[] = [
+        { x: seg.ax, y: seg.ay, z: seg.az },
+        { x: seg.bx, y: seg.by, z: seg.bz },
+      ];
+      let currentKey = endKeys[i];
+      let closed = false;
+
+      // Extend forward until a closed loop or a dead end.
+      for (let guard = 0; guard <= segments.length; guard++) {
+        const curPoint = points[points.length - 1];
+        const prevPoint = points[points.length - 2];
+        const dirHint = dirBetween(prevPoint, curPoint);
+        const nextIdx = pickNextAt(currentKey, curPoint, dirHint);
+        if (nextIdx === -1) break;
+        visited[nextIdx] = true;
+        const { key, point } = otherEnd(nextIdx, currentKey);
+        if (key === startKey) {
+          closed = true;
+          break;
+        }
+        points.push(point);
+        currentKey = key;
+        if (guard === segments.length) {
+          throw new Error(
+            "traceCurvedChains: exceeded segment count while tracing - possible malformed topology",
+          );
+        }
+      }
+
+      // Open chain: also extend backward from the original start, so a
+      // trace that began mid-chain still captures the full path.
+      if (!closed) {
+        let currentKeyB = startKey;
+        for (let guard = 0; guard <= segments.length; guard++) {
+          const curPoint = points[0];
+          const nextPoint = points[1];
+          const dirHint = dirBetween(nextPoint, curPoint);
+          const nextIdx = pickNextAt(currentKeyB, curPoint, dirHint);
+          if (nextIdx === -1) break;
+          visited[nextIdx] = true;
+          const { key, point } = otherEnd(nextIdx, currentKeyB);
+          points.unshift(point);
+          currentKeyB = key;
+          if (guard === segments.length) {
+            throw new Error(
+              "traceCurvedChains: exceeded segment count while tracing - possible malformed topology",
+            );
+          }
+        }
+      }
+
+      chains.push({ points, closed });
+    }
+
+    return chains;
+  }
+
+  // Keeps every Nth vertex along a traced chain's path order (N derived
+  // from the density percent), always keeping both endpoints of an open
+  // chain so it doesn't visually shrink from its real boundary.
+  function thinChainByStride(
+    points: ChainPoint[],
+    closed: boolean,
+    percent: number,
+  ): ChainPoint[] {
+    const total = points.length;
+    const keepFraction = Math.max(0.01, Math.min(1, percent / 100));
+    const desiredStride = Math.max(1, Math.round(1 / keepFraction));
+
+    // Never thin a loop down past a recognizable polygon (hexagon) - a hard
+    // stride derived only from the slider could otherwise collapse a short
+    // chain to 1-2 points. Cap the stride by the chain's own length so every
+    // loop still reads as a ring/polygon at any slider value.
+    const minKeep = closed ? 6 : 2;
+    if (total <= minKeep || desiredStride <= 1) return points;
+
+    const maxStride = closed
+      ? Math.max(1, Math.floor(total / minKeep))
+      : Math.max(1, Math.floor((total - 1) / (minKeep - 1)));
+    const stride = Math.min(desiredStride, maxStride);
+    if (stride <= 1) return points;
+
+    const kept: ChainPoint[] = [];
+    for (let i = 0; i < total; i += stride) kept.push(points[i]);
+
+    if (!closed) {
+      const last = points[total - 1];
+      if (kept[kept.length - 1] !== last) kept.push(last);
+    }
+    return kept;
+  }
+
+  function chainToSegments(
+    points: ChainPoint[],
+    closed: boolean,
+  ): WireEdgeSegment[] {
+    const out: WireEdgeSegment[] = [];
+    const segCount = closed ? points.length : points.length - 1;
+    for (let i = 0; i < segCount; i++) {
+      const p0 = points[i];
+      const p1 = points[(i + 1) % points.length];
+      out.push({ ax: p0.x, ay: p0.y, az: p0.z, bx: p1.x, by: p1.y, bz: p1.z });
+    }
+    return out;
+  }
+
+  // Traces curved-classified edges into connected chains (hole rims, fillet
+  // loops, etc.) and thins each along its own path order rather than by
+  // spatial voxel occupancy, so loops stay connected instead of fragmenting.
+  // Falls back to the full, untouched curved segments if tracing fails or
+  // produces a malformed result (e.g. unusual/non-manifold topology from
+  // certain CAD exports) - more detail is preferable to broken geometry.
+  function thinCurvedSegmentsByChain(
+    segments: WireEdgeSegment[],
+    percent: number,
+  ): WireEdgeSegment[] {
+    if (segments.length === 0) return [];
+    try {
+      const chains = traceCurvedChains(segments);
+      const result: WireEdgeSegment[] = [];
+      for (const chain of chains) {
+        const thinned = thinChainByStride(chain.points, chain.closed, percent);
+        result.push(...chainToSegments(thinned, chain.closed));
+      }
+      if (result.length === 0 && segments.length > 0) return segments;
+      return result;
+    } catch {
+      return segments;
+    }
+  }
+
+  // Classifies each real mesh edge as "flat" (borders two nearly-coplanar
+  // triangles - the triangulation diagonals responsible for zigzag texture
+  // on planar faces) or "curved" (genuine angular difference between the
+  // adjacent triangles - holes, fillets, cylinder walls), using a small
+  // fixed angle threshold purely as a yes/no label, never as a removal
+  // filter. Flat edges are thinned by voxel-dedup (unchanged); curved edges
+  // are thinned by chain-tracing so connected loops stay connected.
+  function buildHybridWireframeGeometry(
+    meshGeometry: THREE.BufferGeometry,
+    flatPercent: number,
+    curvedPercent: number,
+  ): THREE.BufferGeometry {
+    const classifyThresholdDeg = 1;
+    const posAttr = meshGeometry.getAttribute(
+      "position",
+    ) as THREE.BufferAttribute;
+    if (!posAttr) return new THREE.BufferGeometry();
+
+    const index = meshGeometry.getIndex();
+    const triCount = index ? index.count / 3 : posAttr.count / 3;
+    const vIdx = (i: number) => (index ? index.getX(i) : i);
+
+    const precision = 1e4;
+    const vertexKey = (idx: number) =>
+      `${Math.round(posAttr.getX(idx) * precision)}_${Math.round(posAttr.getY(idx) * precision)}_${Math.round(posAttr.getZ(idx) * precision)}`;
+
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
+    const c = new THREE.Vector3();
+    const ab = new THREE.Vector3();
+    const ac = new THREE.Vector3();
+
+    type EdgeEntry = WireEdgeSegment & {
+      normal: THREE.Vector3;
+      maxAngleDeg: number;
+      count: number;
+    };
+    const edgeMap = new Map<string, EdgeEntry>();
+
+    for (let t = 0; t < triCount; t++) {
+      const ia = vIdx(t * 3);
+      const ib = vIdx(t * 3 + 1);
+      const ic = vIdx(t * 3 + 2);
+      a.fromBufferAttribute(posAttr, ia);
+      b.fromBufferAttribute(posAttr, ib);
+      c.fromBufferAttribute(posAttr, ic);
+      ab.subVectors(b, a);
+      ac.subVectors(c, a);
+      const normal = new THREE.Vector3().crossVectors(ab, ac).normalize();
+
+      const idxs = [ia, ib, ic];
+      for (let e = 0; e < 3; e++) {
+        const i0 = idxs[e];
+        const i1 = idxs[(e + 1) % 3];
+        const k0 = vertexKey(i0);
+        const k1 = vertexKey(i1);
+        const key = k0 < k1 ? `${k0}|${k1}` : `${k1}|${k0}`;
+        const existing = edgeMap.get(key);
+        if (!existing) {
+          edgeMap.set(key, {
+            ax: posAttr.getX(i0),
+            ay: posAttr.getY(i0),
+            az: posAttr.getZ(i0),
+            bx: posAttr.getX(i1),
+            by: posAttr.getY(i1),
+            bz: posAttr.getZ(i1),
+            normal,
+            maxAngleDeg: 0,
+            count: 1,
+          });
+        } else {
+          const angleDeg = THREE.MathUtils.radToDeg(
+            existing.normal.angleTo(normal),
+          );
+          existing.maxAngleDeg = Math.max(existing.maxAngleDeg, angleDeg);
+          existing.count++;
+        }
+      }
+    }
+
+    const flatSegments: WireEdgeSegment[] = [];
+    const curvedSegments: WireEdgeSegment[] = [];
+    for (const entry of edgeMap.values()) {
+      // Boundary edges (only one adjacent triangle - open/non-manifold
+      // mesh edges) have no angle to classify; keep them with the curved
+      // pass since they are topologically significant either way.
+      const isFlat = entry.count >= 2 && entry.maxAngleDeg < classifyThresholdDeg;
+      (isFlat ? flatSegments : curvedSegments).push(entry);
+    }
+
+    if (!meshGeometry.boundingBox) meshGeometry.computeBoundingBox();
+    const diagonal =
+      meshGeometry.boundingBox?.getSize(new THREE.Vector3()).length() || 1;
+
+    const keptFlat = voxelDedupSegments(flatSegments, flatPercent, diagonal);
+    const keptCurved = thinCurvedSegmentsByChain(curvedSegments, curvedPercent);
+
+    const positions = new Float32Array(
+      (keptFlat.length + keptCurved.length) * 6,
+    );
+    let o = 0;
+    for (const seg of keptFlat) {
+      positions[o++] = seg.ax;
+      positions[o++] = seg.ay;
+      positions[o++] = seg.az;
+      positions[o++] = seg.bx;
+      positions[o++] = seg.by;
+      positions[o++] = seg.bz;
+    }
+    for (const seg of keptCurved) {
+      positions[o++] = seg.ax;
+      positions[o++] = seg.ay;
+      positions[o++] = seg.az;
+      positions[o++] = seg.bx;
+      positions[o++] = seg.by;
+      positions[o++] = seg.bz;
+    }
+
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    return geom;
+  }
+
   function rebuildWireframeOverlays() {
     clearWireframeOverlays();
     try {
@@ -3943,11 +4336,15 @@ export function createViewer(container: HTMLElement): Viewer {
         if (child?.userData?.__isExactCadEdge) return;
 
         const mesh = child as THREE.Mesh;
-        const wfGeom = new THREE.WireframeGeometry(mesh.geometry);
+        const wfGeom = buildHybridWireframeGeometry(
+          mesh.geometry,
+          flatSurfaceDensityPercent,
+          curvedSurfaceDetailPercent,
+        );
         const wfMat = new THREE.LineBasicMaterial({
-          color: 0x000000,
+          color: 0x333333,
           transparent: true,
-          opacity: 0.9,
+          opacity: 0.4,
           depthTest: false,
           depthWrite: false,
         });
@@ -7588,6 +7985,13 @@ export function createViewer(container: HTMLElement): Viewer {
           mat.opacity = 0.3;
           mat.depthWrite = false;
           if (child.isMesh) mat.side = THREE.DoubleSide;
+        } else if (wireframe) {
+          // Make the solid body translucent so the dense wireframe overlay
+          // reads as linework instead of piling onto an opaque surface.
+          mat.transparent = true;
+          mat.opacity = 0.4;
+          mat.depthWrite = true;
+          if (child.isMesh) mat.side = THREE.DoubleSide;
         } else {
           mat.transparent = false;
           mat.opacity = 1.0;
@@ -7612,6 +8016,18 @@ export function createViewer(container: HTMLElement): Viewer {
       updateWireframeOverlayVisibility();
     } catch {}
     requestRender("set_material_properties");
+  }
+
+  function setFlatSurfaceDensityPercent(percent: number) {
+    flatSurfaceDensityPercent = percent;
+    rebuildWireframeOverlays();
+    updateWireframeOverlayVisibility();
+  }
+
+  function setCurvedSurfaceDetailPercent(percent: number) {
+    curvedSurfaceDetailPercent = percent;
+    rebuildWireframeOverlays();
+    updateWireframeOverlayVisibility();
   }
 
   function setClipping(value: number | null) {
@@ -8080,6 +8496,8 @@ export function createViewer(container: HTMLElement): Viewer {
     getScreenshotDataURL,
     getOutlineSnapshotDataURL,
     setMaterialProperties,
+    setFlatSurfaceDensityPercent,
+    setCurvedSurfaceDetailPercent,
     setClipping,
     fitToScreen,
     frameObject,
