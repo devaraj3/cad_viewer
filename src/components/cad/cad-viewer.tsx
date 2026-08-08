@@ -11,7 +11,10 @@ import * as BufferGeometryUtils from "three/examples/jsm/utils/BufferGeometryUti
 import {
   createViewer,
   Viewer,
+  COMPARE_OBJECTS,
   type ViewerRenderQualityProfile,
+  type CompareObjectId,
+  type CompareObjectTier,
 } from "./viewer";
 import {
   analyzeCadSheetMetal,
@@ -972,6 +975,10 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       if (!file) {
         const viewer = viewerRef.current;
         viewer?.clear();
+        // clear() deliberately leaves an active Compare reference object alone
+        // (so it survives ordinary file-to-file swaps) — the explicit "no file
+        // loaded" case here is the one place that must actually turn it off.
+        viewer?.setCompareObject(null);
         viewer?.showAllParts();
         viewer?.clearIsolation();
         viewer?.clearEdgeHighlight?.();
@@ -985,6 +992,8 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
         setDimsMM(null);
         setMeasureMode(false);
         setMeasureMM(null);
+        setCompareObjectId(null);
+        setComparePickerOpen(false);
         setRenderQualityProfile("normal");
         viewerRef.current?.setRenderQualityProfile("normal");
         setSheetMeta(null);
@@ -1062,6 +1071,9 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
     const [materialColor, setMaterialColor] = useState("#b8c2ff");
     const [sliceEnabled, setSliceEnabled] = useState(false);
     const [sliceLevel, setSliceLevel] = useState(50);
+    const [compareObjectId, setCompareObjectId] =
+      useState<CompareObjectId | null>(null);
+    const [comparePickerOpen, setComparePickerOpen] = useState(false);
 
     useImperativeHandle(ref, () => ({
       getSnapshot: (type: "normal" | "outline" = "normal") => {
@@ -1566,6 +1578,11 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
         try {
           setCadTopologyContext(null);
           viewerRef.current?.clear();
+          // Compare Scale selection deliberately survives a file-to-file swap:
+          // viewer.clear() leaves the reference object in place, and it
+          // re-anchors beside the newly loaded part once geometry finishes
+          // (see viewer.ts's finalizePrimaryGeometryUpdate/loadObject3D). Only
+          // the explicit "no file loaded" path resets compareObjectId.
           markStage("viewer_cleared");
           if (ext === "dxf") {
             const buf =
@@ -2396,6 +2413,13 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       }
     };
 
+    const handleSelectCompareObject = (id: CompareObjectId | null) => {
+      const next = id === null || id === compareObjectId ? null : id;
+      setCompareObjectId(next);
+      viewerRef.current?.setCompareObject(next);
+      setComparePickerOpen(false);
+    };
+
     const handleKFactorChange = (raw: string) => {
       const parsed = Number(raw);
       if (!Number.isFinite(parsed)) return;
@@ -3215,6 +3239,26 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                 )}
               </div>
 
+              <div className="cad-divider" />
+
+              {/* Compare Scale — toggles the picker open/closed only; it never
+                  clears the active selection (that's the picker's own Clear
+                  button, or re-picking the active object from the list). The
+                  picker itself auto-closes on selection (see
+                  handleSelectCompareObject) so it only competes for sidebar
+                  width during the brief moment of actively choosing. */}
+              <button
+                type="button"
+                onClick={() => setComparePickerOpen((open) => !open)}
+                className={`cad-btn cad-btn--wide ${
+                  comparePickerOpen || compareObjectId
+                    ? "cad-btn--active"
+                    : "cad-btn--neutral"
+                }`}
+              >
+                Compare Scale
+              </button>
+
               {showDxfPreviewPanel && (
                 <>
                   <div className="cad-divider" />
@@ -3388,6 +3432,61 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                         <ArrowLeft className="cad-icon-sm" />
                         Back to Assembly
                       </span>
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+
+            {comparePickerOpen && (
+              <div className="cad-compare-panel">
+                <div className="cad-compare-title">Compare Scale</div>
+                <div className="cad-compare-list">
+                  {(["small", "medium", "large"] as CompareObjectTier[]).map(
+                    (tier) => (
+                      <div key={tier} className="cad-compare-tier">
+                        <span
+                          className="cad-label"
+                          style={{ textTransform: "capitalize" }}
+                        >
+                          {tier}
+                        </span>
+                        {COMPARE_OBJECTS.filter(
+                          (obj) => obj.tier === tier,
+                        ).map((obj) => (
+                          <button
+                            key={obj.id}
+                            onClick={() => handleSelectCompareObject(obj.id)}
+                            className={`cad-btn cad-btn--wide ${
+                              compareObjectId === obj.id
+                                ? "cad-btn--active"
+                                : "cad-btn--neutral"
+                            }`}
+                            style={{
+                              textAlign: "left",
+                              display: "flex",
+                              justifyContent: "space-between",
+                              gap: "8px",
+                            }}
+                          >
+                            <span>{obj.name}</span>
+                            <span style={{ opacity: 0.7, fontWeight: 500 }}>
+                              {obj.dimensionLabel}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    ),
+                  )}
+                </div>
+                {compareObjectId && (
+                  <>
+                    <div className="cad-divider" />
+                    <button
+                      onClick={() => handleSelectCompareObject(null)}
+                      className="cad-btn cad-btn--wide cad-btn--neutral"
+                    >
+                      Clear
                     </button>
                   </>
                 )}
