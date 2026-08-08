@@ -155,6 +155,7 @@ export type Viewer = {
   setClipping: (value: number | null) => void;
   fitToScreen: (zoom?: number) => void;
   frameObject: (object: THREE.Object3D) => void;
+  setCompareObject: (id: CompareObjectId | null) => void;
   setHighlight: (
     triangles: number[] | null,
     location?: { x: number; y: number; z: number },
@@ -1497,6 +1498,782 @@ export function resolveExactCadCurveFeatureHoverPath(params: {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Compare Scale — reference objects of known real-world size, placed beside
+// the loaded part purely for visual scale comparison. All dimensions are mm,
+// matching the scene's native unit (see createStainlessSteelMaterial /
+// GridHelper(1000, 50) sizing elsewhere in this file for corroboration).
+// ---------------------------------------------------------------------------
+
+export type CompareObjectTier = "small" | "medium" | "large";
+
+export type CompareObjectId =
+  | "credit_card"
+  | "golf_ball"
+  | "soda_can"
+  | "basketball"
+  | "laptop_13in"
+  | "human_figure"
+  | "washing_machine"
+  | "standard_door";
+
+export interface CompareObjectConfig {
+  id: CompareObjectId;
+  tier: CompareObjectTier;
+  /** Full name shown in the picker, including any "(approx...)"/region qualifiers. */
+  name: string;
+  /** Human-readable real-world dimension, shown in the picker. */
+  dimensionLabel: string;
+}
+
+export const COMPARE_OBJECTS: CompareObjectConfig[] = [
+  {
+    id: "credit_card",
+    tier: "small",
+    name: "Credit card",
+    dimensionLabel: "85.6 × 54mm",
+  },
+  {
+    id: "golf_ball",
+    tier: "small",
+    name: "Golf ball",
+    dimensionLabel: "42.7mm dia",
+  },
+  {
+    id: "soda_can",
+    tier: "small",
+    name: "Soda can",
+    dimensionLabel: "66mm dia × 115mm",
+  },
+  {
+    id: "basketball",
+    tier: "medium",
+    name: "Basketball",
+    dimensionLabel: "240mm dia",
+  },
+  {
+    id: "laptop_13in",
+    tier: "medium",
+    name: '13" laptop (approx)',
+    dimensionLabel: "~304 × 212 × 18mm",
+  },
+  {
+    id: "human_figure",
+    tier: "large",
+    name: "Human figure",
+    dimensionLabel: "1700mm (avg height)",
+  },
+  {
+    id: "washing_machine",
+    tier: "large",
+    name: "Washing machine (approx — standard front-load)",
+    dimensionLabel: "~600 × 600 × 850mm",
+  },
+  {
+    id: "standard_door",
+    tier: "large",
+    name: "Standard door (US standard)",
+    dimensionLabel: "2032 × 810mm",
+  },
+];
+
+const COMPARE_OBJECT_CONFIG_BY_ID: Record<CompareObjectId, CompareObjectConfig> =
+  COMPARE_OBJECTS.reduce(
+    (acc, cfg) => {
+      acc[cfg.id] = cfg;
+      return acc;
+    },
+    {} as Record<CompareObjectId, CompareObjectConfig>,
+  );
+
+const COMPARE_REFERENCE_COLOR = 0x4f83cc;
+const COMPARE_REFERENCE_EDGE_COLOR = 0x1d4ed8;
+
+function buildCompareReferenceMaterial(
+  overrides?: Partial<THREE.MeshStandardMaterialParameters>,
+): THREE.MeshStandardMaterial {
+  return new THREE.MeshStandardMaterial({
+    color: COMPARE_REFERENCE_COLOR,
+    transparent: true,
+    opacity: 0.55,
+    roughness: 0.65,
+    metalness: 0.05,
+    depthWrite: true,
+    side: THREE.DoubleSide,
+    ...overrides,
+  });
+}
+
+function addCompareReferencePart(
+  group: THREE.Group,
+  geometry: THREE.BufferGeometry,
+  position: THREE.Vector3,
+  material?: THREE.Material | THREE.Material[],
+): void {
+  const mesh = new THREE.Mesh(geometry, material ?? buildCompareReferenceMaterial());
+  mesh.position.copy(position);
+  mesh.userData.__isCompareReference = true;
+  mesh.raycast = () => {}; // belt-and-suspenders: never pickable even if re-parented
+  group.add(mesh);
+
+  const edgesGeom = new THREE.EdgesGeometry(geometry, 30);
+  const edgesMat = new THREE.LineBasicMaterial({
+    color: COMPARE_REFERENCE_EDGE_COLOR,
+    transparent: true,
+    opacity: 0.5,
+  });
+  const edges = new THREE.LineSegments(edgesGeom, edgesMat);
+  edges.position.copy(position);
+  edges.userData.__isCompareReference = true;
+  edges.raycast = () => {};
+  group.add(edges);
+}
+
+// ---------------------------------------------------------------------------
+// Procedural textures — drawn to an in-memory <canvas> and wrapped as a
+// THREE.CanvasTexture. No external image/model assets, so these cost nothing
+// in bundle size; each is generated lazily only when its reference object is
+// actually selected.
+// ---------------------------------------------------------------------------
+
+function createCanvasTexture(
+  width: number,
+  height: number,
+  draw: (ctx: CanvasRenderingContext2D, w: number, h: number) => void,
+): THREE.CanvasTexture {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (ctx) draw(ctx, width, height);
+  const texture = new THREE.CanvasTexture(canvas);
+  (texture as any).colorSpace = (THREE as any).SRGBColorSpace ?? undefined;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+/** BoxGeometry material-array order: [+x, -x, +y (top), -y (bottom), +z (front), -z (back)]. */
+function buildBoxMaterials(
+  topOrFront: THREE.Material,
+  plain: THREE.Material,
+  faceIndex: 2 | 4,
+): THREE.Material[] {
+  const mats: THREE.Material[] = [plain, plain, plain, plain, plain, plain];
+  mats[faceIndex] = topOrFront;
+  return mats;
+}
+
+function buildCreditCardMaterials(): THREE.Material[] {
+  const baseColor = "#eef1f5";
+  const topTexture = createCanvasTexture(512, 320, (ctx, w, h) => {
+    ctx.fillStyle = baseColor;
+    ctx.fillRect(0, 0, w, h);
+    const chipW = w * 0.14;
+    const chipH = h * 0.11;
+    const chipX = w * 0.08;
+    const chipY = h * 0.16;
+    ctx.fillStyle = "#d4af6a";
+    ctx.fillRect(chipX, chipY, chipW, chipH);
+    ctx.strokeStyle = "#a9843f";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(chipX, chipY, chipW, chipH);
+    ctx.fillStyle = "#94a3b8";
+    ctx.fillRect(w * 0.08, h * 0.55, w * 0.5, h * 0.045);
+    ctx.fillRect(w * 0.08, h * 0.65, w * 0.35, h * 0.045);
+  });
+  const top = buildCompareReferenceMaterial({
+    map: topTexture,
+    color: 0xffffff,
+    opacity: 0.9,
+    metalness: 0.1,
+    roughness: 0.5,
+  });
+  const side = buildCompareReferenceMaterial({
+    color: new THREE.Color(baseColor).getHex(),
+    opacity: 0.75,
+    metalness: 0.05,
+    roughness: 0.6,
+  });
+  return buildBoxMaterials(top, side, 2);
+}
+
+function buildGolfBallMaterial(): THREE.MeshStandardMaterial {
+  const texture = createCanvasTexture(256, 256, (ctx, w, h) => {
+    ctx.fillStyle = "#f5f5f0";
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = "#c9c9c0";
+    const spacing = w / 8;
+    const r = spacing * 0.28;
+    for (let row = 0; row < 8; row++) {
+      for (let col = 0; col < 8; col++) {
+        const offsetX = row % 2 === 0 ? 0 : spacing / 2;
+        const x = col * spacing + offsetX;
+        const y = row * spacing * 0.87;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  });
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.repeat.set(4, 2);
+  return buildCompareReferenceMaterial({
+    map: texture,
+    color: 0xffffff,
+    opacity: 0.9,
+    roughness: 0.4,
+    metalness: 0,
+  });
+}
+
+function buildBasketballMaterial(): THREE.MeshStandardMaterial {
+  const texture = createCanvasTexture(512, 256, (ctx, w, h) => {
+    ctx.fillStyle = "#d9691e";
+    ctx.fillRect(0, 0, w, h);
+    ctx.strokeStyle = "#2b1a12";
+    ctx.lineWidth = 4;
+    const meridianCount = 6;
+    for (let i = 0; i <= meridianCount; i++) {
+      const x = (w / meridianCount) * i;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, h);
+      ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.moveTo(0, h / 2);
+    ctx.lineTo(w, h / 2);
+    ctx.stroke();
+    ctx.beginPath();
+    for (let x = 0; x <= w; x += 4) {
+      const y = h / 2 + Math.sin((x / w) * Math.PI * 2) * (h * 0.18);
+      if (x === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.beginPath();
+    for (let x = 0; x <= w; x += 4) {
+      const y = h / 2 - Math.sin((x / w) * Math.PI * 2) * (h * 0.18);
+      if (x === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  });
+  return buildCompareReferenceMaterial({
+    map: texture,
+    color: 0xffffff,
+    opacity: 0.9,
+    roughness: 0.75,
+    metalness: 0,
+  });
+}
+
+const SODA_CAN_BODY_RADIUS = 33; // 66mm dia / 2
+const SODA_CAN_HEIGHT = 115;
+const SODA_CAN_BOTTOM_RADIUS = SODA_CAN_BODY_RADIUS * 0.86;
+const SODA_CAN_NECK_RADIUS = SODA_CAN_BODY_RADIUS * 0.78;
+
+/**
+ * Revolve profile for the can's side wall — a flat-ish bottom, a short curve
+ * out to the main body radius, a straight label run, and a taper into the
+ * neck/rim below the lid. Curved transitions are smoothstep-eased so they
+ * stay smooth (not faceted) without needing true circular-arc math.
+ */
+function buildSodaCanProfile(): THREE.Vector2[] {
+  const bodyR = SODA_CAN_BODY_RADIUS;
+  const bottomR = SODA_CAN_BOTTOM_RADIUS;
+  const neckR = SODA_CAN_NECK_RADIUS;
+  const totalH = SODA_CAN_HEIGHT;
+  const bottomFilletTopY = 5;
+  const neckStartY = totalH - 20;
+  const neckTopY = totalH - 6;
+
+  const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+  const ease = (t: number) => t * t * (3 - 2 * t);
+  const addArc = (
+    points: THREE.Vector2[],
+    r0: number,
+    y0: number,
+    r1: number,
+    y1: number,
+    segments: number,
+  ) => {
+    for (let i = 1; i <= segments; i++) {
+      const t = i / segments;
+      points.push(new THREE.Vector2(lerp(r0, r1, ease(t)), lerp(y0, y1, t)));
+    }
+  };
+
+  const points: THREE.Vector2[] = [new THREE.Vector2(bottomR, 0)];
+  addArc(points, bottomR, 0, bodyR, bottomFilletTopY, 6);
+  points.push(new THREE.Vector2(bodyR, neckStartY)); // straight label run
+  addArc(points, bodyR, neckStartY, neckR, neckTopY, 8); // taper into neck
+  points.push(new THREE.Vector2(neckR, totalH)); // short flat rim below the lid
+  return points;
+}
+
+function buildSodaCanSideGeometry(): THREE.LatheGeometry {
+  const geometry = new THREE.LatheGeometry(buildSodaCanProfile(), 48);
+  // LatheGeometry's default v-coordinate is based on profile-point index,
+  // not actual height — since our points are unevenly spaced (bunched at
+  // the fillet/neck curves, sparse on the straight run), that would badly
+  // distort the label texture. Recompute v from real Y so it maps evenly.
+  const position = geometry.attributes.position;
+  const uv = geometry.attributes.uv;
+  for (let i = 0; i < position.count; i++) {
+    uv.setY(i, position.getY(i) / SODA_CAN_HEIGHT);
+  }
+  uv.needsUpdate = true;
+  return geometry;
+}
+
+function buildSodaCanLidTexture(): THREE.CanvasTexture {
+  return createCanvasTexture(256, 256, (ctx, w, h) => {
+    const cx = w / 2;
+    const cy = h / 2;
+    ctx.fillStyle = "#d7dbe0";
+    ctx.fillRect(0, 0, w, h);
+    // Rim highlight ring — suggests the seam where the lid attaches.
+    ctx.strokeStyle = "#9aa0a6";
+    ctx.lineWidth = w * 0.03;
+    ctx.beginPath();
+    ctx.arc(cx, cy, w * 0.42, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = "#f0f2f4";
+    ctx.lineWidth = w * 0.015;
+    ctx.beginPath();
+    ctx.arc(cx, cy, w * 0.36, 0, Math.PI * 2);
+    ctx.stroke();
+    // Molded pull-tab outline — printed detail only, no raised geometry.
+    ctx.strokeStyle = "#8b929a";
+    ctx.lineWidth = w * 0.012;
+    ctx.save();
+    ctx.translate(cx, cy * 0.95);
+    ctx.beginPath();
+    ctx.ellipse(0, 0, w * 0.14, w * 0.07, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, -w * 0.02, w * 0.045, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  });
+}
+
+function buildSodaCanMaterials(): {
+  side: THREE.Material;
+  top: THREE.Material;
+  bottom: THREE.Material;
+} {
+  const sideTexture = createCanvasTexture(512, 512, (ctx, w, h) => {
+    ctx.fillStyle = "#d7dbe0";
+    ctx.fillRect(0, 0, w, h);
+    const grad = ctx.createLinearGradient(0, 0, w, 0);
+    grad.addColorStop(0, "rgba(255,255,255,0.35)");
+    grad.addColorStop(0.5, "rgba(255,255,255,0)");
+    grad.addColorStop(1, "rgba(255,255,255,0.35)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = "#2f7dd1";
+    ctx.fillRect(0, h / 3, w, h / 3);
+  });
+  // Solid aluminum body — fully opaque so the can reads as metal, not glass.
+  // The blue "reference object" identity is carried by the edge outline
+  // (see addCompareReferencePart) rather than a translucent fill here.
+  const side = buildCompareReferenceMaterial({
+    map: sideTexture,
+    color: 0xffffff,
+    transparent: false,
+    opacity: 1,
+    metalness: 0.6,
+    roughness: 0.35,
+  });
+  const top = buildCompareReferenceMaterial({
+    map: buildSodaCanLidTexture(),
+    color: 0xffffff,
+    transparent: false,
+    opacity: 1,
+    metalness: 0.8,
+    roughness: 0.25,
+  });
+  const bottom = buildCompareReferenceMaterial({
+    color: 0xe4e7eb,
+    transparent: false,
+    opacity: 1,
+    metalness: 0.8,
+    roughness: 0.25,
+  });
+  return { side, top, bottom };
+}
+
+function buildLaptopBaseMaterials(): THREE.Material[] {
+  const topTexture = createCanvasTexture(512, 356, (ctx, w, h) => {
+    ctx.fillStyle = "#7d848c";
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = "#4b4f55";
+    const cols = 12;
+    const rows = 5;
+    const marginX = w * 0.08;
+    const marginY = h * 0.15;
+    const areaW = w - marginX * 2;
+    const areaH = h * 0.55;
+    const keyW = areaW / cols;
+    const keyH = areaH / rows;
+    const gap = keyW * 0.12;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        ctx.fillRect(
+          marginX + c * keyW + gap / 2,
+          marginY + r * keyH + gap / 2,
+          keyW - gap,
+          keyH - gap,
+        );
+      }
+    }
+  });
+  const top = buildCompareReferenceMaterial({
+    map: topTexture,
+    color: 0xffffff,
+    opacity: 0.9,
+    metalness: 0.3,
+    roughness: 0.55,
+  });
+  const side = buildCompareReferenceMaterial({
+    color: 0x9aa0a6,
+    opacity: 0.75,
+    metalness: 0.3,
+    roughness: 0.6,
+  });
+  return buildBoxMaterials(top, side, 2);
+}
+
+function buildLaptopScreenMaterials(): THREE.Material[] {
+  const frontTexture = createCanvasTexture(512, 320, (ctx, w, h) => {
+    ctx.fillStyle = "#3a3d42";
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = "#111317";
+    const inset = w * 0.06;
+    ctx.fillRect(inset, inset, w - inset * 2, h - inset * 2);
+  });
+  const front = buildCompareReferenceMaterial({
+    map: frontTexture,
+    color: 0xffffff,
+    opacity: 0.9,
+    metalness: 0.2,
+    roughness: 0.5,
+  });
+  const side = buildCompareReferenceMaterial({
+    color: 0x3a3d42,
+    opacity: 0.75,
+    metalness: 0.2,
+    roughness: 0.6,
+  });
+  return buildBoxMaterials(front, side, 4);
+}
+
+function buildHumanSkinMaterial(): THREE.MeshStandardMaterial {
+  return buildCompareReferenceMaterial({
+    color: 0xd8a878,
+    opacity: 0.75,
+    metalness: 0,
+    roughness: 0.7,
+  });
+}
+
+function buildHumanShirtMaterial(): THREE.MeshStandardMaterial {
+  return buildCompareReferenceMaterial({
+    color: 0x3b6fa0,
+    opacity: 0.75,
+    metalness: 0,
+    roughness: 0.7,
+  });
+}
+
+function buildWashingMachineMaterials(): THREE.Material[] {
+  const frontTexture = createCanvasTexture(512, 512, (ctx, w, h) => {
+    ctx.fillStyle = "#e9edf1";
+    ctx.fillRect(0, 0, w, h);
+    const cx = w / 2;
+    const cy = h * 0.58;
+    const rOuter = w * 0.28;
+    ctx.strokeStyle = "#3a4048";
+    ctx.lineWidth = 10;
+    ctx.beginPath();
+    ctx.arc(cx, cy, rOuter, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(cx, cy, rOuter * 0.82, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = "#c7ccd1";
+    const panelW = w * 0.5;
+    const panelH = h * 0.1;
+    ctx.fillRect(cx - panelW / 2, h * 0.08, panelW, panelH);
+    ctx.strokeStyle = "#8b929a";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(cx - panelW / 2, h * 0.08, panelW, panelH);
+  });
+  // Fully opaque on every face (including the top) so the box reads as a
+  // solid enclosed appliance rather than hollow/open from above.
+  const front = buildCompareReferenceMaterial({
+    map: frontTexture,
+    color: 0xffffff,
+    transparent: false,
+    opacity: 1,
+    metalness: 0.1,
+    roughness: 0.6,
+  });
+  const side = buildCompareReferenceMaterial({
+    color: 0xe9edf1,
+    transparent: false,
+    opacity: 1,
+    metalness: 0.1,
+    roughness: 0.65,
+  });
+  return buildBoxMaterials(front, side, 4);
+}
+
+function buildStandardDoorMaterials(): THREE.Material[] {
+  const frontTexture = createCanvasTexture(324, 813, (ctx, w, h) => {
+    ctx.fillStyle = "#b98554";
+    ctx.fillRect(0, 0, w, h);
+    ctx.strokeStyle = "#7a5738";
+    ctx.lineWidth = 6;
+    const marginX = w * 0.14;
+    const panelW = w - marginX * 2;
+    const panelGap = h * 0.06;
+    const panelH = h * 0.38;
+    ctx.strokeRect(marginX, h * 0.08, panelW, panelH);
+    ctx.strokeRect(marginX, h * 0.08 + panelH + panelGap, panelW, panelH);
+    ctx.fillStyle = "#2b2f33";
+    ctx.beginPath();
+    ctx.arc(w * 0.86, h * 0.52, w * 0.035, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  const front = buildCompareReferenceMaterial({
+    map: frontTexture,
+    color: 0xffffff,
+    opacity: 0.85,
+    metalness: 0,
+    roughness: 0.75,
+  });
+  const side = buildCompareReferenceMaterial({
+    color: 0xb98554,
+    opacity: 0.7,
+    metalness: 0,
+    roughness: 0.75,
+  });
+  return buildBoxMaterials(front, side, 4);
+}
+
+/**
+ * Builds a reference object's geometry, positioned so the group's local
+ * origin sits at the object's ground-contact point (i.e. resting on y=0).
+ */
+function buildCompareObjectGroup(id: CompareObjectId): THREE.Group {
+  const group = new THREE.Group();
+  group.name = `compare_reference_${id}`;
+  group.userData.__isCompareReference = true;
+
+  switch (id) {
+    case "credit_card": {
+      const w = 85.6;
+      const d = 54;
+      const t = 0.76;
+      addCompareReferencePart(
+        group,
+        new THREE.BoxGeometry(w, t, d),
+        new THREE.Vector3(0, t / 2, 0),
+        buildCreditCardMaterials(),
+      );
+      break;
+    }
+    case "golf_ball": {
+      const r = 42.7 / 2;
+      addCompareReferencePart(
+        group,
+        new THREE.SphereGeometry(r, 32, 24),
+        new THREE.Vector3(0, r, 0),
+        buildGolfBallMaterial(),
+      );
+      break;
+    }
+    case "soda_can": {
+      const { side, top, bottom } = buildSodaCanMaterials();
+      // Lathed side wall (flat bottom → body → tapered neck/rim), plus flat
+      // top/bottom caps sized to match the profile's end radii exactly so
+      // there's no gap at the seams.
+      addCompareReferencePart(
+        group,
+        buildSodaCanSideGeometry(),
+        new THREE.Vector3(0, 0, 0),
+        side,
+      );
+      const topCapGeometry = new THREE.CircleGeometry(SODA_CAN_NECK_RADIUS, 48);
+      topCapGeometry.rotateX(-Math.PI / 2);
+      addCompareReferencePart(
+        group,
+        topCapGeometry,
+        new THREE.Vector3(0, SODA_CAN_HEIGHT, 0),
+        top,
+      );
+      const bottomCapGeometry = new THREE.CircleGeometry(
+        SODA_CAN_BOTTOM_RADIUS,
+        48,
+      );
+      bottomCapGeometry.rotateX(Math.PI / 2);
+      addCompareReferencePart(
+        group,
+        bottomCapGeometry,
+        new THREE.Vector3(0, 0, 0),
+        bottom,
+      );
+      break;
+    }
+    case "basketball": {
+      const r = 240 / 2;
+      addCompareReferencePart(
+        group,
+        new THREE.SphereGeometry(r, 32, 24),
+        new THREE.Vector3(0, r, 0),
+        buildBasketballMaterial(),
+      );
+      break;
+    }
+    case "laptop_13in": {
+      const w = 304;
+      const d = 212;
+      const t = 18;
+      addCompareReferencePart(
+        group,
+        new THREE.BoxGeometry(w, t, d),
+        new THREE.Vector3(0, t / 2, 0),
+        buildLaptopBaseMaterials(),
+      );
+      // Upright screen panel at the back edge, front face (+Z, facing the
+      // keyboard/user side) carries the darker inset-rectangle screen texture.
+      const screenH = d * 0.92;
+      const screenT = 6;
+      addCompareReferencePart(
+        group,
+        new THREE.BoxGeometry(w * 0.94, screenH, screenT),
+        new THREE.Vector3(0, t + screenH / 2, -d / 2 + screenT / 2),
+        buildLaptopScreenMaterials(),
+      );
+      break;
+    }
+    case "human_figure": {
+      // Simple low-poly humanoid built from primitives, ~1700mm total height.
+      const legHeight = 800;
+      const legRadius = 55;
+      const legOffsetX = 60;
+      const torsoBottomY = legHeight;
+      const torsoHeight = 500;
+      const torsoRadius = 130;
+      const shoulderY = torsoBottomY + torsoHeight;
+      // Short, slightly thicker neck so the head reads as attached rather
+      // than "bobblehead on a stick".
+      const neckHeight = 80;
+      const neckRadius = 55;
+      const headRadius = 100;
+      const headCenterY = shoulderY + neckHeight + headRadius;
+      const armLength = 600;
+      const armRadius = 35;
+      // Arm top sits at the torso's widest point (base of the capsule's
+      // domed cap, not its apex) and overlaps the torso radius so the arm
+      // visually attaches at the shoulder instead of floating beside it.
+      const armTopY = shoulderY - torsoRadius;
+      const armOffsetX = torsoRadius + armRadius - 15;
+      const armCenterY = armTopY - armLength / 2;
+
+      // Torso is shirt-colored; head/neck/arms/legs share the skin tone —
+      // a plain material color swap (no image texture) is enough here.
+      const skinMaterial = buildHumanSkinMaterial();
+      const shirtMaterial = buildHumanShirtMaterial();
+
+      // Legs — slightly tapered (wider at hip, narrower at ankle).
+      addCompareReferencePart(
+        group,
+        new THREE.CylinderGeometry(legRadius, legRadius * 0.8, legHeight, 16),
+        new THREE.Vector3(-legOffsetX, legHeight / 2, 0),
+        skinMaterial,
+      );
+      addCompareReferencePart(
+        group,
+        new THREE.CylinderGeometry(legRadius, legRadius * 0.8, legHeight, 16),
+        new THREE.Vector3(legOffsetX, legHeight / 2, 0),
+        skinMaterial,
+      );
+      // Torso (capsule)
+      addCompareReferencePart(
+        group,
+        new THREE.CapsuleGeometry(
+          torsoRadius,
+          Math.max(1, torsoHeight - torsoRadius * 2),
+          8,
+          16,
+        ),
+        new THREE.Vector3(0, torsoBottomY + torsoHeight / 2, 0),
+        shirtMaterial,
+      );
+      // Neck
+      addCompareReferencePart(
+        group,
+        new THREE.CylinderGeometry(neckRadius, neckRadius, neckHeight, 12),
+        new THREE.Vector3(0, shoulderY + neckHeight / 2, 0),
+        skinMaterial,
+      );
+      // Head
+      addCompareReferencePart(
+        group,
+        new THREE.SphereGeometry(headRadius, 24, 20),
+        new THREE.Vector3(0, headCenterY, 0),
+        skinMaterial,
+      );
+      // Arms — tapered (wider at shoulder, narrower at wrist).
+      addCompareReferencePart(
+        group,
+        new THREE.CylinderGeometry(armRadius, armRadius * 0.7, armLength, 14),
+        new THREE.Vector3(-armOffsetX, armCenterY, 0),
+        skinMaterial,
+      );
+      addCompareReferencePart(
+        group,
+        new THREE.CylinderGeometry(armRadius, armRadius * 0.7, armLength, 14),
+        new THREE.Vector3(armOffsetX, armCenterY, 0),
+        skinMaterial,
+      );
+      break;
+    }
+    case "washing_machine": {
+      const w = 600;
+      const h = 850;
+      const d = 600;
+      addCompareReferencePart(
+        group,
+        new THREE.BoxGeometry(w, h, d),
+        new THREE.Vector3(0, h / 2, 0),
+        buildWashingMachineMaterials(),
+      );
+      break;
+    }
+    case "standard_door": {
+      const w = 810;
+      const h = 2032;
+      const t = 40;
+      addCompareReferencePart(
+        group,
+        new THREE.BoxGeometry(w, h, t),
+        new THREE.Vector3(0, h / 2, 0),
+        buildStandardDoorMaterials(),
+      );
+      break;
+    }
+  }
+
+  return group;
+}
+
 export function createViewer(container: HTMLElement): Viewer {
   // Declare controls and requestUpdateSilhouette at the top to avoid TS errors
   // (used before assignment in view cube setup)
@@ -2504,6 +3281,14 @@ export function createViewer(container: HTMLElement): Viewer {
   const modelRoot = new THREE.Group();
   modelRoot.name = "modelRoot";
   scene.add(modelRoot);
+
+  // Compare Scale reference object: a scene sibling of modelRoot (like gridHelper/
+  // axesHelper), never a child of it. Every raycast/measure/wireframe/x-ray system
+  // in this file walks modelRoot exclusively, so keeping this outside modelRoot is
+  // what makes it automatically un-pickable and unaffected by those systems.
+  let compareActiveId: CompareObjectId | null = null;
+  let compareReferenceGroup: THREE.Group | null = null;
+  const COMPARE_GAP_MM = 30;
 
   // Feature edges overlay root (kept as a child of modelRoot so it inherits scene placement)
   const featureEdgesGroup = new THREE.Group();
@@ -4560,6 +5345,97 @@ export function createViewer(container: HTMLElement): Viewer {
     requestRender("fit_camera_to_box");
   }
 
+  function disposeCompareReferenceGroup(): void {
+    if (!compareReferenceGroup) return;
+    scene.remove(compareReferenceGroup);
+    const disposedTextures = new Set<THREE.Texture>();
+    compareReferenceGroup.traverse((obj: any) => {
+      if (obj.geometry) obj.geometry.dispose();
+      if (obj.material) {
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        mats.forEach((m: any) => {
+          if (m?.map && !disposedTextures.has(m.map)) {
+            disposedTextures.add(m.map);
+            m.map.dispose();
+          }
+          m?.dispose?.();
+        });
+      }
+    });
+    compareReferenceGroup = null;
+  }
+
+  function getPartOnlyBox(): THREE.Box3 {
+    return new THREE.Box3().setFromObject(modelRoot);
+  }
+
+  /**
+   * Repositions the active reference object beside the current part bounds
+   * (small gap, resting on the grid, to the +X side) and re-fits the camera
+   * to frame both together. No-op if Compare is off. Called on selection and
+   * again whenever the loaded part's geometry changes.
+   */
+  function placeActiveCompareObject(): void {
+    if (!compareActiveId || !compareReferenceGroup) return;
+    const config = COMPARE_OBJECT_CONFIG_BY_ID[compareActiveId];
+    if (!config) return;
+
+    const partBox = getPartOnlyBox();
+    const hasPart = !partBox.isEmpty();
+
+    // Reset position before measuring local size so previous placement
+    // doesn't skew the box.
+    compareReferenceGroup.position.set(0, 0, 0);
+    compareReferenceGroup.updateWorldMatrix(true, true);
+    const refBoxLocal = new THREE.Box3().setFromObject(compareReferenceGroup);
+    const refSize = refBoxLocal.getSize(new THREE.Vector3());
+
+    const posX = hasPart
+      ? partBox.max.x + COMPARE_GAP_MM + refSize.x / 2
+      : 0;
+    const posZ = hasPart ? partBox.getCenter(new THREE.Vector3()).z : 0;
+
+    compareReferenceGroup.position.set(posX, 0, posZ);
+    compareReferenceGroup.updateWorldMatrix(true, true);
+    const refBoxWorld = new THREE.Box3().setFromObject(compareReferenceGroup);
+
+    const combinedBox = hasPart
+      ? partBox.clone().union(refBoxWorld)
+      : refBoxWorld.clone();
+    fitCameraToBox(combinedBox, 1.5);
+    requestRender("place_compare_object");
+  }
+
+  /** Turns Compare off (if active) and re-fits the camera to the part alone. */
+  function clearCompareObject(refit: boolean): void {
+    const hadActive = compareActiveId !== null;
+    disposeCompareReferenceGroup();
+    compareActiveId = null;
+    if (hadActive && refit) {
+      fitToScreen(1);
+    }
+  }
+
+  function setCompareObject(id: CompareObjectId | null): void {
+    if (id === null || id === compareActiveId) {
+      clearCompareObject(true);
+      return;
+    }
+
+    const config = COMPARE_OBJECT_CONFIG_BY_ID[id];
+    if (!config) return;
+
+    // Swap out any previously active reference object silently (the refit
+    // below will supersede whatever fitToScreen would have done here).
+    disposeCompareReferenceGroup();
+
+    compareActiveId = id;
+    compareReferenceGroup = buildCompareObjectGroup(id);
+    scene.add(compareReferenceGroup);
+
+    placeActiveCompareObject();
+  }
+
   // function computeBoxOf(object: THREE.Object3D) {
   //   const box = new THREE.Box3();
   //   box.setFromObject(object);
@@ -6078,6 +6954,12 @@ export function createViewer(container: HTMLElement): Viewer {
     const prevModelVisibleForCube = modelRoot.visible;
     modelRoot.visible = false;
 
+    // Outline Snap traces the actual part's edges only — a reference object's
+    // solid-color linework would be indistinguishable from real part geometry
+    // in this black-on-white export, so hide it for this capture.
+    const prevCompareGroupVisible = compareReferenceGroup?.visible ?? false;
+    if (compareReferenceGroup) compareReferenceGroup.visible = false;
+
     renderer.setClearColor(0xf0f2f5, 1);
     scene.background = null;
 
@@ -6102,6 +6984,7 @@ export function createViewer(container: HTMLElement): Viewer {
     });
 
     modelRoot.visible = prevModelVisibleForCube;
+    if (compareReferenceGroup) compareReferenceGroup.visible = prevCompareGroupVisible;
     renderer.setClearColor(prevClearColor, prevClearAlpha);
     scene.background = prevBackground;
 
@@ -7338,6 +8221,9 @@ export function createViewer(container: HTMLElement): Viewer {
       if (shouldRefit) {
         const padding = 1.5;
         fitCameraToBox(translatedBox, padding);
+        // Part bounds moved: re-anchor and re-frame the active reference
+        // object (if any) so it stays adjacent instead of floating stale.
+        if (compareActiveId) placeActiveCompareObject();
       }
       // Create feature edges after the model has been positioned and matrices are up-to-date.
       modelRoot.updateWorldMatrix(true, true);
@@ -7359,6 +8245,7 @@ export function createViewer(container: HTMLElement): Viewer {
       modelDiagonal = 0;
       clearFeatureEdges();
       clearWireframeOverlays();
+      if (compareActiveId) clearCompareObject(false);
     }
   }
 
@@ -7623,6 +8510,7 @@ export function createViewer(container: HTMLElement): Viewer {
 
       const padding = 1.5;
       fitCameraToBox(translatedBox, padding);
+      if (compareActiveId) placeActiveCompareObject();
       updateClippingPlanes();
       if (hasAnyMesh) {
         modelRoot.updateWorldMatrix(true, true);
@@ -7645,6 +8533,7 @@ export function createViewer(container: HTMLElement): Viewer {
       modelBounds = { min: 0, max: 0 };
       modelDiagonal = 0;
       updateClippingPlanes();
+      if (compareActiveId) clearCompareObject(false);
     }
 
     perfLog("load_diagnostics", {
@@ -7675,6 +8564,14 @@ export function createViewer(container: HTMLElement): Viewer {
       modelRoot.add(featureEdgesGroup);
     }
     modelRoot.position.set(0, 0, 0);
+    // Deliberately does NOT clear the active Compare reference object: clear()
+    // is also called at the start of every file load (including swapping from
+    // one file to another) to reset modelRoot before new geometry arrives. The
+    // reference object must survive that transient empty state so it can
+    // re-anchor beside the newly loaded part once finalizePrimaryGeometryUpdate/
+    // loadObject3D run (see their `if (compareActiveId) placeActiveCompareObject()`
+    // calls). Callers that want Compare to actually turn off on clear — i.e. the
+    // "no file loaded" case — must call setCompareObject(null) explicitly.
     emitViewChanged();
     requestRender("clear_viewer");
   }
@@ -8501,6 +9398,7 @@ export function createViewer(container: HTMLElement): Viewer {
     setClipping,
     fitToScreen,
     frameObject,
+    setCompareObject,
     setHighlight,
     setBackgroundColor,
     setOverlayVisible,
