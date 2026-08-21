@@ -12,6 +12,8 @@ import {
 import { Line2 } from "three/examples/jsm/lines/Line2.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
+import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
+import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import { measureApproximateMeshEdgeAtScreenPosition } from "./approx-mesh-measurement";
 import {
   buildCircularFeatureCache,
@@ -81,6 +83,270 @@ function buildBoundsTreeForObjectMeshes(root: THREE.Object3D): void {
   });
 }
 
+// --- TEMPORARY DEBUG: hidden-line detection spike -------------------------
+// Everything between these markers exists only to prove out ray-cast-based
+// hidden-line detection in isolation before any dashed-line/sheet work
+// begins. Remove once the approach is verified (or promoted into the real
+// feature).
+
+export type HiddenLineDebugStats = {
+  edgeSource: "exact-cad" | "approx-cad" | "fallback-mesh";
+  edgeCount: number;
+  totalSamples: number;
+  visibleSamples: number;
+  hiddenSamples: number;
+  visibleSegmentCount: number;
+  hiddenSegmentCount: number;
+  computeMs: number;
+};
+
+// A flat run of mini-segments sharing one visibility state. `distances` holds
+// a cumulative arc-length per vertex, reset to 0 at each run boundary -
+// consumed as the `lineDistance` attribute LineDashedMaterial needs to dash
+// correctly across a LineSegments buffer (whose built-in
+// computeLineDistances() resets every pair, which would break dashing across
+// a real multi-sample-long hidden run).
+type HiddenLineRunBuffers = {
+  positions: number[];
+  distances: number[];
+};
+
+export type HiddenLineComputeResult = {
+  stats: HiddenLineDebugStats;
+  visible: HiddenLineRunBuffers;
+  hidden: HiddenLineRunBuffers;
+};
+
+export type HiddenLineViewName = "front" | "top" | "right";
+
+/**
+ * One continuous run of hidden-line result geometry, already projected into
+ * the captured view's own pixel space (the same space canvasWidth/
+ * canvasHeight and every annotation's *Px point live in).
+ *
+ * VECTORS, not a bitmap, deliberately: the drawing sheet has to stroke these
+ * at a real drafting line weight in PAPER mm (see drafting-rules.ts's
+ * LINE_WEIGHT_* hierarchy), and a rasterized capture can't deliver that - it
+ * gets resampled by whatever ratio the sheet ends up composing at (bilinear-
+ * blurred when magnified, washed out below one pixel when reduced), so its
+ * apparent stroke width would track the part's drafting ratio instead of
+ * staying the fixed on-paper weight the convention specifies. `pts` is a
+ * flat [x0,y0,x1,y1,...] polyline so a whole view is a handful of canvas
+ * subpaths rather than thousands of independent strokes, and so a dash
+ * pattern runs continuously along a real hidden run instead of restarting at
+ * every ~1mm occlusion sample.
+ */
+export type HiddenLineEdgeRun = {
+  /** true = occluded (draw dashed/lighter), false = visible outline. */
+  hidden: boolean;
+  pts: number[];
+};
+
+export type HiddenLineViewCapture = {
+  view: HiddenLineViewName;
+  label: string;
+  edgeRuns: HiddenLineEdgeRun[];
+};
+
+/**
+ * Shaded true-isometric snapshot of the whole part, for the drawing sheet's
+ * top-right reference view (see sheet-composer.ts). A real raster here, not
+ * vectors like the orthographic views above: this one is SHADED (that's the
+ * point of it), it carries no dimensions, and it's explicitly not to scale -
+ * none of the reasons the ortho views must be vectors apply.
+ */
+export type HiddenLineIsoCapture = {
+  dataURL: string;
+  /** The sub-rect of the captured image (capture px) that actually contains
+   * the part - the projected bounding box's own screen bounds plus a small
+   * margin, so the sheet can crop away the empty canvas around it without
+   * having to scan pixels. */
+  cropPx: { x: number; y: number; w: number; h: number };
+};
+
+export type HiddenLineProgressInfo = {
+  label: string;
+  index: number;
+  total: number;
+  done: boolean;
+};
+
+export type HiddenLineCircularAnnotation = {
+  featureId: string;
+  kind: "circle" | "arc";
+  /** Real-world radius (mm). */
+  radiusMm: number;
+  /** Where the leader line should touch the feature - a rim point (circles)
+   * or the arc's midpoint (arcs) - in the SAME pixel space as this view's
+   * captured dataURL/canvasWidth/canvasHeight. */
+  anchorPx: { x: number; y: number };
+  /** The feature's true center, same pixel space as anchorPx - used for
+   * location (distance-from-edge) dimensioning, which every instance gets
+   * regardless of size-label dedup. */
+  centerPx: { x: number; y: number };
+  /** Pre-formatted size callout text (e.g. "⌀3.0", "4X ⌀3.0", "R8.0"), or
+   * null when this feature is a non-representative member of a same-size
+   * group within this view and its size callout is suppressed to avoid
+   * drawing the same "⌀3.0" four times over - see
+   * computeCircularAnnotationsForView()'s dedup pass. Non-representative
+   * members also get no location dimension of their own downstream (see
+   * sheet-composer.ts's drawCell) - the group's "NX" prefix on the
+   * representative's label stands for all of them, standard drafting
+   * shorthand for a symmetric/repeated pattern. */
+  sizeLabel: string | null;
+  /** The featureId of this feature's dedup-group representative (see
+   * computeCircularAnnotationsForView()'s dedup pass) - equal to this
+   * feature's own featureId when it IS the representative. Lets a
+   * downstream consumer (e.g. a completeness checker) tell whether a
+   * feature with sizeLabel===null is nonetheless "covered" by its group's
+   * shared label rather than truly undimensioned. */
+  groupRepresentativeFeatureId: string;
+  /** How many features share this one's dedup group (>= 1). */
+  groupSize: number;
+  /** Diameter (mm) of a coaxial partner circle at a DIFFERENT depth along
+   * this circle's own axis - i.e. this hole is stepped/counterbored, not a
+   * constant-diameter hole. Set by findSteppedPartner(). Only
+   * meaningful for kind "circle" (arcs/fillets are never stepped in this
+   * model). Used to keep a stepped hole's near-face opening out of the
+   * plain same-diameter dedup group it would otherwise coincidentally fall
+   * into (e.g. a ⌀3.0 counterbore throat next to four plain ⌀3.0 mounting
+   * holes), since the two are different real features despite one face
+   * measuring the same. */
+  secondaryDiameterMm: number | null;
+};
+
+/** A stepped/counterbored hole's depth, as seen edge-on in a view where its
+ * axis lies in the screen plane (see computeAxialDepthAnnotationsForView) -
+ * the complementary case to HiddenLineCircularAnnotation, which only covers
+ * the view where the SAME hole reads as a true circle. */
+export type HiddenLineAxialDepthAnnotation = {
+  /** featureId of the near/pilot-side circle feature - the same id that
+   * feature carries in circularAnnotations on whichever view it reads
+   * face-on, so a completeness checker can treat the two as one feature. */
+  featureId: string;
+  depthMm: number;
+  nearPx: { x: number; y: number };
+  farPx: { x: number; y: number };
+};
+
+export type HiddenLineViewSetResult = {
+  views: HiddenLineViewCapture[];
+  /** World-units-per-pixel scale shared by all three captures (mm/px, since
+   * the app's models are authored in mm - see "Model Bounds" panel). Every
+   * view was captured through the identical orthographic frustum, so this
+   * single value converts pixels to real mm in any of the three images. */
+  pxPerMm: number;
+  /** Pixel size of each captured image (they're all the same canvas). */
+  canvasWidth: number;
+  canvasHeight: number;
+  /** The part's overall 3D bounding box (mm) used to compute the shared fit. */
+  modelBoundsMm: { x: number; y: number; z: number };
+  /** Visible circle/arc features that read as a true circle/arc in each
+   * view (i.e. the feature's plane faces the camera) - see
+   * computeCircularAnnotationsForView() for the visibility/relevance rules. */
+  circularAnnotations: Record<HiddenLineViewName, HiddenLineCircularAnnotation[]>;
+  /** Every circle/arc feature in the model, regardless of whether it faces
+   * the camera (i.e. reads as a true circle) in any of the three captured
+   * views - the canonical feature inventory a completeness checker needs,
+   * since circularAnnotations alone only lists features that happened to be
+   * visible face-on and unoccluded in at least one view. A feature that
+   * never faces any of the three orthogonal views still needs to be known
+   * about so a checker can flag it as having zero dimension coverage. */
+  allCircularFeatures: {
+    featureId: string;
+    kind: "circle" | "arc";
+    radiusMm: number;
+    secondaryDiameterMm: number | null;
+  }[];
+  /** Per-view dedup group membership for every circle/arc annotation
+   * (including non-representative members whose sizeLabel is null) - the
+   * completeness checker needs this to know a null-sizeLabel feature is
+   * legitimately covered by its group's shared "NX" label rather than
+   * genuinely undimensioned. Keyed by featureId; a feature that appears in
+   * more than one view (not expected for circles, but not impossible) will
+   * just carry whichever view's grouping was recorded last. */
+  circularFeatureGroups: Record<
+    string,
+    { representativeFeatureId: string; groupSize: number }
+  >;
+  /** Stepped/counterbored hole depth dimensions, per view - see
+   * computeAxialDepthAnnotationsForView(). Empty for a view where no
+   * stepped hole's axis lies in the screen plane. */
+  axialDepthAnnotations: Record<HiddenLineViewName, HiddenLineAxialDepthAnnotation[]>;
+  /** Shaded isometric reference capture for the sheet's top-right corner -
+   * see HiddenLineIsoCapture. Null only when there's no part geometry to
+   * capture; the sheet simply omits the reference view in that case. */
+  isoCapture: HiddenLineIsoCapture | null;
+};
+
+/**
+ * Procedural test part for hidden-line verification: a hollow tube (annular
+ * prism) with a vertical (Y-axis) through-hole. Viewed from Front/Right, the
+ * inner wall/rim is fully hidden (occluded by the tube's own near wall)
+ * while the outer rim is fully visible - a clean, reasoned-about ground
+ * truth. Viewed from an angled (iso) view, each rim circle (inner and
+ * outer, top and bottom) is naturally half-visible/half-hidden, exercising
+ * the "edge with both visible and hidden segments" case.
+ *
+ * Built by hand (no ExtrudeGeometry/earcut hole-bridging) specifically to
+ * avoid a triangulation artifact found while building this test: an
+ * ExtrudeGeometry shape-with-hole, once run through this app's normal
+ * BVH-build step, produced a spurious internal edge from EdgesGeometry that
+ * didn't correspond to any real surface (reproducible in the live app, not
+ * reproducible in an isolated Node/three.js repro with identical code - the
+ * exact trigger wasn't pinned down). Concentric same-segment-count circles
+ * triangulate as trivial quad strips, so there's no bridging step to go
+ * wrong.
+ */
+function buildHiddenLineDebugTestGeometry(): THREE.BufferGeometry {
+  const outerR = 25;
+  const innerR = 10;
+  const height = 30;
+  const segs = 48;
+
+  const positions: number[] = [];
+  const indices: number[] = [];
+
+  const ring = (r: number, y: number): number => {
+    const start = positions.length / 3;
+    for (let i = 0; i < segs; i++) {
+      const theta = (i / segs) * Math.PI * 2;
+      positions.push(r * Math.cos(theta), y, r * Math.sin(theta));
+    }
+    return start;
+  };
+
+  const outerBottom = ring(outerR, 0);
+  const outerTop = ring(outerR, height);
+  const innerBottom = ring(innerR, 0);
+  const innerTop = ring(innerR, height);
+
+  const quad = (a: number, b: number, c: number, d: number) => {
+    indices.push(a, b, c, a, c, d);
+  };
+
+  for (let i = 0; i < segs; i++) {
+    const j = (i + 1) % segs;
+    // Outer wall (outward-facing).
+    quad(outerBottom + i, outerBottom + j, outerTop + j, outerTop + i);
+    // Inner wall (inward-facing, reversed winding).
+    quad(innerBottom + j, innerBottom + i, innerTop + i, innerTop + j);
+    // Top annulus cap.
+    quad(outerTop + i, outerTop + j, innerTop + j, innerTop + i);
+    // Bottom annulus cap (reversed winding, faces downward).
+    quad(outerBottom + j, outerBottom + i, innerBottom + i, innerBottom + j);
+  }
+
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(positions, 3),
+  );
+  geom.setIndex(indices);
+  geom.computeVertexNormals();
+  return geom;
+}
+
 export type Viewer = {
   loadMeshFromGeometry: (geom: THREE.BufferGeometry) => void;
   replacePrimaryGeometry: (
@@ -145,6 +411,22 @@ export type Viewer = {
   setMeasurementGraphicsScale: (scale: number) => void;
   getScreenshotDataURL: () => string;
   getOutlineSnapshotDataURL: () => string;
+  /**
+   * Re-captures the isometric reference view (see HiddenLineIsoCapture) at
+   * an explicit pixel resolution, independent of the live 3D viewport's own
+   * on-screen backing-buffer size - generateHiddenLineViewSet's normal
+   * isoCapture reuses whatever that happens to be (capped by the render
+   * quality profile's DPR), which isn't guaranteed to hit a print target's
+   * DPI. Temporarily resizes the renderer's drawing buffer (pixel ratio
+   * forced to 1 so `targetWidthPx`/`targetHeightPx` land exactly), captures,
+   * then restores both the buffer size and the live view - fully
+   * synchronous, so nothing mid-resize is ever visible on screen. Null only
+   * when there's no part geometry loaded (mirrors captureIsoReferenceView).
+   */
+  captureHighResIsoView: (
+    targetWidthPx: number,
+    targetHeightPx: number,
+  ) => HiddenLineIsoCapture | null;
   setMaterialProperties: (
     colorHex: number,
     wireframe: boolean,
@@ -173,6 +455,32 @@ export type Viewer = {
     x: number;
     y: number;
     visible: boolean;
+  };
+  /**
+   * Generates Front/Top/Right hidden-line views of the currently loaded
+   * part - visible and hidden edges as projected polylines (see
+   * HiddenLineEdgeRun; the consumer strokes them at its own drafting line
+   * weights, so no rasterization happens here) - plus one shaded isometric
+   * reference capture (HiddenLineIsoCapture). Geometry only, no sheet/layout
+   * composition. Restores the camera to wherever it was before the call.
+   * onProgress fires once per view (before that view's compute, which can
+   * take several hundred ms on a real part), once for the isometric, and
+   * once more when done.
+   */
+  generateHiddenLineViewSet: (
+    onProgress?: (info: HiddenLineProgressInfo) => void,
+  ) => Promise<HiddenLineViewSetResult>;
+  /** TEMPORARY DEBUG: loads the procedural hidden-line test part. */
+  debugLoadHiddenLineTestPart: () => void;
+  /** TEMPORARY DEBUG: runs ray-cast hidden-line detection on current edges/camera and visualizes it (solid black = visible, dashed black = hidden). */
+  debugRunHiddenLineTest: () => HiddenLineDebugStats | null;
+  /** TEMPORARY DEBUG: reports which edge mode/source is currently active. */
+  debugGetEdgeMode: () => {
+    isExactCadMode: boolean;
+    isApproxCadMode: boolean;
+    exactEdgeCount: number;
+    curveFeatureCount: number;
+    approxEdgeCount: number;
   };
 };
 
@@ -3467,6 +3775,42 @@ export function createViewer(container: HTMLElement): Viewer {
   const curveFeatureRenderObjectsById = new Map<string, THREE.Line>();
   const curveFeaturePickObjectsById = new Map<string, THREE.Line>();
   const exactEdgeRenderObjectsById = new Map<string, THREE.LineSegments>();
+  // Purely cosmetic "fat line" twins of the two maps above (task: "increase
+  // the 3D isometric view's edge/outline weight") - plain THREE.LineBasicMaterial
+  // ignores `linewidth` on essentially every modern WebGL backend, so real
+  // width needs Line2/LineSegments2 (screen-space quads via LineMaterial,
+  // already used elsewhere in this file for edgeHoverLine). Kept STRICTLY
+  // separate from the render/pick objects above rather than converting them
+  // in place: exactEdgeRenderObjectsById IS the raycast target for straight
+  // edges (no separate pick object exists for them, see its own comment
+  // below), collectExactCadEdgeRaycastTargets filters on `.isLineSegments`
+  // (which LineSegments2 - a Mesh subtype - never sets), and several readers
+  // (getWorldPolylinePositions, the hidden-line chain builder, the outline
+  // snapshot) read a conventional `position` BufferAttribute directly, which
+  // fat-line geometries don't expose the same way. Same key space as their
+  // twin map (edge.id / feature.featureId) so visibility/style can be kept in
+  // lockstep by simple lookup - see updateEngineeringEdgeVisibility. Live
+  // under edgesGroup (not featureEdgesGroup directly), which already exists
+  // for exactly this ("Subgroup for world-space edge visuals (LineSegments2)")
+  // and already has its own disposal handled in clearFeatureEdges.
+  const curveFeatureFatOverlayById = new Map<string, Line2>();
+  const exactEdgeFatOverlayById = new Map<string, LineSegments2>();
+  // Two shared materials (normal / tangent-phantom-dimmed), mirroring
+  // applyExactEdgeStyle's own two states - one pair reused across every twin
+  // rather than one material per edge, matching edgeHoverLineMaterial's own
+  // singleton convention. Lazily created (see ensureExactEdgeFatMaterials)
+  // so `.resolution` can be seeded from the container's real size at first
+  // use rather than needing `container` available at this earlier point in
+  // the closure.
+  let exactEdgeFatMaterialNormal: LineMaterial | null = null;
+  let exactEdgeFatMaterialTangentPhantom: LineMaterial | null = null;
+  // The fat twins above exist ONLY for the drawing sheet's isometric
+  // reference capture (task: "increase the 3D isometric view's edge/outline
+  // weight" meant the sheet's iso corner, not the live interactive viewer) -
+  // false the rest of the time so the interactive viewer keeps its normal
+  // hairline edges. captureSceneSnapshot flips this on for the one render
+  // call captureIsoReferenceView makes, then restores it - see both.
+  let showFatEdgeOverlaysForIsoCapture = false;
   const approxCadEdgeObjects: THREE.LineSegments[] = [];
   let curveFeatureCount = 0;
   let circleFeatureCount = 0;
@@ -3849,17 +4193,34 @@ export function createViewer(container: HTMLElement): Viewer {
     if (isExactCadMode) {
       // Exact CAD mode controls exact topology edges only; silhouettes remain a
       // separate, view-dependent concept and are not part of edge kind mapping.
-      for (const line of exactEdgeRenderObjectsById.values()) {
+      const fatMaterials = ensureExactEdgeFatMaterials();
+      for (const [id, line] of exactEdgeRenderObjectsById) {
         const kind = (line.userData?.__exactEdgeKind ?? "unknown") as ExactEdgeKind;
         const kindVisible = isExactEdgeKindVisible(kind);
         applyExactEdgeStyle(line, kind);
         line.visible = featureEdgesEnabled && kindVisible;
+        // Cosmetic fat-line twin (task: thicker isometric edges) stays in
+        // lockstep with its source line's own visibility/style - see
+        // exactEdgeFatOverlayById's doc comment for why it's a separate
+        // object rather than the source line itself.
+        const fatTwin = exactEdgeFatOverlayById.get(id);
+        if (fatTwin) {
+          fatTwin.visible = line.visible && showFatEdgeOverlaysForIsoCapture;
+          const isTangentPhantom = kind === "tangent" && exactCadEdgeDisplayOptions.tangentEdges === "phantom";
+          fatTwin.material = isTangentPhantom ? fatMaterials.tangentPhantom : fatMaterials.normal;
+        }
       }
-      for (const line of curveFeatureRenderObjectsById.values()) {
+      for (const [id, line] of curveFeatureRenderObjectsById) {
         const kind = (line.userData?.__exactEdgeKind ?? "unknown") as ExactEdgeKind;
         const kindVisible = isExactEdgeKindVisible(kind);
         applyExactEdgeStyle(line, kind);
         line.visible = featureEdgesEnabled && kindVisible;
+        const fatTwin = curveFeatureFatOverlayById.get(id);
+        if (fatTwin) {
+          fatTwin.visible = line.visible && showFatEdgeOverlaysForIsoCapture;
+          const isTangentPhantom = kind === "tangent" && exactCadEdgeDisplayOptions.tangentEdges === "phantom";
+          fatTwin.material = isTangentPhantom ? fatMaterials.tangentPhantom : fatMaterials.normal;
+        }
       }
       for (const line of curveFeaturePickObjectsById.values()) {
         const kind = (line.userData?.__exactEdgeKind ?? "unknown") as ExactEdgeKind;
@@ -4147,6 +4508,39 @@ export function createViewer(container: HTMLElement): Viewer {
     };
   }
 
+  // Weight for the cosmetic fat-line edge twins (task: "increase... edge/
+  // outline weight so its silhouette and feature edges read clearly") -
+  // heavier than the effectively-1px hairline THREE.LineBasicMaterial
+  // renders today, lighter than edgeHoverLineMaterial's own linewidth:4 so
+  // hover still reads as extra emphasis over the resting state.
+  const EXACT_EDGE_FAT_LINEWIDTH_PX = 2.25;
+  function ensureExactEdgeFatMaterials(): {
+    normal: LineMaterial;
+    tangentPhantom: LineMaterial;
+  } {
+    if (!exactEdgeFatMaterialNormal) {
+      exactEdgeFatMaterialNormal = new LineMaterial({
+        color: 0x111111,
+        linewidth: EXACT_EDGE_FAT_LINEWIDTH_PX,
+        transparent: true,
+        opacity: 0.9,
+        depthWrite: false,
+      });
+      exactEdgeFatMaterialNormal.resolution.set(container.clientWidth, container.clientHeight);
+    }
+    if (!exactEdgeFatMaterialTangentPhantom) {
+      exactEdgeFatMaterialTangentPhantom = new LineMaterial({
+        color: 0x4b5563,
+        linewidth: EXACT_EDGE_FAT_LINEWIDTH_PX,
+        transparent: true,
+        opacity: 0.32,
+        depthWrite: false,
+      });
+      exactEdgeFatMaterialTangentPhantom.resolution.set(container.clientWidth, container.clientHeight);
+    }
+    return { normal: exactEdgeFatMaterialNormal, tangentPhantom: exactEdgeFatMaterialTangentPhantom };
+  }
+
   function rebuildExactCadEdges(reason = "unspecified") {
     clearFeatureEdges();
     if (!isExactCadMode) return;
@@ -4214,6 +4608,27 @@ export function createViewer(container: HTMLElement): Viewer {
       featureEdgesGroup.add(renderLine);
       featureEdgeLines.push(renderLine);
       curveFeatureRenderObjectsById.set(feature.featureId, renderLine);
+
+      // Cosmetic fat-line twin (task: thicker isometric edges) - see this
+      // map's own doc comment above for why it's a separate object rather
+      // than a converted renderLine. Reuses the same preview.positions array
+      // already computed for renderGeometry above.
+      const fatCurveGeometry = new LineGeometry();
+      fatCurveGeometry.setPositions(preview.positions);
+      const fatCurveLine = new Line2(fatCurveGeometry, ensureExactEdgeFatMaterials().normal);
+      fatCurveLine.name = "exactCadCurveFeatureFat";
+      fatCurveLine.frustumCulled = false;
+      // Line2/LineSegments2 are Mesh subtypes under the hood (fat lines are
+      // tessellated screen-space quads), so anything doing a broad
+      // `.isMesh` scene traversal (e.g. collectVisibleMeshRaycastTargets,
+      // used for hidden-line occlusion testing) would otherwise treat this
+      // purely cosmetic twin as real solid geometry - __edgeOverlay is the
+      // exact flag that traversal (and others) already check to exclude
+      // overlay objects, matching every other line built in this function.
+      fatCurveLine.userData.__edgeOverlay = true;
+      fatCurveLine.userData.__isFeatureEdge = true;
+      edgesGroup.add(fatCurveLine);
+      curveFeatureFatOverlayById.set(feature.featureId, fatCurveLine);
 
       const pickGeometry = renderGeometry.clone();
       const pickMaterial = new THREE.LineBasicMaterial({
@@ -4289,6 +4704,21 @@ export function createViewer(container: HTMLElement): Viewer {
       // Exact CAD mode raycasts directly against exactEdgeRenderObjectsById.
       // Legacy edgePickables are reserved for fallback mesh overlays only.
       exactEdgeRenderObjectsById.set(edge.id, line);
+
+      // Cosmetic fat-line twin - see exactEdgeFatOverlayById's own doc
+      // comment above. segmentPositions is already disconnected-pair-shaped
+      // (buildSegmentPositionsFromSamplePoints), exactly what
+      // LineSegmentsGeometry.setPositions expects.
+      const fatEdgeGeometry = new LineSegmentsGeometry();
+      fatEdgeGeometry.setPositions(segmentPositions);
+      const fatEdgeLine = new LineSegments2(fatEdgeGeometry, ensureExactEdgeFatMaterials().normal);
+      fatEdgeLine.name = "exactCadEdgeFat";
+      fatEdgeLine.frustumCulled = false;
+      // See the matching comment on fatCurveLine above.
+      fatEdgeLine.userData.__edgeOverlay = true;
+      fatEdgeLine.userData.__isFeatureEdge = true;
+      edgesGroup.add(fatEdgeLine);
+      exactEdgeFatOverlayById.set(edge.id, fatEdgeLine);
     }
 
     perfDebug("[CadViewer] Exact curve adaptive resample", {
@@ -4667,12 +5097,20 @@ export function createViewer(container: HTMLElement): Viewer {
       exactEdgeRenderObjectsById.clear();
       curveFeatureRenderObjectsById.clear();
       curveFeaturePickObjectsById.clear();
+      exactEdgeFatOverlayById.clear();
+      curveFeatureFatOverlayById.clear();
       approxCadEdgeObjects.length = 0;
       approxCadRenderedEdgeCount = 0;
 
       // (No separate LineMaterial tracking for simple LineSegments overlays)
 
-      // Also clear the edgesGroup children if any exist
+      // Also clear the edgesGroup children if any exist - this disposes each
+      // fat-line twin's geometry, plus calls .dispose() on the two SHARED
+      // exactEdgeFatMaterial* instances once per twin that referenced them
+      // (harmless - three.js Material.dispose() is idempotent). Explicitly
+      // null the shared refs below regardless, so ensureExactEdgeFatMaterials
+      // always constructs clean replacements on the next rebuild rather than
+      // reusing ones already told to release their GPU program.
       try {
         edgesGroup.traverse((obj: any) => {
           if (obj.geometry) obj.geometry.dispose?.();
@@ -4686,6 +5124,8 @@ export function createViewer(container: HTMLElement): Viewer {
       } catch {
         /* ignore */
       }
+      exactEdgeFatMaterialNormal = null;
+      exactEdgeFatMaterialTangentPhantom = null;
     } catch {
       /* ignore */
     }
@@ -6127,6 +6567,42 @@ export function createViewer(container: HTMLElement): Viewer {
     return pickExactCadEntityAtScreenPosition(ndcX, ndcY);
   }
 
+  /**
+   * Builds a reusable "is this world point occluded, looking along viewDir"
+   * test - the same ray-cast-from-camera-side approach computeHiddenLineSegments()
+   * uses per edge sample, factored out so a single representative point (a
+   * circle/arc feature's rim or midpoint) can be classified the same way,
+   * without duplicating the raycaster/epsilon setup.
+   */
+  function createPointOcclusionTester(
+    viewDir: THREE.Vector3,
+    meshTargets: THREE.Object3D[],
+  ): (p: THREE.Vector3) => boolean {
+    const box = new THREE.Box3().setFromObject(modelRoot);
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
+    const rayDistance = Math.max(sphere.radius * 2.5, modelDiagonal, 50);
+
+    const sampleSpacing = Math.max(modelDiagonal * 0.004, 0.25);
+    // See computeHiddenLineSegments()'s identical eps for why: large enough
+    // to swallow a self-grazing hit near a shared vertex/edge, small enough
+    // to stay well under any real occluder's material thickness.
+    const eps = Math.max(sampleSpacing * 10, modelDiagonal * 0.01, 0.5);
+
+    const raycaster = new THREE.Raycaster();
+    raycaster.near = 0;
+    const maxHitDistance = rayDistance - eps;
+    const originScratch = new THREE.Vector3();
+
+    return (p: THREE.Vector3): boolean => {
+      originScratch.copy(p).addScaledVector(viewDir, -rayDistance);
+      raycaster.set(originScratch, viewDir);
+      const hits = raycaster
+        .intersectObjects(meshTargets, true)
+        .filter((h) => h.distance <= maxHitDistance);
+      return hits.length > 0;
+    };
+  }
+
   function collectVisibleMeshRaycastTargets(): THREE.Object3D[] {
     if (!visibleMeshTargetsDirty) {
       return visibleMeshRaycastTargets;
@@ -6142,6 +6618,1312 @@ export function createViewer(container: HTMLElement): Viewer {
     visibleMeshTargetsDirty = false;
     return visibleMeshRaycastTargets;
   }
+
+  // --- Hidden-line detection engine ----------------------------------------
+  // Ray-cast occlusion technique verified in isolation against both the
+  // fallback mesh-edge path and the real exact-CAD B-rep edge path. Pure
+  // computation lives in computeHiddenLineSegments(); styling/capture are
+  // separate so the same computation feeds both the interactive debug
+  // preview and the real multi-view generator.
+
+  function computeHiddenLineSegments(): HiddenLineComputeResult | null {
+    if (!(activeCamera as any).isOrthographicCamera) {
+      console.warn(
+        "[hidden-line] active camera is not orthographic; call setProjection('orthographic') first",
+      );
+      return null;
+    }
+
+    const meshTargets = collectVisibleMeshRaycastTargets();
+    if (meshTargets.length === 0) {
+      console.warn("[hidden-line] no visible mesh targets");
+      return null;
+    }
+
+    const t0 = performance.now();
+
+    // Gather world-space edge geometry from the same edge source
+    // getOutlineSnapshotDataURL prefers per mode, as CHAINS of connected
+    // points rather than a flat list of disconnected pairs. That distinction
+    // matters once dashing enters the picture: a LineSegments buffer is
+    // genuinely a set of independent pairs (no implied connectivity between
+    // them), but a Line buffer (e.g. one sampled circle/curve) is one
+    // continuous run - flattening it into pairs and resetting run-tracking
+    // at every pair boundary would restart the dash pattern every ~1mm
+    // instead of only at real visible/hidden transitions.
+    type Chain = THREE.Vector3[];
+    const chains: Chain[] = [];
+
+    // NOTE: takes an explicit world matrix rather than reading obj.matrixWorld
+    // directly, so it can also be used with synthetic (unparented) geometries
+    // whose matrixWorld would otherwise be reset to identity by updateWorldMatrix.
+    const pushChainsFromGeometry = (
+      geom: THREE.BufferGeometry | undefined,
+      worldMatrix: THREE.Matrix4,
+      isSegs: boolean,
+    ) => {
+      if (!geom) return;
+      const pos = geom.getAttribute("position");
+      if (!pos) return;
+      if (isSegs) {
+        for (let i = 0; i + 1 < pos.count; i += 2) {
+          const a = new THREE.Vector3()
+            .fromBufferAttribute(pos, i)
+            .applyMatrix4(worldMatrix);
+          const b = new THREE.Vector3()
+            .fromBufferAttribute(pos, i + 1)
+            .applyMatrix4(worldMatrix);
+          if (a.distanceToSquared(b) < 1e-10) continue;
+          chains.push([a, b]);
+        }
+      } else {
+        const chain: Chain = [];
+        for (let i = 0; i < pos.count; i++) {
+          const p = new THREE.Vector3()
+            .fromBufferAttribute(pos, i)
+            .applyMatrix4(worldMatrix);
+          if (
+            chain.length === 0 ||
+            chain[chain.length - 1].distanceToSquared(p) > 1e-10
+          ) {
+            chain.push(p);
+          }
+        }
+        if (chain.length >= 2) chains.push(chain);
+      }
+    };
+
+    let edgeSource: HiddenLineDebugStats["edgeSource"];
+    if (
+      isExactCadMode &&
+      (exactEdgeRenderObjectsById.size > 0 || curveFeatureRenderObjectsById.size > 0)
+    ) {
+      edgeSource = "exact-cad";
+      for (const line of curveFeatureRenderObjectsById.values()) {
+        if (!line.visible) continue;
+        line.updateWorldMatrix(true, false);
+        pushChainsFromGeometry(line.geometry, line.matrixWorld, false);
+      }
+      for (const line of exactEdgeRenderObjectsById.values()) {
+        if (!line.visible) continue;
+        line.updateWorldMatrix(true, false);
+        pushChainsFromGeometry(line.geometry, line.matrixWorld, true);
+      }
+    } else if (isApproxCadMode && approxCadEdgeObjects.length > 0) {
+      edgeSource = "approx-cad";
+      for (const line of approxCadEdgeObjects) {
+        if (!line.visible) continue;
+        line.updateWorldMatrix(true, false);
+        pushChainsFromGeometry(line.geometry, line.matrixWorld, true);
+      }
+    } else {
+      edgeSource = "fallback-mesh";
+      for (const obj of meshTargets) {
+        const mesh = obj as THREE.Mesh;
+        if (!mesh.geometry) continue;
+        mesh.updateWorldMatrix(true, false);
+        const edgesGeom = new THREE.EdgesGeometry(mesh.geometry, 40);
+        pushChainsFromGeometry(edgesGeom, mesh.matrixWorld, true);
+        edgesGeom.dispose();
+      }
+    }
+
+    if (chains.length === 0) {
+      console.warn("[hidden-line] no edge segments found");
+      return null;
+    }
+
+    const viewDir = new THREE.Vector3();
+    activeCamera.getWorldDirection(viewDir);
+
+    const sampleSpacing = Math.max(modelDiagonal * 0.004, 0.25);
+    const maxSamplesPerSegment = 200;
+    const isHidden = createPointOcclusionTester(viewDir, meshTargets);
+
+    const visibleBuf: HiddenLineRunBuffers = { positions: [], distances: [] };
+    const hiddenBuf: HiddenLineRunBuffers = { positions: [], distances: [] };
+    let totalSamples = 0;
+    let hiddenSamples = 0;
+    let visibleSegmentCount = 0;
+    let hiddenSegmentCount = 0;
+
+    for (const chain of chains) {
+      // Tracks which bucket the previous mini-segment landed in and its
+      // cumulative in-run arc length, so LineDashedMaterial dashes
+      // continuously along a real multi-sample hidden/visible run instead
+      // of restarting the pattern at every tiny sample-spacing segment.
+      // Scoped per CHAIN (not per a/b pair) so a long continuous curve -
+      // e.g. a sampled circle - keeps one run across its whole length
+      // instead of resetting at every original tessellation vertex.
+      let lastBucketHidden: boolean | null = null;
+      let runDistance = 0;
+
+      for (let c = 0; c + 1 < chain.length; c++) {
+        const a = chain[c];
+        const b = chain[c + 1];
+        const length = a.distanceTo(b);
+        const subdivisions = Math.min(
+          maxSamplesPerSegment,
+          Math.max(1, Math.ceil(length / sampleSpacing)),
+        );
+        // Re-samples each chain joint once as an endpoint and once as the
+        // next pair's start - a deterministic, harmless bit of redundant
+        // raycasting (same point, same result) traded for much simpler code.
+        let prevPoint: THREE.Vector3 | null = null;
+        let prevHidden = false;
+        for (let i = 0; i <= subdivisions; i++) {
+          const t = i / subdivisions;
+          const p = new THREE.Vector3().lerpVectors(a, b, t);
+          const hidden = isHidden(p);
+          totalSamples++;
+          if (hidden) hiddenSamples++;
+          if (prevPoint) {
+            const stepLength = prevPoint.distanceTo(p);
+            const bucketHidden = prevHidden;
+            if (lastBucketHidden !== null && lastBucketHidden !== bucketHidden) {
+              runDistance = 0;
+            }
+            const bucket = bucketHidden ? hiddenBuf : visibleBuf;
+            bucket.positions.push(prevPoint.x, prevPoint.y, prevPoint.z, p.x, p.y, p.z);
+            bucket.distances.push(runDistance, runDistance + stepLength);
+            runDistance += stepLength;
+            lastBucketHidden = bucketHidden;
+            if (bucketHidden) hiddenSegmentCount++;
+            else visibleSegmentCount++;
+          }
+          prevPoint = p;
+          prevHidden = hidden;
+        }
+      }
+    }
+
+    const computeMs = performance.now() - t0;
+
+    const stats: HiddenLineDebugStats = {
+      edgeSource,
+      edgeCount: chains.length,
+      totalSamples,
+      visibleSamples: totalSamples - hiddenSamples,
+      hiddenSamples,
+      visibleSegmentCount,
+      hiddenSegmentCount,
+      computeMs,
+    };
+
+    return { stats, visible: visibleBuf, hidden: hiddenBuf };
+  }
+
+  /**
+   * Builds the styled visible/hidden overlay: visible segments as a solid
+   * black LineSegments (matching Outline Snap), hidden segments as a dashed
+   * black LineSegments (standard engineering hidden-line convention). Dash
+   * size is scaled off model size, clamped to a sane range.
+   */
+  function buildHiddenLineStyledGroup(result: HiddenLineComputeResult): THREE.Group {
+    const group = new THREE.Group();
+    group.userData.__hiddenLineOverlay = true;
+
+    const dashSize = THREE.MathUtils.clamp(modelDiagonal * 0.01, 0.6, 4);
+    const gapSize = dashSize * 0.6;
+
+    // renderOrder must be set on the renderable leaf objects, not the Group -
+    // THREE only reads it from objects it actually draws. Hidden is drawn
+    // first so a coincident visible edge (e.g. a prism's near/far edges
+    // that project on top of each other from an axis-aligned view) wins
+    // the tie and reads as solid, not dashed.
+    if (result.hidden.positions.length > 0) {
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute(
+        "position",
+        new THREE.Float32BufferAttribute(result.hidden.positions, 3),
+      );
+      geom.setAttribute(
+        "lineDistance",
+        new THREE.Float32BufferAttribute(result.hidden.distances, 1),
+      );
+      const mat = new THREE.LineDashedMaterial({
+        color: 0x000000,
+        dashSize,
+        gapSize,
+        depthTest: false,
+        depthWrite: false,
+      });
+      const line = new THREE.LineSegments(geom, mat);
+      line.renderOrder = 9998;
+      group.add(line);
+    }
+    if (result.visible.positions.length > 0) {
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute(
+        "position",
+        new THREE.Float32BufferAttribute(result.visible.positions, 3),
+      );
+      const mat = new THREE.LineBasicMaterial({
+        color: 0x000000,
+        depthTest: false,
+        depthWrite: false,
+      });
+      const line = new THREE.LineSegments(geom, mat);
+      line.renderOrder = 9999;
+      group.add(line);
+    }
+    return group;
+  }
+
+  function disposeHiddenLineGroup(group: THREE.Group): void {
+    group.traverse((obj: any) => {
+      if (obj.geometry) {
+        disposeGeometryBoundsTree(obj.geometry);
+        obj.geometry.dispose();
+      }
+      if (obj.material) {
+        if (Array.isArray(obj.material)) {
+          obj.material.forEach((m: any) => m.dispose());
+        } else {
+          obj.material.dispose();
+        }
+      }
+    });
+  }
+
+  /**
+   * Renders overlayGroup alone against a blank background (model, grid,
+   * axes, and compare-reference all hidden) and captures a PNG data URL -
+   * the same hide/render/capture/restore dance getOutlineSnapshotDataURL
+   * uses, factored out so both can share it.
+   */
+  function captureSceneSnapshotWithOverlay(overlayGroup: THREE.Group): string {
+    return captureSceneSnapshot(overlayGroup, { hideModel: true });
+  }
+
+  /**
+   * The shared hide/render/capture/restore dance behind every white-
+   * background snapshot this module takes. `hideModel: true` (the
+   * line-art cases - see captureSceneSnapshotWithOverlay above) renders
+   * ONLY the passed overlay group; `hideModel: false` keeps the real shaded
+   * model in the frame, which is what the drawing sheet's isometric
+   * reference view needs (see captureIsoReferenceView).
+   */
+  function captureSceneSnapshot(
+    overlayGroup: THREE.Group | null,
+    options: { hideModel: boolean; fatEdgeOverlays?: boolean },
+  ): string {
+    const prevGridVisible = gridHelper ? gridHelper.visible : false;
+    const prevAxesVisible = axesHelper ? axesHelper.visible : false;
+
+    // Isometric-sheet-only heavier edges (see showFatEdgeOverlaysForIsoCapture's
+    // own doc comment) - only captureIsoReferenceView passes fatEdgeOverlays:
+    // true, so every other snapshot (and the live interactive viewer) keeps
+    // normal hairline edges.
+    const prevFatEdgeOverlays = showFatEdgeOverlaysForIsoCapture;
+    if (options.fatEdgeOverlays) {
+      showFatEdgeOverlaysForIsoCapture = true;
+      updateEngineeringEdgeVisibility();
+    }
+
+    const prevLineColor = measureMaterial.color.clone();
+    const prevArrowColor = arrowMaterial.color.clone();
+    let prevLabelColor: THREE.Color | null = null;
+    if (measureLabel && (measureLabel.material as any).color) {
+      prevLabelColor = (measureLabel.material as any).color.clone();
+    }
+
+    if (gridHelper) gridHelper.visible = false;
+    if (axesHelper) axesHelper.visible = false;
+
+    measureMaterial.color.set(0x000000);
+    arrowMaterial.color.set(0x000000);
+    if (measureLabel && (measureLabel.material as any).color) {
+      (measureLabel.material as any).color.set(0x000000);
+    }
+
+    const prevClearColor = renderer.getClearColor(new THREE.Color()).clone();
+    const prevClearAlpha = renderer.getClearAlpha();
+    const prevBackground = scene.background;
+
+    if (overlayGroup) scene.add(overlayGroup);
+
+    const prevModelVisible = modelRoot.visible;
+    if (options.hideModel) modelRoot.visible = false;
+
+    const prevCompareGroupVisible = compareReferenceGroup?.visible ?? false;
+    if (compareReferenceGroup) compareReferenceGroup.visible = false;
+
+    // White, not the app's usual light-gray canvas background: this capture
+    // gets cropped and pasted onto the (white) drawing sheet by
+    // sheet-composer.ts, and the shared renderer is created with alpha:
+    // false (a real per-pixel-transparent capture would need a second,
+    // alpha-enabled WebGL context just for this). Matching the destination
+    // white exactly is visually identical to true transparency once
+    // composited - no gray tile, no edge fringing.
+    renderer.setClearColor(0xffffff, 1);
+    scene.background = null;
+
+    renderNow("scene_snapshot_capture");
+
+    const dataURL = renderer.domElement.toDataURL("image/png");
+
+    if (overlayGroup) scene.remove(overlayGroup);
+
+    modelRoot.visible = prevModelVisible;
+    if (compareReferenceGroup) compareReferenceGroup.visible = prevCompareGroupVisible;
+    renderer.setClearColor(prevClearColor, prevClearAlpha);
+    scene.background = prevBackground;
+
+    measureMaterial.color.copy(prevLineColor);
+    arrowMaterial.color.copy(prevArrowColor);
+    if (
+      measureLabel &&
+      prevLabelColor &&
+      (measureLabel.material as any).color
+    ) {
+      (measureLabel.material as any).color.copy(prevLabelColor);
+    }
+    if (gridHelper) gridHelper.visible = prevGridVisible;
+    if (axesHelper) axesHelper.visible = prevAxesVisible;
+    if (options.fatEdgeOverlays) {
+      showFatEdgeOverlaysForIsoCapture = prevFatEdgeOverlays;
+      updateEngineeringEdgeVisibility();
+    }
+    requestRender("scene_snapshot_restore");
+
+    return dataURL;
+  }
+
+  /**
+   * Projects a hidden-line compute result into the current camera's pixel
+   * space as polyline runs - see HiddenLineEdgeRun for why the drawing sheet
+   * consumes vectors rather than the styled bitmap
+   * buildHiddenLineStyledGroup produces (which remains the interactive debug
+   * preview's path, unchanged).
+   *
+   * Run reconstruction: computeHiddenLineSegments pushes its occlusion
+   * samples in order, one bucket (visible/hidden) at a time, writing each
+   * mini-segment as prevPoint->p and then carrying p forward as the next
+   * prevPoint - so consecutive entries in one bucket whose start EXACTLY
+   * equals the previous entry's end (identical float values, copied from the
+   * same Vector3, never recomputed) are by construction one continuous run
+   * of that bucket, and a mismatch is a real break (bucket switch, or a jump
+   * to a different edge chain). Two adjacent chains that genuinely share a
+   * vertex merging into one run is harmless - it's one polyline through a
+   * corner, which is what the geometry actually is.
+   */
+  function buildProjectedEdgeRuns(
+    result: HiddenLineComputeResult,
+    camera: THREE.OrthographicCamera,
+    canvasWidth: number,
+    canvasHeight: number,
+  ): HiddenLineEdgeRun[] {
+    const projection: MeasurementProjectionContext = {
+      camera,
+      viewportWidth: canvasWidth,
+      viewportHeight: canvasHeight,
+    };
+    const runs: HiddenLineEdgeRun[] = [];
+    const scratch = new THREE.Vector3();
+    const project = (x: number, y: number, z: number) =>
+      projectWorldToScreenPx(scratch.set(x, y, z), projection);
+
+    const emit = (buffer: HiddenLineRunBuffers, hidden: boolean) => {
+      const p = buffer.positions;
+      let pts: number[] | null = null;
+      let prevX = 0;
+      let prevY = 0;
+      let prevZ = 0;
+      const flush = () => {
+        if (pts && pts.length >= 4) runs.push({ hidden, pts });
+        pts = null;
+      };
+      for (let i = 0; i + 5 < p.length; i += 6) {
+        const [ax, ay, az, bx, by, bz] = [
+          p[i], p[i + 1], p[i + 2], p[i + 3], p[i + 4], p[i + 5],
+        ];
+        if (!(pts && ax === prevX && ay === prevY && az === prevZ)) {
+          flush();
+          const a = project(ax, ay, az);
+          pts = [a.x, a.y];
+        }
+        const b = project(bx, by, bz);
+        pts.push(b.x, b.y);
+        prevX = bx;
+        prevY = by;
+        prevZ = bz;
+      }
+      flush();
+    };
+
+    emit(result.hidden, true);
+    emit(result.visible, false);
+    return runs;
+  }
+
+  /**
+   * Captures the shaded TRUE-isometric reference view the drawing sheet puts
+   * in its top-right corner (see sheet-composer.ts): camera placed along the
+   * (1,1,1) body diagonal - equal foreshortening on all three axes, the
+   * standard isometric orientation, not the app's interactive "iso" preset
+   * (a deliberately less symmetric (1, 0.6, 1) framing tuned for on-screen
+   * orbiting) - orthographic, model shaded, sheet-white background.
+   *
+   * Gets its OWN frustum rather than reusing the three ortho views' shared
+   * fit: an isometric projection of the same box is up to ~1.41x wider than
+   * any axis-aligned view of it, so the shared fit can clip it. Sized in one
+   * exact step instead of a search - halving/doubling the ortho half-extent
+   * scales projected NDC by exactly the inverse, so measuring the projected
+   * corners once is enough to solve for the half-extent that lands the part
+   * at 90% of the frame. Must run AFTER everything that depends on the
+   * shared frustum (both annotation passes) - the caller restores the
+   * frustum afterwards.
+   */
+  function captureIsoReferenceView(
+    box: THREE.Box3,
+    canvasWidth: number,
+    canvasHeight: number,
+  ): HiddenLineIsoCapture | null {
+    if (box.isEmpty()) return null;
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
+    if (!(maxDim > 0)) return null;
+
+    // `ortho`'s frustum is what this function configures below, but the
+    // renderer always draws `activeCamera` (drawFrame's `renderer.render(
+    // scene, activeCamera)`) - if the caller hasn't already switched to
+    // orthographic (e.g. captureHighResIsoView, called standalone at PDF
+    // export time, long after the sheet-generation flow that switched
+    // projection modes has already restored perspective), the render would
+    // silently use `persp` instead, whose `aspect` reflects the live
+    // viewport rather than this capture's `canvasWidth`/`canvasHeight` -
+    // producing exactly the anisotropic squeeze/stretch this function's
+    // careful frustum math was supposed to prevent. Bypassing
+    // setProjection() (rather than calling it) avoids its visible side
+    // effects (control rebinding, view-changed events) for this
+    // synchronous, invisible capture.
+    const prevActiveCamera = activeCamera;
+    activeCamera = ortho;
+    try {
+      const direction = new THREE.Vector3(1, 1, 1).normalize();
+      ortho.position.copy(center).addScaledVector(direction, Math.max(maxDim * 4, 1));
+      ortho.up.set(0, 1, 0);
+      ortho.lookAt(center);
+
+      const aspect = canvasWidth / Math.max(1, canvasHeight);
+      const applyHalfExtent = (half: number) => {
+        ortho.left = -half * aspect;
+        ortho.right = half * aspect;
+        ortho.top = half;
+        ortho.bottom = -half;
+        ortho.near = -10000;
+        ortho.far = 10000;
+        ortho.updateProjectionMatrix();
+        ortho.updateMatrixWorld(true);
+      };
+
+      const corners: THREE.Vector3[] = [];
+      for (const x of [box.min.x, box.max.x]) {
+        for (const y of [box.min.y, box.max.y]) {
+          for (const z of [box.min.z, box.max.z]) {
+            corners.push(new THREE.Vector3(x, y, z));
+          }
+        }
+      }
+      const projection: MeasurementProjectionContext = {
+        camera: ortho,
+        viewportWidth: canvasWidth,
+        viewportHeight: canvasHeight,
+      };
+      const maxAbsNdc = () =>
+        corners.reduce((acc, c) => {
+          const { ndc } = projectWorldToScreenPx(c, projection);
+          return Math.max(acc, Math.abs(ndc.x), Math.abs(ndc.y));
+        }, 0);
+
+      const startHalf = maxDim;
+      applyHalfExtent(startHalf);
+      const measured = maxAbsNdc();
+      const FRAME_FILL = 0.9;
+      if (measured > 1e-6) applyHalfExtent((startHalf * measured) / FRAME_FILL);
+
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const c of corners) {
+        const { x, y } = projectWorldToScreenPx(c, projection);
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+      }
+      if (!Number.isFinite(minX) || maxX <= minX || maxY <= minY) return null;
+      // Small breathing margin so the outermost edge's own stroke width isn't
+      // clipped by the crop, then clamped to the real canvas.
+      const marginPx = Math.max(maxX - minX, maxY - minY) * 0.03;
+      const cropX = Math.max(0, minX - marginPx);
+      const cropY = Math.max(0, minY - marginPx);
+      const cropPx = {
+        x: cropX,
+        y: cropY,
+        w: Math.min(canvasWidth, maxX + marginPx) - cropX,
+        h: Math.min(canvasHeight, maxY + marginPx) - cropY,
+      };
+      if (!(cropPx.w > 0) || !(cropPx.h > 0)) return null;
+
+      return {
+        dataURL: captureSceneSnapshot(null, { hideModel: false, fatEdgeOverlays: true }),
+        cropPx,
+      };
+    } finally {
+      activeCamera = prevActiveCamera;
+    }
+  }
+
+  function captureHighResIsoView(
+    targetWidthPx: number,
+    targetHeightPx: number,
+  ): HiddenLineIsoCapture | null {
+    const box = getPartOnlyBox();
+    if (box.isEmpty()) return null;
+    const w = Math.max(1, Math.round(targetWidthPx));
+    const h = Math.max(1, Math.round(targetHeightPx));
+
+    const prevPixelRatio = renderer.getPixelRatio();
+    const prevWidth = renderer.domElement.width;
+    const prevHeight = renderer.domElement.height;
+
+    // Pixel ratio forced to 1 so the drawing buffer lands at EXACTLY
+    // (w,h) - avoids fractional-DPR rounding ambiguity. `updateStyle:
+    // false` leaves the on-screen CSS box untouched, so nothing visibly
+    // resizes; every step here through the restore below is synchronous
+    // (captureIsoReferenceView's own render+toDataURL is synchronous - see
+    // its doc comment), so the browser never gets a chance to paint the
+    // temporarily-resized buffer.
+    renderer.setPixelRatio(1);
+    renderer.setSize(w, h, false);
+    const capture = captureIsoReferenceView(box, w, h);
+
+    renderer.setPixelRatio(prevPixelRatio);
+    renderer.setSize(
+      Math.max(1, Math.round(prevWidth / prevPixelRatio)),
+      Math.max(1, Math.round(prevHeight / prevPixelRatio)),
+      false,
+    );
+    requestRender("capture_high_res_iso_view_restore");
+
+    return capture;
+  }
+
+  const HIDDEN_LINE_VIEW_LABELS: Record<HiddenLineViewName, string> = {
+    front: "Front",
+    top: "Top",
+    right: "Right",
+  };
+
+  function nextFrame(): Promise<void> {
+    return new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    });
+  }
+
+  /**
+   * Face-adjacency graph (faceId -> neighboring faceIds, i.e. faces sharing
+   * at least one edge with it), built fresh from edgesById each call -
+   * findSteppedPartner uses this to tell a genuine stepped-hole pair (two
+   * cylinder sections of ONE bore, meeting at a shoulder) apart from two
+   * UNRELATED coaxial cylinder faces that just happen to share an axis line
+   * (e.g. a tube's inner bore and outer OD are always coaxial by
+   * construction, but are not "steps" of each other - see
+   * findSteppedPartner's doc comment). Rebuilt per call rather than cached:
+   * called at most a few dozen times per sheet generation, against models
+   * with edge counts in the tens to low hundreds, so the rebuild cost is
+   * negligible next to the rest of the pipeline.
+   */
+  function buildFaceAdjacencyGraph(): Map<string, Set<string>> {
+    const neighbors = new Map<string, Set<string>>();
+    for (const edge of edgesById.values()) {
+      const faces = edge.adjacentFaceIds;
+      for (const a of faces) {
+        for (const b of faces) {
+          if (a === b) continue;
+          let set = neighbors.get(a);
+          if (!set) {
+            set = new Set();
+            neighbors.set(a, set);
+          }
+          set.add(b);
+        }
+      }
+    }
+    return neighbors;
+  }
+
+  /** The cylinder-kind faces bordering `feature`'s own rim edge(s) - for a
+   * closed loop split into two half-edges (as this app's CAD kernel export
+   * typically does), that's normally the two half-cylinder wall pieces of
+   * the SAME physical cylindrical surface. */
+  function adjacentCylinderFaceIds(feature: ExactCircleOrArcCurveFeature): Set<string> {
+    const out = new Set<string>();
+    for (const edgeId of feature.edgeIds) {
+      const edge = edgesById.get(edgeId);
+      if (!edge) continue;
+      for (const faceId of edge.adjacentFaceIds) {
+        if (facesById.get(faceId)?.kind === "cylinder") out.add(faceId);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * A hole can be a plain constant-diameter through-hole, or it can be
+   * stepped/counterbored: two (or more) coaxial circles at the same X/Y
+   * axis line but different depth and different radius, e.g. a ⌀3.0 pilot
+   * section for 5mm then a ⌀5.0 counterbore for the remaining depth. Such a
+   * hole's near-face opening can coincidentally measure the exact same
+   * diameter as an unrelated plain hole elsewhere on the part (e.g. ⌀3.0
+   * mounting holes) - without this check, the dedup pass below would lump
+   * them into one "NX ⌀3.0" group even though they're physically different
+   * features, permanently hiding the stepped hole's own size and location
+   * dimensions (see the "6X ⌀3.0" investigation this fixes).
+   *
+   * Coaxial + different-radius alone is NOT enough to call two circles a
+   * "step": a hollow tube's inner bore and outer OD are coaxial and
+   * different-radius by definition too, but they're two independent
+   * surfaces, not sequential sections of one hole (confirmed by testing
+   * against Sleeve.stp, a tube whose OD/ID were incorrectly flagged as a
+   * "step" before this check existed). The real signature of a genuine
+   * step is topological, not just geometric: its two cylinder faces are
+   * bridged by exactly one shoulder (an annular plane face directly
+   * touching both), so this additionally requires the candidate's cylinder
+   * face(s) to share a common neighboring face with `feature`'s own
+   * cylinder face(s) in the shell's face-adjacency graph.
+   *
+   * Returns the OTHER coaxial circle (diameter + world center + the signed
+   * distance from `feature`'s own center to it along the shared axis) if
+   * `feature` has one, else null. Coaxial means: same axis direction
+   * (normals parallel) and centers differing only along that axis (no
+   * lateral offset). When a hole has more than one coaxial partner (e.g. a
+   * 3-diameter double-counterbore), the CLOSEST one along the axis wins -
+   * that's the partner whose shared step boundary is actually adjacent to
+   * `feature`'s own section.
+   */
+  function findSteppedPartner(
+    feature: ExactCircleOrArcCurveFeature,
+    allFeatures: Iterable<ExactCurveFeature>,
+  ): { diameterMm: number; center: THREE.Vector3; alongAxisMm: number } | null {
+    if (feature.kind !== "circle" || !feature.center || !feature.normal || feature.radius == null) {
+      return null;
+    }
+    const AXIS_PARALLEL_TOL = 0.01;
+    const LATERAL_TOL_MM = 0.05;
+    const RADIUS_SAME_TOL_MM = 0.01;
+    const faceAdjacency = buildFaceAdjacencyGraph();
+    const featureCylFaces = adjacentCylinderFaceIds(feature);
+    // A face bridging two cylinder sections is only a genuine step
+    // shoulder if EVERY one of its own neighbors is itself a cylinder face
+    // - i.e. it exists purely to connect cylindrical sections, nothing
+    // else. A slot/pocket wall can ALSO happen to touch both a part's bore
+    // and its OD (if the pocket is cut radially through the wall - see the
+    // Sleeve.stp investigation this refines), including via genuine
+    // circular rim-fragment edges, so "shares a neighbor" alone isn't
+    // sufficient - but that pocket wall's OTHER neighbors are its sibling
+    // pocket walls (plane faces), which a pure annular shoulder never has.
+    const isPureShoulder = (faceId: string): boolean => {
+      const neigh = faceAdjacency.get(faceId);
+      if (!neigh || neigh.size === 0) return false;
+      for (const n of neigh) {
+        if (facesById.get(n)?.kind !== "cylinder") return false;
+      }
+      return true;
+    };
+    // Two genuine step sections' cylinder faces are never directly
+    // adjacent to each other - they're bridged BY the shoulder (a plane
+    // face adjacent to both). So the test is "does featureCylFace's
+    // neighbor set intersect otherCylFace's neighbor set, at a face that
+    // is itself a pure shoulder" (a shared 1-hop neighbor = the shoulder),
+    // not "is otherCylFace itself one of featureCylFace's neighbors" (that
+    // would require them to touch directly, which two coaxial cylinder
+    // sections of different radii never do).
+    const shareShoulder = (otherCylFaces: Set<string>): boolean => {
+      for (const a of featureCylFaces) {
+        const neighA = faceAdjacency.get(a);
+        if (!neighA) continue;
+        for (const b of otherCylFaces) {
+          const neighB = faceAdjacency.get(b);
+          if (!neighB) continue;
+          for (const shared of neighA) {
+            if (neighB.has(shared) && isPureShoulder(shared)) return true;
+          }
+        }
+      }
+      return false;
+    };
+    let best: { diameterMm: number; center: THREE.Vector3; alongAxisMm: number } | null = null;
+    for (const other of allFeatures) {
+      if (other === feature || other.kind !== "circle") continue;
+      if (!other.center || !other.normal || other.radius == null) continue;
+      if (Math.abs(other.radius - feature.radius) < RADIUS_SAME_TOL_MM) continue;
+      if (Math.abs(Math.abs(other.normal.dot(feature.normal)) - 1) > AXIS_PARALLEL_TOL) continue;
+      const centerDelta = other.center.clone().sub(feature.center);
+      const alongAxis = centerDelta.dot(feature.normal);
+      const lateral = centerDelta
+        .clone()
+        .sub(feature.normal.clone().multiplyScalar(alongAxis))
+        .length();
+      if (lateral > LATERAL_TOL_MM) continue;
+      if (Math.abs(alongAxis) < RADIUS_SAME_TOL_MM) continue;
+      if (!shareShoulder(adjacentCylinderFaceIds(other))) continue;
+      if (best === null || Math.abs(alongAxis) < Math.abs(best.alongAxisMm)) {
+        best = { diameterMm: other.radius * 2, center: other.center.clone(), alongAxisMm: alongAxis };
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Finds the circle/arc curve features that should get a diameter/radius
+   * callout in ONE captured view: only features whose plane faces the
+   * camera (so they read as a true circle/arc in this projection, not
+   * foreshortened into a line) AND whose rim/midpoint isn't occluded by
+   * other geometry in this view (so a hole's far-side/hidden circle - e.g.
+   * the bottom of a blind hole, or a counterbore's hidden rim - doesn't get
+   * the same callout treatment as a genuinely visible one).
+   */
+  function computeCircularAnnotationsForView(
+    camera: THREE.OrthographicCamera,
+    meshTargets: THREE.Object3D[],
+    canvasWidth: number,
+    canvasHeight: number,
+  ): HiddenLineCircularAnnotation[] {
+    if (curveFeatureById.size === 0) return [];
+
+    const viewDir = new THREE.Vector3();
+    camera.getWorldDirection(viewDir);
+    const isOccluded = createPointOcclusionTester(viewDir, meshTargets);
+
+    // The camera's actual current screen-right/up basis, read straight off
+    // its world matrix - for a face-on circle these are already an
+    // orthonormal basis for the circle's own plane (normal ~= viewDir), so
+    // they place the leader anchor at a conventional "upper right on
+    // screen" rim point without needing to reason about which world axis
+    // maps to which screen axis for this particular view.
+    const camRight = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
+    const camUp = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+
+    const projection: MeasurementProjectionContext = {
+      camera,
+      viewportWidth: canvasWidth,
+      viewportHeight: canvasHeight,
+    };
+
+    // Coaxial circles (same center, same axis, different radius - e.g. a
+    // flange's stack of stepped/counterbored diameters) otherwise ALL
+    // anchor at the identical conventional 45deg upper-right rim point
+    // below, since that formula only depends on center+radius+camRight/Up,
+    // none of which differ between coaxial members. That crowds every one
+    // of their size-callout leaders into the same narrow search cone in
+    // sheet-composer.ts's drawCircularCallout, which for 3+ members (each
+    // wanting a fairly wide "NX.0/NY.0 STEP" label) has repeatedly forced
+    // labels out far enough to collide with a NEIGHBORING view - see
+    // AVOID_CALLOUT_DIRECTIONS_RAD there for the complementary fix on the
+    // placement side. Fanning coaxial members across a spread of starting
+    // angles here fixes it at the source: grouped purely by LOCAL center +
+    // normal direction (not world space - every feature already shares one
+    // model transform, so local coincidence implies world coincidence,
+    // cheaper than transforming twice).
+    const COAXIAL_FAN_STEP_DEG = 28;
+    const coaxialSlot = new Map<string, { indexInGroup: number; groupSize: number }>();
+    {
+      const groups = new Map<string, { featureId: string; radius: number }[]>();
+      const keyFor = (center: THREE.Vector3, normal: THREE.Vector3) =>
+        [
+          Math.round(center.x * 20),
+          Math.round(center.y * 20),
+          Math.round(center.z * 20),
+          Math.round(Math.abs(normal.x) * 100),
+          Math.round(Math.abs(normal.y) * 100),
+          Math.round(Math.abs(normal.z) * 100),
+        ].join("_");
+      for (const feature of curveFeatureById.values()) {
+        if (feature.kind !== "circle") continue;
+        if (!feature.center || !feature.normal || feature.radius == null) continue;
+        const key = keyFor(feature.center, feature.normal);
+        const arr = groups.get(key) ?? [];
+        arr.push({ featureId: feature.featureId, radius: feature.radius });
+        groups.set(key, arr);
+      }
+      for (const members of groups.values()) {
+        if (members.length < 2) continue;
+        // Largest radius first - the outermost ring's own search has the
+        // least room to work with (its rim already sits closest to the
+        // silhouette edge), so it gets the most "natural" (centermost) of
+        // the fanned angles, same reasoning sheet-composer.ts's own
+        // largest-first callout ordering uses.
+        members.sort((a, b) => b.radius - a.radius);
+        members.forEach((m, i) => {
+          coaxialSlot.set(m.featureId, { indexInGroup: i, groupSize: members.length });
+        });
+      }
+    }
+
+    type RawAnnotation = {
+      featureId: string;
+      kind: "circle" | "arc";
+      radiusMm: number;
+      anchorPx: { x: number; y: number };
+      centerPx: { x: number; y: number };
+      secondaryDiameterMm: number | null;
+    };
+
+    const raw: RawAnnotation[] = [];
+    for (const feature of curveFeatureById.values()) {
+      if (feature.kind !== "circle" && feature.kind !== "arc") continue;
+      if (!feature.center || !feature.normal || feature.radius == null) continue;
+
+      const worldNormal = feature.normal.clone().transformDirection(modelRoot.matrixWorld);
+      // Face-on check: the feature's plane must be (near) perpendicular to
+      // the view direction, i.e. normal (near) parallel to it - otherwise
+      // this view foreshortens it into a line/ellipse, not a true circle.
+      if (Math.abs(worldNormal.dot(viewDir)) < 0.99) continue;
+
+      const worldCenter = exactCadPointToWorld(feature.center);
+      if (!worldCenter) continue;
+
+      let anchorWorld: THREE.Vector3;
+      if (feature.kind === "arc" && feature.midPoint) {
+        const worldMid = exactCadPointToWorld(feature.midPoint);
+        if (!worldMid) continue;
+        anchorWorld = worldMid;
+      } else {
+        // Conventional upper-right rim point (45deg), in this view's own
+        // screen basis - fanned out per coaxialSlot for a coaxial group
+        // (see its own doc comment) so its members don't all pile onto the
+        // identical angle.
+        const slot = coaxialSlot.get(feature.featureId);
+        const angleDeg = slot
+          ? 45 + (slot.indexInGroup - (slot.groupSize - 1) / 2) * COAXIAL_FAN_STEP_DEG
+          : 45;
+        const angleRad = (angleDeg * Math.PI) / 180;
+        anchorWorld = worldCenter
+          .clone()
+          .addScaledVector(camRight, feature.radius * Math.cos(angleRad))
+          .addScaledVector(camUp, feature.radius * Math.sin(angleRad));
+      }
+
+      if (isOccluded(anchorWorld)) continue;
+
+      const anchorScreen = projectWorldToScreenPx(anchorWorld, projection);
+      if (!anchorScreen.visible) continue;
+      const centerScreen = projectWorldToScreenPx(worldCenter, projection);
+
+      raw.push({
+        featureId: feature.featureId,
+        kind: feature.kind,
+        radiusMm: feature.radius,
+        anchorPx: { x: anchorScreen.x, y: anchorScreen.y },
+        centerPx: { x: centerScreen.x, y: centerScreen.y },
+        secondaryDiameterMm: findSteppedPartner(feature, curveFeatureById.values())?.diameterMm ?? null,
+      });
+    }
+
+    // Dedup size callouts: group same-kind features whose DISPLAYED value
+    // (same rounding as the label text) matches within this view, then only
+    // the group's representative (top-left-most, for a deterministic pick)
+    // gets a size label - "4X ⌀3.0" instead of four "⌀3.0"s. Every feature
+    // still gets a full annotation entry (and, downstream, its own location
+    // dimensions) regardless of which side of this dedup it lands on.
+    //
+    // Stepped/counterbored holes (secondaryDiameterMm set) key separately
+    // from plain constant-diameter holes even when this face's diameter
+    // happens to match - a ⌀3.0 counterbore throat is a different real
+    // feature from a plain ⌀3.0 mounting hole and must not be silently
+    // folded into that group (see findSteppedPartner's doc
+    // comment for the investigation that found this).
+    const groups = new Map<string, RawAnnotation[]>();
+    for (const r of raw) {
+      const displayValue = r.kind === "circle" ? r.radiusMm * 2 : r.radiusMm;
+      const steppedKey =
+        r.secondaryDiameterMm != null ? `/${r.secondaryDiameterMm.toFixed(1)}` : "";
+      const key = `${r.kind}:${displayValue.toFixed(1)}${steppedKey}`;
+      const group = groups.get(key);
+      if (group) group.push(r);
+      else groups.set(key, [r]);
+    }
+    const representativeFeatureIds = new Set<string>();
+    const countByFeatureId = new Map<string, number>();
+    const representativeIdByFeatureId = new Map<string, string>();
+    for (const group of groups.values()) {
+      const representative = group.reduce((best, item) =>
+        item.centerPx.y < best.centerPx.y ||
+        (item.centerPx.y === best.centerPx.y && item.centerPx.x < best.centerPx.x)
+          ? item
+          : best,
+      );
+      representativeFeatureIds.add(representative.featureId);
+      for (const item of group) {
+        countByFeatureId.set(item.featureId, group.length);
+        representativeIdByFeatureId.set(item.featureId, representative.featureId);
+      }
+    }
+
+    return raw.map((r) => {
+      const displayValue = r.kind === "circle" ? r.radiusMm * 2 : r.radiusMm;
+      const prefix = r.kind === "circle" ? "⌀" : "R";
+      const count = countByFeatureId.get(r.featureId) ?? 1;
+      const baseLabel = `${prefix}${displayValue.toFixed(1)}`;
+      const steppedSuffix =
+        r.secondaryDiameterMm != null ? `/⌀${r.secondaryDiameterMm.toFixed(1)} STEP` : "";
+      const sizeLabel = representativeFeatureIds.has(r.featureId)
+        ? `${count > 1 ? `${count}X ` : ""}${baseLabel}${steppedSuffix}`
+        : null;
+      return {
+        featureId: r.featureId,
+        kind: r.kind,
+        radiusMm: r.radiusMm,
+        anchorPx: r.anchorPx,
+        centerPx: r.centerPx,
+        sizeLabel,
+        secondaryDiameterMm: r.secondaryDiameterMm,
+        groupRepresentativeFeatureId: representativeIdByFeatureId.get(r.featureId) ?? r.featureId,
+        groupSize: count,
+      };
+    });
+  }
+
+  /**
+   * Finds the axial-depth dimension for a stepped/counterbored hole in ONE
+   * captured view: the complementary case to computeCircularAnnotationsForView
+   * above. A stepped hole's diameter only reads as a true circle in the ONE
+   * view whose sight line runs along its axis (Front, for a Z-axis hole);
+   * in the other two views the same hole is edge-on, its axis lying flat in
+   * the screen plane - exactly where its DEPTH (not visible/measurable from
+   * Front at all) can be dimensioned instead. Returns one entry per stepped
+   * hole whose axis is (near) perpendicular to this view's sight line,
+   * giving the screen-space near/far points of its first section so the
+   * sheet composer can draw a depth dimension without needing any 3D math
+   * of its own.
+   */
+  function computeAxialDepthAnnotationsForView(
+    camera: THREE.OrthographicCamera,
+    canvasWidth: number,
+    canvasHeight: number,
+    // Restrict candidates to featureIds computeCircularAnnotationsForView
+    // already recognized (on whichever view faces this hole) as a stepped
+    // hole's near/pilot circle. A stepped hole's topology usually carries
+    // MULTIPLE same-radius coaxial circle pairs along its own axis (e.g. a
+    // step's shoulder rim shares the pilot's radius on one side and the
+    // counterbore's radius on the other), each of which independently looks
+    // like a valid "stepped pair" to findSteppedPartner - without this
+    // filter every one of those would surface as its own depth annotation,
+    // producing several redundant/competing depth dimensions for what a
+    // drafter would draw as ONE. Restricting to the known-recognized near
+    // circle keeps exactly one depth dimension per real stepped hole.
+    allowedFeatureIds: ReadonlySet<string>,
+  ): HiddenLineAxialDepthAnnotation[] {
+    if (curveFeatureById.size === 0 || allowedFeatureIds.size === 0) return [];
+
+    const viewDir = new THREE.Vector3();
+    camera.getWorldDirection(viewDir);
+    const projection: MeasurementProjectionContext = {
+      camera,
+      viewportWidth: canvasWidth,
+      viewportHeight: canvasHeight,
+    };
+
+    const results: HiddenLineAxialDepthAnnotation[] = [];
+    for (const feature of curveFeatureById.values()) {
+      if (feature.kind !== "circle" || !feature.center || !feature.normal || feature.radius == null) {
+        continue;
+      }
+      if (!allowedFeatureIds.has(feature.featureId)) continue;
+      const worldNormal = feature.normal.clone().transformDirection(modelRoot.matrixWorld);
+      // Edge-on check: the axis must lie (near) IN this view's screen plane,
+      // i.e. (near) perpendicular to the sight line - the opposite test
+      // from computeCircularAnnotationsForView's face-on check.
+      if (Math.abs(worldNormal.dot(viewDir)) > 0.1) continue;
+
+      const partner = findSteppedPartner(feature, curveFeatureById.values());
+      if (!partner) continue;
+
+      const worldNear = exactCadPointToWorld(feature.center);
+      const worldFar = exactCadPointToWorld(partner.center);
+      if (!worldNear || !worldFar) continue;
+      const nearScreen = projectWorldToScreenPx(worldNear, projection);
+      const farScreen = projectWorldToScreenPx(worldFar, projection);
+      if (!nearScreen.visible || !farScreen.visible) continue;
+
+      results.push({
+        featureId: feature.featureId,
+        depthMm: Math.abs(partner.alongAxisMm),
+        nearPx: { x: nearScreen.x, y: nearScreen.y },
+        farPx: { x: farScreen.x, y: farScreen.y },
+      });
+    }
+    return results;
+  }
+
+  /**
+   * Generates Front/Top/Right hidden-line views in sequence: reuses the
+   * existing camera presets, runs the verified ray-cast occlusion pass on
+   * each, and captures a clean visible-solid/hidden-dashed snapshot per
+   * view. Returns the three labeled images only - no sheet/layout
+   * composition. Restores the camera to wherever it was before the call.
+   *
+   * Scale consistency: fitCameraToBox() is called exactly ONCE, before the
+   * view loop, using the part's overall 3D bounding box (all three of
+   * X/Y/Z, not just what's visible from one angle). That box's largest
+   * dimension sets the ortho frustum half-height, and that same frustum is
+   * then reused unchanged for all three captures - so Front/Top/Right are
+   * guaranteed the same world-units-per-pixel scale. Fitting per-view off
+   * each view's own 2D silhouette would size each view to fill the frame
+   * independently, breaking that shared scale (e.g. a long part would
+   * render "shorter" in Front than the same length appears in Top).
+   */
+  async function generateHiddenLineViewSet(
+    onProgress?: (info: HiddenLineProgressInfo) => void,
+  ): Promise<HiddenLineViewSetResult> {
+    const views: HiddenLineViewName[] = ["front", "top", "right"];
+
+    const wasPerspective = activeCamera === persp;
+    const prevPosition = activeCamera.position.clone();
+    const prevTarget = controls.target.clone();
+    const prevOrtho = {
+      left: ortho.left,
+      right: ortho.right,
+      top: ortho.top,
+      bottom: ortho.bottom,
+      near: ortho.near,
+      far: ortho.far,
+    };
+    const prevPerspNearFar = { near: persp.near, far: persp.far };
+
+    const overallBox = getPartOnlyBox();
+    if (!overallBox.isEmpty()) {
+      // Single shared fit for all three views - see doc comment above.
+      fitCameraToBox(overallBox, 1.5);
+    }
+    // Snap straight to the first view's final orthographic pose here, still
+    // synchronous with the fit above (no await has happened yet). Both calls'
+    // pending renders coalesce into the same not-yet-fired animation frame,
+    // so the browser's next actual paint already shows the correct Front
+    // view - never an intermediate frame with the fitted scale but the old
+    // (possibly perspective) camera/orientation still on screen.
+    setProjection("orthographic");
+    setViewExact(views[0]);
+
+    // Captured once, right after the shared fit - every view below reuses
+    // this same frustum, so this is the one true mm<->px conversion for all
+    // three resulting images (see HiddenLineViewSetResult's doc comment).
+    const canvasWidth = renderer.domElement.width;
+    const canvasHeight = renderer.domElement.height;
+    const pxPerMm = canvasHeight / (ortho.top - ortho.bottom);
+    const boxSize = overallBox.isEmpty()
+      ? new THREE.Vector3(0, 0, 0)
+      : overallBox.getSize(new THREE.Vector3());
+    const modelBoundsMm = { x: boxSize.x, y: boxSize.y, z: boxSize.z };
+
+    const results: HiddenLineViewCapture[] = [];
+    const circularAnnotations: Record<HiddenLineViewName, HiddenLineCircularAnnotation[]> = {
+      front: [],
+      top: [],
+      right: [],
+    };
+    const axialDepthAnnotations: Record<HiddenLineViewName, HiddenLineAxialDepthAnnotation[]> = {
+      front: [],
+      top: [],
+      right: [],
+    };
+
+    for (let i = 0; i < views.length; i++) {
+      const view = views[i];
+      const label = HIDDEN_LINE_VIEW_LABELS[view];
+      onProgress?.({
+        label: `Generating ${label} view...`,
+        index: i,
+        total: views.length,
+        done: false,
+      });
+      // Yield so the progress update above actually paints before the
+      // upcoming synchronous ray-cast pass blocks the main thread again.
+      await nextFrame();
+
+      setProjection("orthographic");
+      // Exact (untilted) Top/Bottom - see setViewExact()'s doc comment for
+      // why this differs from the interactive setView() used elsewhere.
+      // Note: setViewExact() only repositions/reorients the camera - it
+      // never touches the ortho frustum set above, so the shared scale
+      // survives each of these calls untouched.
+      setViewExact(view);
+
+      // Vectors, not a snapshot: the sheet strokes these itself at a real
+      // paper-mm line weight - see HiddenLineEdgeRun's doc comment.
+      const result = computeHiddenLineSegments();
+      const edgeRuns = result
+        ? buildProjectedEdgeRuns(result, ortho, canvasWidth, canvasHeight)
+        : [];
+
+      results.push({ view, label, edgeRuns });
+      circularAnnotations[view] = computeCircularAnnotationsForView(
+        ortho,
+        collectVisibleMeshRaycastTargets(),
+        canvasWidth,
+        canvasHeight,
+      );
+    }
+
+    // Second pass for axial-depth (stepped-hole) annotations: needs the
+    // FULL set of stepped-hole featureIds recognized across all three
+    // views (see computeAxialDepthAnnotationsForView's doc comment), which
+    // isn't known until every view's circularAnnotations above has been
+    // computed - so this can't be folded into the loop above. Cheap: no
+    // re-capture, just repositioning the already-fitted camera and reusing
+    // curveFeatureById.
+    const steppedNearFeatureIds = new Set<string>();
+    for (const view of views) {
+      for (const a of circularAnnotations[view]) {
+        if (a.secondaryDiameterMm != null) steppedNearFeatureIds.add(a.featureId);
+      }
+    }
+    if (steppedNearFeatureIds.size > 0) {
+      for (const view of views) {
+        setViewExact(view);
+        axialDepthAnnotations[view] = computeAxialDepthAnnotationsForView(
+          ortho,
+          canvasWidth,
+          canvasHeight,
+          steppedNearFeatureIds,
+        );
+      }
+    }
+
+    // Isometric reference view - LAST, after both annotation passes above,
+    // because it needs its own orthographic frustum (see
+    // captureIsoReferenceView) and everything that depends on the three
+    // views' shared fit is finished by this point. The restore immediately
+    // below puts the shared frustum back either way.
+    onProgress?.({
+      label: "Generating isometric view...",
+      index: views.length,
+      total: views.length + 1,
+      done: false,
+    });
+    await nextFrame();
+    const isoCapture = captureIsoReferenceView(
+      overallBox,
+      canvasWidth,
+      canvasHeight,
+    );
+
+    setProjection(wasPerspective ? "perspective" : "orthographic");
+    activeCamera.position.copy(prevPosition);
+    controls.target.copy(prevTarget);
+    ortho.left = prevOrtho.left;
+    ortho.right = prevOrtho.right;
+    ortho.top = prevOrtho.top;
+    ortho.bottom = prevOrtho.bottom;
+    ortho.near = prevOrtho.near;
+    ortho.far = prevOrtho.far;
+    ortho.updateProjectionMatrix();
+    persp.near = prevPerspNearFar.near;
+    persp.far = prevPerspNearFar.far;
+    persp.updateProjectionMatrix();
+    controls.update();
+    requestUpdateSilhouette?.();
+    requestRender("hidden_line_view_set_restore");
+
+    onProgress?.({
+      label: "Done",
+      index: views.length,
+      total: views.length,
+      done: true,
+    });
+
+    // Canonical feature inventory for a completeness checker: the union of
+    // every circle/arc annotation that turned up face-on and unoccluded in
+    // ANY of the three views, deduped by featureId. Built from
+    // circularAnnotations (not a raw curveFeatureById scan) deliberately -
+    // a raw scan would also pick up internal step-shoulder rims (e.g. the
+    // mid-depth transition circle inside a counterbore) that were never
+    // meant to get their own dimension, producing false-positive coverage
+    // failures. This can still miss a feature that's foreshortened/occluded
+    // in all three orthogonal views, which is a known limitation, not
+    // silently "fixed" here.
+    const allCircularFeatures: HiddenLineViewSetResult["allCircularFeatures"] = [];
+    const seenFeatureIds = new Set<string>();
+    const circularFeatureGroups: HiddenLineViewSetResult["circularFeatureGroups"] = {};
+    for (const view of views) {
+      for (const a of circularAnnotations[view]) {
+        circularFeatureGroups[a.featureId] = {
+          representativeFeatureId: a.groupRepresentativeFeatureId,
+          groupSize: a.groupSize,
+        };
+        if (seenFeatureIds.has(a.featureId)) continue;
+        seenFeatureIds.add(a.featureId);
+        allCircularFeatures.push({
+          featureId: a.featureId,
+          kind: a.kind,
+          radiusMm: a.radiusMm,
+          secondaryDiameterMm: a.secondaryDiameterMm,
+        });
+      }
+    }
+
+    return {
+      views: results,
+      pxPerMm,
+      canvasWidth,
+      canvasHeight,
+      modelBoundsMm,
+      circularAnnotations,
+      allCircularFeatures,
+      circularFeatureGroups,
+      axialDepthAnnotations,
+      isoCapture,
+    };
+  }
+  // --- end hidden-line detection engine ------------------------------------
+
+  // --- TEMPORARY DEBUG: hidden-line detection spike -----------------------
+  let hiddenLineDebugGroup: THREE.Group | null = null;
+
+  function clearHiddenLineDebugVisualization(): void {
+    if (!hiddenLineDebugGroup) return;
+    scene.remove(hiddenLineDebugGroup);
+    disposeHiddenLineGroup(hiddenLineDebugGroup);
+    hiddenLineDebugGroup = null;
+  }
+
+  function debugGetEdgeMode(): {
+    isExactCadMode: boolean;
+    isApproxCadMode: boolean;
+    exactEdgeCount: number;
+    curveFeatureCount: number;
+    approxEdgeCount: number;
+  } {
+    return {
+      isExactCadMode,
+      isApproxCadMode,
+      exactEdgeCount: exactEdgeRenderObjectsById.size,
+      curveFeatureCount: curveFeatureRenderObjectsById.size,
+      approxEdgeCount: approxCadEdgeObjects.length,
+    };
+  }
+
+  function debugLoadHiddenLineTestPart(): void {
+    const geom = buildHiddenLineDebugTestGeometry();
+    loadMeshFromGeometry(geom);
+  }
+
+  function debugRunHiddenLineTest(): HiddenLineDebugStats | null {
+    clearHiddenLineDebugVisualization();
+    const result = computeHiddenLineSegments();
+    if (!result) return null;
+    hiddenLineDebugGroup = buildHiddenLineStyledGroup(result);
+    scene.add(hiddenLineDebugGroup);
+    requestRender("hidden_line_debug");
+    console.log("[hidden-line-debug] stats", result.stats);
+    return result.stats;
+  }
+  // --- end TEMPORARY DEBUG --------------------------------------------------
 
   function exactCadPointToWorld(
     point: THREE.Vector3 | null | undefined,
@@ -6866,30 +8648,6 @@ export function createViewer(container: HTMLElement): Viewer {
   }
 
   function getOutlineSnapshotDataURL(): string {
-    const prevGridVisible = gridHelper ? gridHelper.visible : false;
-    const prevAxesVisible = axesHelper ? axesHelper.visible : false;
-
-    const prevLineColor = measureMaterial.color.clone();
-    const prevArrowColor = arrowMaterial.color.clone();
-    let prevLabelColor: THREE.Color | null = null;
-    if (measureLabel && (measureLabel.material as any).color) {
-      prevLabelColor = (measureLabel.material as any).color.clone();
-    }
-
-    if (gridHelper) gridHelper.visible = false;
-    if (axesHelper) axesHelper.visible = false;
-
-    measureMaterial.color.set(0x000000);
-    arrowMaterial.color.set(0x000000);
-    if (measureLabel && (measureLabel.material as any).color) {
-      (measureLabel.material as any).color.set(0x000000);
-    }
-
-    const prevClearColor = renderer.getClearColor(new THREE.Color()).clone();
-    const prevClearAlpha = renderer.getClearAlpha();
-    const prevBackground = scene.background;
-    const prevModelVisible = modelRoot.visible;
-
     const edgesGroup = new THREE.Group();
 
     if (
@@ -6949,57 +8707,12 @@ export function createViewer(container: HTMLElement): Viewer {
       });
     }
 
-    scene.add(edgesGroup);
-
-    const prevModelVisibleForCube = modelRoot.visible;
-    modelRoot.visible = false;
-
     // Outline Snap traces the actual part's edges only — a reference object's
     // solid-color linework would be indistinguishable from real part geometry
-    // in this black-on-white export, so hide it for this capture.
-    const prevCompareGroupVisible = compareReferenceGroup?.visible ?? false;
-    if (compareReferenceGroup) compareReferenceGroup.visible = false;
-
-    renderer.setClearColor(0xf0f2f5, 1);
-    scene.background = null;
-
-    renderNow("outline_snapshot_capture");
-
-    const dataURL = renderer.domElement.toDataURL("image/png");
-
-    scene.remove(edgesGroup);
-    edgesGroup.traverse((obj: any) => {
-      const asAny = obj as any;
-      if (asAny.geometry) {
-        disposeGeometryBoundsTree(asAny.geometry);
-        asAny.geometry.dispose();
-      }
-      if (asAny.material) {
-        if (Array.isArray(asAny.material)) {
-          asAny.material.forEach((m: any) => m.dispose());
-        } else {
-          asAny.material.dispose();
-        }
-      }
-    });
-
-    modelRoot.visible = prevModelVisibleForCube;
-    if (compareReferenceGroup) compareReferenceGroup.visible = prevCompareGroupVisible;
-    renderer.setClearColor(prevClearColor, prevClearAlpha);
-    scene.background = prevBackground;
-
-    measureMaterial.color.copy(prevLineColor);
-    arrowMaterial.color.copy(prevArrowColor);
-    if (
-      measureLabel &&
-      prevLabelColor &&
-      (measureLabel.material as any).color
-    ) {
-      (measureLabel.material as any).color.copy(prevLabelColor);
-    }
-    if (gridHelper) gridHelper.visible = prevGridVisible;
-    if (axesHelper) axesHelper.visible = prevAxesVisible;
-    requestRender("outline_snapshot_restore");
+    // in this black-on-white export, so captureSceneSnapshotWithOverlay's
+    // hiding of the compare-reference group applies here too.
+    const dataURL = captureSceneSnapshotWithOverlay(edgesGroup);
+    disposeHiddenLineGroup(edgesGroup);
 
     return dataURL;
   }
@@ -8661,6 +10374,106 @@ export function createViewer(container: HTMLElement): Viewer {
     requestRender("set_view");
   }
 
+  /**
+   * Like setView(), but Top/Bottom use the TRUE perpendicular direction -
+   * no off-axis tilt. setView() deliberately tilts Top/Bottom slightly to
+   * dodge an OrbitControls pole-singularity bug that shows up during
+   * INTERACTIVE dragging after a view-cube click - a real fix, and it must
+   * stay exactly as-is (do not "fix" setView() itself). But that
+   * singularity only ever manifests through subsequent incremental drag
+   * deltas; a single static render/capture never touches that code path,
+   * so a one-shot, non-interactive use (e.g. generateHiddenLineViewSet())
+   * has nothing to dodge, while the tilt itself actively makes a Top/Bottom
+   * capture geometrically wrong for a real engineering drawing (circles
+   * render as ellipses, edges misalign). This function exists so capture
+   * paths can get a geometrically exact view without touching setView()'s
+   * interactive behavior at all. Front/Back/Left/Right/Iso were never
+   * tilted, so they behave identically to setView() here.
+   */
+  function setViewExact(
+    preset: "top" | "front" | "right" | "iso" | "bottom" | "left" | "back",
+  ) {
+    const isFiniteVec3 = (value: THREE.Vector3): boolean =>
+      Number.isFinite(value.x) &&
+      Number.isFinite(value.y) &&
+      Number.isFinite(value.z);
+
+    const resolveStableOrbitTarget = (): THREE.Vector3 => {
+      const modelBoundsBox = new THREE.Box3();
+      let hasModelBounds = false;
+      for (const child of getTopLevelModelChildren()) {
+        const childBounds = new THREE.Box3().setFromObject(child);
+        if (childBounds.isEmpty()) continue;
+        if (!hasModelBounds) {
+          modelBoundsBox.copy(childBounds);
+          hasModelBounds = true;
+        } else {
+          modelBoundsBox.union(childBounds);
+        }
+      }
+      if (hasModelBounds) {
+        const center = modelBoundsBox.getCenter(new THREE.Vector3());
+        if (isFiniteVec3(center)) return center;
+      }
+      const fallbackTarget = controls.target.clone();
+      return isFiniteVec3(fallbackTarget)
+        ? fallbackTarget
+        : new THREE.Vector3(0, 0, 0);
+    };
+
+    const target = resolveStableOrbitTarget();
+    const rawRadius = activeCamera.position.distanceTo(target);
+    const radius =
+      Number.isFinite(rawRadius) && rawRadius > 1e-3
+        ? rawRadius
+        : Math.max(modelDiagonal * 0.6, 300);
+
+    // No off-axis tilt for top/bottom here - see doc comment above.
+    const direction = (() => {
+      switch (preset) {
+        case "top":
+          return new THREE.Vector3(0, 1, 0);
+        case "bottom":
+          return new THREE.Vector3(0, -1, 0);
+        case "front":
+          return new THREE.Vector3(0, 0, 1);
+        case "back":
+          return new THREE.Vector3(0, 0, -1);
+        case "right":
+          return new THREE.Vector3(1, 0, 0);
+        case "left":
+          return new THREE.Vector3(-1, 0, 0);
+        case "iso":
+        default:
+          return new THREE.Vector3(1, 0.6, 1);
+      }
+    })();
+    if (direction.lengthSq() <= 1e-12) {
+      direction.set(1, 0.6, 1);
+    }
+    direction.normalize();
+    const up = getViewerViewUpVector(preset);
+
+    const syncCameraToPreset = (camera: THREE.Camera) => {
+      camera.position.copy(target).addScaledVector(direction, radius);
+      camera.up.copy(up);
+      camera.lookAt(target);
+      camera.up.set(0, 1, 0);
+      (camera as any).updateProjectionMatrix?.();
+      camera.updateMatrixWorld(true);
+    };
+
+    syncCameraToPreset(persp);
+    syncCameraToPreset(ortho);
+
+    controls.target.copy(target);
+    controls.update();
+    requestUpdateSilhouette?.();
+    scheduleExactCurveFeatureResample("set_view_exact");
+    emitViewChanged();
+    requestRender("set_view_exact");
+  }
+
   function setProjection(mode: "perspective" | "orthographic") {
     const nextCamera = mode === "perspective" ? persp : ortho;
     if (activeCamera !== nextCamera) {
@@ -8697,6 +10510,12 @@ export function createViewer(container: HTMLElement): Viewer {
 
     if (edgeHoverLineMaterial) {
       edgeHoverLineMaterial.resolution.set(w, h);
+    }
+    if (exactEdgeFatMaterialNormal) {
+      exactEdgeFatMaterialNormal.resolution.set(w, h);
+    }
+    if (exactEdgeFatMaterialTangentPhantom) {
+      exactEdgeFatMaterialTangentPhantom.resolution.set(w, h);
     }
     updateCubeSize();
     scheduleExactCurveFeatureResample("resize");
@@ -9392,6 +11211,7 @@ export function createViewer(container: HTMLElement): Viewer {
     setMeasurementGraphicsScale,
     getScreenshotDataURL,
     getOutlineSnapshotDataURL,
+    captureHighResIsoView,
     setMaterialProperties,
     setFlatSurfaceDensityPercent,
     setCurvedSurfaceDetailPercent,
@@ -9418,5 +11238,9 @@ export function createViewer(container: HTMLElement): Viewer {
     onViewChanged,
     requestRender,
     projectWorldToScreen,
+    generateHiddenLineViewSet,
+    debugLoadHiddenLineTestPart,
+    debugRunHiddenLineTest,
+    debugGetEdgeMode,
   };
 }
