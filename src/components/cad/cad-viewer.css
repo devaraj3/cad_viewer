@@ -603,6 +603,614 @@
   border-color: #1e293b;
 }
 
+.cad-sheet-modal-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: rgba(15, 23, 42, 0.45);
+  backdrop-filter: blur(4px);
+}
+
+.cad-sheet-modal {
+  position: relative;
+  /* Grid, two explicit rows: the toolbar (auto-height, task 1 - every
+     control + the status row now lives ABOVE the canvas) then the
+     canvas-wrap (minmax(0, 1fr), takes whatever's left). DOM order matches
+     this directly now (toolbar first, canvas-wrap second) - unlike the old
+     "canvas first, grid-auto-rows for a variable tail below" layout this
+     replaced, so there's no longer any implicit-row bookkeeping to keep in
+     sync with what's actually rendered. */
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 14px;
+  width: min(94vw, 1500px);
+  /* 92% of the OVERLAY's own box, not 92vh (task 3 root cause #1): the CAD
+     viewer sits below an app header (.cad-app's grid-template-rows) and its
+     own root is overflow: hidden, so it's shorter than the full viewport -
+     confirmed by measuring it directly (header+status bar ate 100px of a
+     1000px window in testing). A vh-based size doesn't know that and can
+     ask for more room than the visible, clipped container actually has -
+     the real mechanism behind "title block cut off, scrollbar present". %
+     is relative to the overlay's own box (a definite size - it's inset: 0
+     against that same, already-shorter root), so this can't happen
+     regardless of the header's height. A plain height (not max-height) is
+     deliberate too, though a smaller fix on its own: it makes the modal
+     always exactly this tall rather than shrinking for sparse content, so
+     canvas-wrap's own available space (which cad-viewer.tsx's
+     ResizeObserver measures for the canvas - see .cad-sheet-modal-canvas's
+     own doc comment for root cause #2) is the same predictable budget
+     regardless of how many of the optional warning/notice/hint rows in the
+     toolbar happen to be showing. */
+  height: 92%;
+  /* Extra top clearance (vs. the other three sides) so the absolutely-
+     positioned close button (top:12px, height:32px) never sits over the
+     sheet canvas, which is now the modal's first in-flow child (task 2/3:
+     "nothing floating above the sheet"). */
+  padding: 56px 20px 20px;
+  border-radius: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: #ffffff;
+  box-shadow: 0 30px 60px rgba(15, 23, 42, 0.35);
+}
+
+.cad-sheet-modal-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  background: #f8fafc;
+  color: #475569;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.cad-sheet-modal-close:hover {
+  background: #ffffff;
+  border-color: rgba(59, 130, 246, 0.4);
+  color: #1d4ed8;
+}
+
+.cad-sheet-modal-canvas-wrap {
+  position: relative;
+  display: grid;
+  place-items: center;
+  /* Lets this shrink below the canvas's own unconstrained intrinsic size
+     instead of being forced to at least that size (the default min-height/
+     min-width: auto on a grid/flex item) - this is what makes the
+     minmax(0, 1fr) row above actually able to give it only the real
+     leftover space rather than growing the whole modal to fit the canvas. */
+  min-height: 0;
+  min-width: 0;
+  /* auto, not hidden (task 2: zoom/pan) - at 100% (the zoom floor) the
+     canvas exactly fills this box so no scrollbar appears, identical to
+     the old `hidden` behavior; above 100% the canvas (an explicit px
+     width/height set by cad-viewer.tsx, see .cad-sheet-modal-canvas's own
+     doc comment) overflows this box and the browser supplies native
+     scrollbars/wheel/trackpad panning to reach the rest of it - no custom
+     pan-drag gesture needed, and it can never conflict with the existing
+     Adjust Drawing/Annotations click-drag handlers on the canvas itself. */
+  overflow: auto;
+  border-radius: 10px;
+  border: 1px solid #d7dce3;
+  background: #f0f2f5;
+}
+
+/* max-width/max-height: 100% here are only the pre-measurement FALLBACK
+   (a brief instant before cad-viewer.tsx's ResizeObserver-driven
+   canvasFitSize - and the sheetFitSize/zoom math derived from it - sets a
+   real px width/height as an inline style, which then wins over this rule
+   automatically). Confirmed empirically that max-height as a percentage
+   does not reliably resolve against a <canvas>'s containing block in
+   practice (a literal px value works, the equivalent % silently doesn't,
+   even when the ancestor chain's computed height is unambiguously definite
+   - see .cad-sheet-modal's own doc comment for the rest of that chain), so
+   cad-viewer.tsx measures .cad-sheet-modal-canvas-wrap directly and applies
+   px instead of depending on % here - and, since zoom (task 2) needs the
+   canvas to be able to exceed the wrap's own size (to make it scrollable),
+   the inline style sets a real width/height at every zoom level, not just
+   a max-width/max-height cap. */
+.cad-sheet-modal-canvas {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  touch-action: none;
+}
+
+/* Delete-icon overlay (Adjust Annotations mode, task 3) - positioned via
+   inline left/top (CSS px relative to .cad-sheet-modal-canvas-wrap, computed
+   in cad-viewer.tsx's computeDeleteIconPos from the selected dimension's own
+   on-screen label position), so it always sits right next to whatever's
+   selected regardless of the canvas's current CSS-scaled size. */
+.cad-sheet-delete-icon {
+  position: absolute;
+  transform: translate(-20%, -50%);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  border: 1px solid rgba(220, 38, 38, 0.4);
+  background: #fef2f2;
+  color: #dc2626;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.2);
+  transition: all 0.15s ease;
+}
+
+.cad-sheet-delete-icon:hover {
+  background: #dc2626;
+  border-color: #dc2626;
+  color: #ffffff;
+}
+
+.cad-sheet-modal-hint {
+  text-align: center;
+  font-size: 12.5px;
+  color: #64748b;
+  padding: 2px 0;
+}
+
+/* Scale control - a small inline group (label + select + busy text) that
+   reads as one item alongside the footer's buttons. */
+.cad-sheet-scale-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cad-sheet-scale-busy {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #64748b;
+}
+
+/* Error state (task 4) - a visible red border on the Scale control exactly
+   while content crosses the frame margin at the current scale/position, so
+   the error is visible at the control itself, not just in the banner below. */
+.cad-select--error {
+  border-color: #dc2626 !important;
+  box-shadow: 0 0 0 1px rgba(220, 38, 38, 0.25);
+}
+
+.cad-select--error:hover,
+.cad-select--error:focus {
+  border-color: #dc2626 !important;
+}
+
+/* Floating toast (replaces the old in-flow scale-change banner) - absolutely
+   positioned over .cad-sheet-modal (position: relative) so it never reflows
+   the toolbar/canvas, auto-dismissed a few seconds after it appears (see
+   cad-viewer.tsx's scaleChangeNotice effect). */
+.cad-sheet-toast {
+  position: absolute;
+  /* Sits in the modal's own top padding band (56px, cleared for the close
+     button) so it floats above the toolbar entirely rather than overlapping
+     its buttons. */
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  text-align: center;
+  font-size: 12.5px;
+  color: #2563eb;
+  background: rgba(219, 234, 254, 0.95);
+  border: 1px solid rgba(96, 165, 250, 0.45);
+  border-radius: 8px;
+  padding: 6px 14px;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.18);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* Top toolbar - the grid's first row, holds the controls row and the status
+   row (warning/notice/hint), stacked in normal block flow above the
+   canvas-wrap. */
+.cad-sheet-modal-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Control row (task 5: "visually congested... clear gaps between logical
+   groups") - each logical cluster (zoom | notes | scale | layout controls |
+   download) is its own .cad-sheet-toolbar-group flex item; the row-level gap
+   is the space BETWEEN groups, a vertical rule marks the boundary, and each
+   group's own internal gap (below) is tighter, so the grouping reads
+   visually instead of every control looking equally spaced. Wraps
+   (flex-wrap) rather than compressing when it doesn't fit one row. */
+.cad-sheet-modal-controls-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+  row-gap: 14px;
+}
+
+.cad-sheet-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  position: relative;
+  padding-right: 22px;
+}
+
+/* Vertical divider between groups - omitted from the last group via
+   :last-child so the row doesn't end with a trailing rule. */
+.cad-sheet-toolbar-group:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 1px;
+  height: 22px;
+  background: rgba(148, 163, 184, 0.4);
+}
+
+/* Consistent control height across the row (task 5: "consistent control
+   heights and alignment") - buttons/selects/the zoom group all resolve to
+   this same box height regardless of their own padding. */
+.cad-sheet-toolbar-group .cad-btn,
+.cad-sheet-toolbar-group .cad-select,
+.cad-sheet-toolbar-group .cad-sheet-zoom-group {
+  min-height: 34px;
+  box-sizing: border-box;
+}
+
+/* Zoom control - "-" / value box / "+" read as one compact unit. */
+.cad-sheet-zoom-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  border-radius: 8px;
+  padding: 4px 6px;
+  background: #f8fafc;
+}
+
+.cad-sheet-zoom-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  background: #ffffff;
+  color: #334155;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.cad-sheet-zoom-btn:hover:not(:disabled) {
+  background: #eff6ff;
+  border-color: rgba(59, 130, 246, 0.4);
+  color: #1d4ed8;
+}
+
+.cad-sheet-zoom-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.cad-sheet-zoom-input {
+  width: 40px;
+  text-align: right;
+  border: none;
+  background: transparent;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.cad-sheet-zoom-input:focus {
+  outline: none;
+}
+
+.cad-sheet-zoom-suffix {
+  font-size: 12.5px;
+  color: #64748b;
+  margin-right: 2px;
+}
+
+/* Notes checkbox (task: editing is inline on the sheet now, no side panel/
+   "Edit Notes" button - see the pencil/entry overlays below). */
+.cad-sheet-notes-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+  cursor: pointer;
+}
+
+/* Notes pencil overlay (task 2) - positioned via inline left/top (CSS px
+   relative to .cad-sheet-modal-canvas-wrap, computeNotesPencilIconPos in
+   cad-viewer.tsx) at the notes block's own top-right corner, matching the
+   delete-icon overlay's own convention. */
+.cad-sheet-notes-pencil {
+  position: absolute;
+  transform: translate(-20%, -50%);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  border: 1px solid rgba(37, 99, 235, 0.4);
+  background: #eff6ff;
+  color: #1d4ed8;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.2);
+  transition: all 0.15s ease;
+}
+
+.cad-sheet-notes-pencil:hover {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #ffffff;
+}
+
+/* Direct in-document notes editing - one borderless input per point
+   (committed or the trailing new slot), positioned right after the
+   canvas-drawn "N." prefix (see notesLineOrigin/NOTES_NUMBER_PREFIX_W_PX).
+   Reads as "typing directly on the sheet" rather than a form field; the
+   underline only appears on the point actually focused, so the others don't
+   visually compete with it. */
+.cad-sheet-notes-line-input {
+  position: absolute;
+  z-index: 2;
+  width: 220px;
+  border: none;
+  border-bottom: 1.5px solid transparent;
+  background: rgba(255, 255, 255, 0.92);
+  font: 15px sans-serif;
+  color: #000000;
+  padding: 0 2px;
+  outline: none;
+}
+
+.cad-sheet-notes-line-input:focus {
+  border-bottom-color: #2563eb;
+}
+
+/* Static stand-in text for every title block cell NOT actively being edited
+   (bugfix: the canvas draws no cell content at all in edit mode - see
+   drawSheetTitleBlock's own editMode early return - so this is what keeps
+   existing labels/values visible instead of the table appearing wiped the
+   moment edit mode opens). Non-interactive: clicks must fall through to the
+   canvas underneath for cell selection/hit-testing. */
+.cad-titleblock-cell-static {
+  position: absolute;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  padding: 0 8px;
+  font: 11px sans-serif;
+  color: #000000;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.cad-titleblock-cell-static-bold {
+  font-weight: 700;
+}
+
+/* Title block cell content (table-edit mode) - the ONE on-demand input for
+   whichever cell is actively being edited (titleEditingCellId in
+   cad-viewer.tsx), positioned/sized exactly over it. Left-aligned,
+   vertically centred, same "type directly on the sheet" reading as the
+   notes line inputs above. */
+.cad-titleblock-cell-input {
+  position: absolute;
+  z-index: 2;
+  border: none;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.92);
+  outline: 1.5px dashed transparent;
+  font: 11px sans-serif;
+  color: #000000;
+  padding: 0 4px;
+}
+
+.cad-titleblock-cell-input:hover {
+  outline-color: rgba(37, 99, 235, 0.3);
+}
+
+.cad-titleblock-cell-input:focus {
+  outline-color: #2563eb;
+}
+
+.cad-titleblock-cell-input::placeholder {
+  color: #94a3b8;
+}
+
+/* Contextual toolbar (task 2: SELECT/INSERT/DELETE/MERGE/SPLIT), anchored
+   above the current cell/range selection (computeTitleToolbarPos in
+   cad-viewer.tsx). A row of small icon buttons rather than a hover-only
+   affordance, so every structural action is visible and reachable the
+   instant something's selected. */
+.cad-titleblock-toolbar {
+  position: absolute;
+  z-index: 4;
+  transform: translate(0, -100%);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  background: #ffffff;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.25);
+}
+
+.cad-titleblock-toolbar button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 5px;
+  border: none;
+  background: transparent;
+  color: #334155;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.cad-titleblock-toolbar button:hover:not(:disabled) {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.cad-titleblock-toolbar button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.cad-titleblock-toolbar button.cad-titleblock-toolbar-danger:hover:not(:disabled) {
+  background: #fef2f2;
+  color: #dc2626;
+}
+
+.cad-titleblock-toolbar-divider {
+  width: 1px;
+  height: 18px;
+  margin: 0 2px;
+  background: rgba(148, 163, 184, 0.5);
+}
+
+/* Logo cell editor (task 4) - covers the logo cell exactly while in
+   table-edit mode, since the canvas draws nothing there either way (see
+   drawSheetTitleBlock's editMode guard). Two states: an upload dropzone
+   (empty) or a preview + remove control (logo set). */
+.cad-titleblock-logo-editor {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border-radius: 4px;
+  outline: 1.5px dashed rgba(37, 99, 235, 0.35);
+  background: rgba(255, 255, 255, 0.85);
+}
+
+/* Empty-logo state (task 4: "make both options apparent, not just upload") -
+   the personal/non-company path (generated avatar from a typed name) stacked
+   above the upload option, so a user with no company logo sees a complete
+   alternative rather than only a dead-end upload button. */
+.cad-titleblock-logo-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  width: 100%;
+  height: 100%;
+}
+
+.cad-titleblock-avatar-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  color: #ffffff;
+  font: 600 11px sans-serif;
+  flex-shrink: 0;
+}
+
+.cad-titleblock-logo-name-input {
+  width: 90%;
+  border: none;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.9);
+  outline: 1px dashed rgba(37, 99, 235, 0.35);
+  font: 10px sans-serif;
+  color: #000000;
+  text-align: center;
+  padding: 1px 3px;
+}
+
+.cad-titleblock-logo-name-input:focus {
+  outline-color: #2563eb;
+}
+
+.cad-titleblock-logo-upload {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  border-radius: 4px;
+  font: 600 10px sans-serif;
+  color: #2563eb;
+  text-align: center;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.cad-titleblock-logo-upload:hover {
+  background: #eff6ff;
+}
+
+.cad-titleblock-logo-upload input[type="file"] {
+  display: none;
+}
+
+.cad-titleblock-logo-preview {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.cad-titleblock-logo-remove {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  background: #ffffff;
+  color: #475569;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.2);
+  transition: all 0.15s ease;
+}
+
+.cad-titleblock-logo-remove:hover {
+  background: #fef2f2;
+  border-color: rgba(220, 38, 38, 0.4);
+  color: #dc2626;
+}
+
 @keyframes cadSpin {
   to {
     transform: rotate(360deg);
