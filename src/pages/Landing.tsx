@@ -178,6 +178,13 @@ export default function Landing() {
               Need to split an assembly into parts? Read the guide →
             </a>
 
+            <a
+              className={styles.guideLink}
+              href="/guides/step-file-to-2d-drawing"
+            >
+              Need a 2D drawing from a STEP file? Read the guide →
+            </a>
+
             <p className={styles.supported}>
               Supported: STEP · IGES · STL · OBJ · 3MF · BREP · GLB · DXF
             </p>
