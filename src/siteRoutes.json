@@ -4,5 +4,6 @@
   },
   { "path": "/", "changefreq": "weekly", "priority": 1.0 },
   { "path": "/viewer", "changefreq": "monthly", "priority": 0.8 },
-  { "path": "/guides/split-step-assembly", "changefreq": "monthly", "priority": 0.9 }
+  { "path": "/guides/split-step-assembly", "changefreq": "monthly", "priority": 0.9 },
+  { "path": "/guides/step-file-to-2d-drawing", "changefreq": "monthly", "priority": 0.9 }
 ]

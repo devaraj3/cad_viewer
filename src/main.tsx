@@ -3,6 +3,7 @@ import { ClientOnly, Head, ViteReactSSG } from "vite-react-ssg";
 import type { RouteRecord } from "vite-react-ssg";
 import Landing from "./pages/Landing";
 import SplitStepAssembly from "./pages/guides/SplitStepAssembly";
+import StepFileTo2dDrawing from "./pages/guides/StepFileTo2dDrawing";
 
 const App = lazy(() => import("./ui/App"));
 
@@ -50,6 +51,10 @@ function NotFound() {
 export const routes: RouteRecord[] = [
   { path: "/", element: <Landing /> },
   { path: "/guides/split-step-assembly", Component: SplitStepAssembly },
+  {
+    path: "/guides/step-file-to-2d-drawing",
+    Component: StepFileTo2dDrawing,
+  },
   {
     path: "/viewer",
     element: (
