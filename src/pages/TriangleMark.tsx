@@ -12,7 +12,7 @@ export default function TriangleMark({ size = 108 }: { size?: number }) {
       <path
         d={TRIANGLE_PATH}
         fill="none"
-        stroke="#3b82f6"
+        style={{ stroke: "var(--color-blue-500)" }}
         strokeWidth={6}
         strokeLinejoin="round"
         strokeLinecap="round"
@@ -22,7 +22,7 @@ export default function TriangleMark({ size = 108 }: { size?: number }) {
         y1={85}
         x2={82}
         y2={85}
-        stroke="#3b82f6"
+        style={{ stroke: "var(--color-blue-500)" }}
         strokeWidth={6}
         strokeLinecap="round"
       />

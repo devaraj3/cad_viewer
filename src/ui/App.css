@@ -1,21 +1,14 @@
 :root {
-  font-family:
-    "Inter",
-    "Segoe UI",
-    -apple-system,
-    BlinkMacSystemFont,
-    "Helvetica Neue",
-    Arial,
-    sans-serif;
-  --bg-base: #e2e8f0;
-  --bg-soft: #f8fafc;
+  font-family: var(--font-display);
+  --bg-base: var(--color-bg-alt);
+  --bg-soft: var(--color-bg);
   --bg-panel: rgba(255, 255, 255, 0.92);
   --surface-border: rgba(148, 163, 184, 0.35);
-  --text-primary: #0f172a;
-  --text-secondary: #475569;
-  --text-muted: #64748b;
-  --brand: #1d4ed8;
-  --brand-strong: #1e40af;
+  --text-primary: var(--color-ink);
+  --text-secondary: var(--color-ink-muted);
+  --text-muted: var(--color-ink-faint);
+  --brand: var(--color-blue-700);
+  --brand-strong: var(--color-blue-700);
   --brand-soft: rgba(59, 130, 246, 0.14);
   --shadow-soft: 0 18px 40px rgba(15, 23, 42, 0.08);
 }
@@ -403,8 +396,8 @@ a {
   height: 100%;
   display: grid;
   grid-template-rows: auto auto 1fr;
-  background: #f7f8fa;
-  color: #0f172a;
+  background: var(--color-bg);
+  color: var(--color-ink);
 }
 
 .cad-app__header {
@@ -428,7 +421,7 @@ a {
 .cad-app__title-wrap h1 {
   margin: 0;
   font-size: 20px;
-  font-weight: 700;
+  font-weight: 500;
 }
 
 .cad-app__actions {
@@ -445,15 +438,15 @@ a {
   border-radius: 8px;
   padding: 9px 14px;
   font-size: 13px;
-  font-weight: 600;
-  color: #ffffff;
+  font-weight: 500;
+  color: var(--color-white);
   border: none;
-  background: #2563eb;
+  background: var(--color-blue-600);
   cursor: pointer;
 }
 
 .cad-app__upload-btn:hover {
-  background: #1d4ed8;
+  background: var(--color-blue-700);
 }
 
 .cad-app__upload-btn input {
@@ -467,9 +460,9 @@ a {
   border-radius: 8px;
   border: none;
   background: transparent;
-  color: #64748b;
+  color: var(--color-ink-faint);
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
   padding: 9px 14px;
   cursor: pointer;
 }
@@ -477,7 +470,7 @@ a {
 .cad-app__actions button:hover:not(:disabled) {
   background: rgba(100, 116, 139, 0.08);
   border-radius: 8px;
-  color: #334155;
+  color: var(--color-ink-muted);
 }
 
 .cad-app__actions button:disabled {
@@ -493,12 +486,12 @@ a {
   padding: 10px 16px;
   border-bottom: 1px solid rgba(148, 163, 184, 0.25);
   font-size: 13px;
-  color: #334155;
+  color: var(--color-ink-muted);
 }
 
 .cad-app__error {
-  color: #b91c1c;
-  font-weight: 600;
+  color: var(--color-error-500);
+  font-weight: 500;
 }
 
 .cad-app__viewer {
@@ -509,6 +502,25 @@ a {
 .cad-viewer-host {
   width: 100%;
   height: 100%;
+}
+
+.cad-app__viewer-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  padding-bottom: 12%;
+  gap: 0.75rem;
+  pointer-events: none;
+}
+
+.cad-app__viewer-empty p {
+  margin: 0;
+  color: var(--color-ink-faint);
+  font-family: var(--font-display);
+  font-size: 0.9rem;
 }
 
 @media (max-width: 1080px) {

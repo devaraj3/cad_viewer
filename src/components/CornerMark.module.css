@@ -1,0 +1,51 @@
+.mark {
+  display: block;
+  overflow: visible;
+}
+
+.stroke {
+  fill: none;
+  stroke: var(--color-blue-500);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.drawIn .stroke {
+  /* Both strokes in the mark are constructed to the same length (14 user
+   * units); 16 is a safe rounded-up dash length that fully hides the
+   * stroke before the draw-in animation starts. */
+  stroke-dasharray: 16;
+  stroke-dashoffset: 16;
+  animation: corner-draw-in 1.1s ease-out forwards;
+  animation-delay: var(--corner-mark-delay, 0ms);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drawIn .stroke {
+    animation: none;
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes corner-draw-in {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* Hover "sharpen" state — applied by a parent card via .sharpen on hover/focus.
+ * Opacity/scale only, quick and precise, no bounce. */
+.mark {
+  opacity: 0.55;
+  transform: scale(0.94);
+  transition:
+    opacity 0.14s ease-out,
+    transform 0.14s ease-out;
+}
+
+:global(.cornerMarkSharpen):hover .mark,
+:global(.cornerMarkSharpen):focus-within .mark {
+  opacity: 1;
+  transform: scale(1);
+}

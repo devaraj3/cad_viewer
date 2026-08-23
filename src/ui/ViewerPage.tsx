@@ -1,7 +1,9 @@
 import React, { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { CAD_EXTS, CadViewer, MESH_ASSEMBLY_EXTS } from "../components/cad/cad-viewer";
+import { EmptyViewportIllustration } from "../pages/illustrations";
 import TriangleMark from "../pages/TriangleMark";
+import { VIEWER_BG_COLOR } from "../styles/tokenValues";
 
 const ACCEPTED_FORMATS = [
   ".step",
@@ -94,9 +96,15 @@ export default function ViewerPage() {
           showControls
           showViewCube
           showHomeButton
-          backgroundColor="#f1f5f9"
+          backgroundColor={VIEWER_BG_COLOR}
           className="cad-viewer-host"
         />
+        {!file && (
+          <div className="cad-app__viewer-empty" aria-hidden="true">
+            <EmptyViewportIllustration size={72} />
+            <p>Drop a CAD file to get started</p>
+          </div>
+        )}
       </main>
     </div>
   );

@@ -1,7 +1,14 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { Head } from "vite-react-ssg";
+import AccordionItem from "../../components/AccordionItem";
+import CornerMark from "../../components/CornerMark";
+import Reveal from "../../components/Reveal";
 import styles from "./StepFileTo2dDrawing.module.css";
+
+const MARK_STAGGER_MS = 130;
+const cardMarkDelay = (index: number, offset: number) =>
+  index * 90 + offset;
 
 function ExternalLink({
   href,
@@ -176,6 +183,12 @@ export default function StepFileTo2dDrawing() {
       <main className={styles.page}>
         <article className={styles.article}>
           <section className={styles.section}>
+            <CornerMark corner="top-left" animate delay={0} />
+            <CornerMark
+              corner="bottom-right"
+              animate
+              delay={MARK_STAGGER_MS}
+            />
             <Link to="/" className={styles.breadcrumb}>
               ← Back to CAD Viewer
             </Link>
@@ -214,7 +227,17 @@ export default function StepFileTo2dDrawing() {
           <section className={styles.section}>
             <h2 className={styles.sectionHeading}>How to do it</h2>
             <ol className={styles.stepList}>
-              <li className={styles.stepCard}>
+              <Reveal
+                as="li"
+                className={`${styles.stepCard} cornerMarkSharpen`}
+                delayMs={0}
+              >
+                <CornerMark corner="top-left" animate delay={cardMarkDelay(0, 0)} />
+                <CornerMark
+                  corner="bottom-right"
+                  animate
+                  delay={cardMarkDelay(0, MARK_STAGGER_MS)}
+                />
                 <span className={styles.stepNumber}>1</span>
                 <div className={styles.stepBody}>
                   <p className={styles.stepTitle}>{STEPS[0].title}</p>
@@ -222,9 +245,19 @@ export default function StepFileTo2dDrawing() {
                     {STEPS[0].description}
                   </p>
                 </div>
-              </li>
+              </Reveal>
 
-              <li className={styles.stepCard}>
+              <Reveal
+                as="li"
+                className={`${styles.stepCard} cornerMarkSharpen`}
+                delayMs={70}
+              >
+                <CornerMark corner="top-left" animate delay={cardMarkDelay(1, 0)} />
+                <CornerMark
+                  corner="bottom-right"
+                  animate
+                  delay={cardMarkDelay(1, MARK_STAGGER_MS)}
+                />
                 <span className={styles.stepNumber}>2</span>
                 <div className={styles.stepBody}>
                   <p className={styles.stepTitle}>{STEPS[1].title}</p>
@@ -232,10 +265,16 @@ export default function StepFileTo2dDrawing() {
                     {STEPS[1].description}
                   </p>
                 </div>
-              </li>
+              </Reveal>
             </ol>
 
-            <div className={styles.stepImageWrap}>
+            <Reveal as="div" className={styles.stepImageWrap}>
+              <CornerMark corner="top-left" animate delay={0} />
+              <CornerMark
+                corner="bottom-right"
+                animate
+                delay={MARK_STAGGER_MS}
+              />
               <img
                 src="/guides/step-file-to-2d-drawing-3d-view.png"
                 alt="CAD Viewer's 3D viewer showing an uploaded Pump Housing Face Plate STEP file with the Generate 2D Drawing button highlighted in the side panel"
@@ -244,19 +283,35 @@ export default function StepFileTo2dDrawing() {
                 loading="lazy"
                 style={{ width: "100%", height: "auto", borderRadius: "8px" }}
               />
-            </div>
+            </Reveal>
 
             <ol className={styles.stepList} start={3}>
-              <li className={styles.stepCard}>
+              <Reveal
+                as="li"
+                className={`${styles.stepCard} cornerMarkSharpen`}
+                delayMs={0}
+              >
+                <CornerMark corner="top-left" animate delay={cardMarkDelay(2, 0)} />
+                <CornerMark
+                  corner="bottom-right"
+                  animate
+                  delay={cardMarkDelay(2, MARK_STAGGER_MS)}
+                />
                 <span className={styles.stepNumber}>3</span>
                 <div className={styles.stepBody}>
                   <p className={styles.stepTitle}>{STEPS[2].title}</p>
                   {STEPS[2].description}
                 </div>
-              </li>
+              </Reveal>
             </ol>
 
-            <div className={styles.stepImageWrap}>
+            <Reveal as="div" className={styles.stepImageWrap}>
+              <CornerMark corner="top-left" animate delay={0} />
+              <CornerMark
+                corner="bottom-right"
+                animate
+                delay={MARK_STAGGER_MS}
+              />
               <img
                 src="/guides/step-file-to-2d-drawing-editor.png"
                 alt="CAD Viewer's 2D drawing editor showing a fully dimensioned Front, Top, and Right orthographic drawing with an isometric reference view, notes, and title block"
@@ -265,10 +320,20 @@ export default function StepFileTo2dDrawing() {
                 loading="lazy"
                 style={{ width: "100%", height: "auto", borderRadius: "8px" }}
               />
-            </div>
+            </Reveal>
 
             <ol className={styles.stepList} start={4}>
-              <li className={styles.stepCard}>
+              <Reveal
+                as="li"
+                className={`${styles.stepCard} cornerMarkSharpen`}
+                delayMs={0}
+              >
+                <CornerMark corner="top-left" animate delay={cardMarkDelay(3, 0)} />
+                <CornerMark
+                  corner="bottom-right"
+                  animate
+                  delay={cardMarkDelay(3, MARK_STAGGER_MS)}
+                />
                 <span className={styles.stepNumber}>4</span>
                 <div className={styles.stepBody}>
                   <p className={styles.stepTitle}>{STEPS[3].title}</p>
@@ -276,7 +341,7 @@ export default function StepFileTo2dDrawing() {
                     {STEPS[3].description}
                   </p>
                 </div>
-              </li>
+              </Reveal>
             </ol>
 
             <div className={styles.videoWrap}>
@@ -305,26 +370,43 @@ export default function StepFileTo2dDrawing() {
           <section className={styles.section}>
             <h2 className={styles.sectionHeading}>Frequently asked</h2>
             <div className={styles.faqGrid}>
-              {FAQS.map((faq) => (
-                <details className={styles.faqItem} key={faq.question}>
-                  <summary className={styles.faqQuestion}>
-                    {faq.question}
-                  </summary>
-                  <p className={styles.faqAnswer}>{faq.answer}</p>
-                </details>
+              {FAQS.map((faq, index) => (
+                <Reveal as="div" key={faq.question} delayMs={index * 70}>
+                  <AccordionItem
+                    question={faq.question}
+                    answer={faq.answer}
+                    className="cornerMarkSharpen"
+                  >
+                    <CornerMark
+                      corner="top-left"
+                      animate
+                      delay={cardMarkDelay(index, 0)}
+                    />
+                    <CornerMark
+                      corner="bottom-right"
+                      animate
+                      delay={cardMarkDelay(index, MARK_STAGGER_MS)}
+                    />
+                  </AccordionItem>
+                </Reveal>
               ))}
-            </div>
-          </section>
-
-          <section className={styles.section}>
-            <div className={styles.ctaRow}>
-              <a className={styles.cta} href="/viewer">
-                Try it now — upload your STEP file
-              </a>
             </div>
           </section>
         </article>
       </main>
+
+      <div className={styles.ctaBand}>
+        <div className={styles.ctaBandInner}>
+          <h2 className={styles.ctaBandHeading}>
+            Get a real drawing out of your model
+          </h2>
+          <div className={styles.ctaRow}>
+            <a className={styles.cta} href="/viewer">
+              Try it now — upload your STEP file
+            </a>
+          </div>
+        </div>
+      </div>
     </>
   );
 }

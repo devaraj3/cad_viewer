@@ -1,0 +1,89 @@
+.item {
+  position: relative;
+  background: var(--color-white);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 0 1.5rem;
+  transition: border-color 0.14s ease-out;
+}
+
+.item:hover,
+.item:focus-within {
+  border-color: var(--color-blue-500);
+}
+
+.trigger {
+  width: 100%;
+  margin: 0;
+  padding: 1rem 0;
+  background: none;
+  border: none;
+  color: var(--color-ink);
+  font-family: var(--font-display);
+  font-size: 1rem;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.trigger:focus-visible {
+  outline: 2px solid var(--color-blue-500);
+  outline-offset: 2px;
+}
+
+.chevron {
+  flex: none;
+  color: var(--color-blue-500);
+  transition: transform 0.2s ease;
+}
+
+.chevronOpen {
+  transform: rotate(180deg);
+}
+
+.plusIcon {
+  flex: none;
+  display: inline-block;
+  color: var(--color-blue-500);
+  font-size: 1.2rem;
+  line-height: 1;
+  transition: transform 0.2s ease;
+}
+
+.plusIconOpen {
+  transform: rotate(45deg);
+}
+
+.contentWrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.2s ease;
+}
+
+.contentOpen {
+  grid-template-rows: 1fr;
+}
+
+.contentInner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.answer {
+  margin: 0 0 1.25rem;
+  color: var(--color-ink-muted);
+  font-size: 0.95rem;
+  line-height: 1.65;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .contentWrap,
+  .chevron,
+  .plusIcon {
+    transition: none;
+  }
+}

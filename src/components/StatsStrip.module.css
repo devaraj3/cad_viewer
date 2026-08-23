@@ -1,0 +1,53 @@
+.strip {
+  width: min(760px, 100%);
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  gap: clamp(1rem, 3vw, 1.5rem);
+  background: var(--color-white);
+  border: 1px solid var(--color-border);
+  border-radius: 16px;
+  padding: clamp(1.5rem, 3vw, 2rem) clamp(1rem, 4vw, 2.5rem);
+  box-shadow: 0 20px 45px -28px rgba(15, 23, 42, 0.3);
+}
+
+.divider {
+  align-self: stretch;
+  width: 1px;
+  min-height: 2.25rem;
+  background: var(--color-border);
+}
+
+.stat {
+  text-align: center;
+}
+
+.value {
+  display: block;
+  color: var(--color-ink);
+  font-family: var(--font-mono);
+  font-size: clamp(1.8rem, 3vw, 2.4rem);
+  font-weight: 500;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.label {
+  display: block;
+  margin-top: 0.3rem;
+  color: var(--color-ink-muted);
+  font-size: 0.85rem;
+}
+
+@media (max-width: 860px) {
+  .strip {
+    flex-wrap: wrap;
+  }
+
+  /* Dividers only make sense between items on the same row; once the
+   * strip wraps, an orphaned divider would float before whichever stat
+   * dropped to its own line. */
+  .divider {
+    display: none;
+  }
+}
