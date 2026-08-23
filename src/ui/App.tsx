@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useState, startTransition } from "reac
 import { Link } from "react-router-dom";
 import { consumePendingFile } from "../fileStore";
 import { CAD_EXTS, CadViewer, MESH_ASSEMBLY_EXTS } from "../components/cad/cad-viewer";
+import { EmptyViewportIllustration } from "../pages/illustrations";
 import TriangleMark from "../pages/TriangleMark";
+import { VIEWER_BG_COLOR } from "../styles/tokenValues";
 import "./App.css";
 
 const ACCEPTED_FORMATS = [
@@ -102,7 +104,7 @@ export default function App() {
       onDrop={handleViewerDrop}
       style={{
         colorScheme: "light",
-        outline: viewerDragging ? "2px solid #3b82f6" : "none",
+        outline: viewerDragging ? "2px solid var(--color-blue-500)" : "none",
         outlineOffset: "-2px",
         transition: "outline 0.12s ease",
       }}
@@ -141,9 +143,15 @@ export default function App() {
           showControls
           showViewCube
           showHomeButton
-          backgroundColor="#f0f2f5"
+          backgroundColor={VIEWER_BG_COLOR}
           className="cad-viewer-host"
         />
+        {!file && (
+          <div className="cad-app__viewer-empty" aria-hidden="true">
+            <EmptyViewportIllustration size={72} />
+            <p>Drop a CAD file to get started</p>
+          </div>
+        )}
       </main>
 
       {viewerDragging && (
@@ -167,10 +175,10 @@ export default function App() {
               border: "1px solid rgba(59,130,246,0.4)",
               borderRadius: "10px",
               padding: "0.7rem 1.6rem",
-              color: "#3b82f6",
+              color: "var(--color-blue-500)",
               fontSize: "1rem",
-              fontWeight: 600,
-              fontFamily: "monospace",
+              fontWeight: 500,
+              fontFamily: "var(--font-mono)",
               letterSpacing: "0.04em",
             }}
           >

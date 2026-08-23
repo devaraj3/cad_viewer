@@ -27,7 +27,7 @@
   background: rgba(255, 255, 255, 0.9);
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.1);
   backdrop-filter: blur(10px);
-  color: #475569;
+  color: var(--color-ink-muted);
   font-size: 13px;
 }
 
@@ -66,17 +66,17 @@
 
 .cad-label {
   font-size: 12px;
-  font-weight: 600;
-  color: #64748b;
+  font-weight: 500;
+  color: var(--color-ink-faint);
 }
 
 .cad-btn {
   border-radius: 8px;
   border: 1px solid rgba(148, 163, 184, 0.6);
-  background: #f8fafc;
-  color: #475569;
+  background: var(--color-bg);
+  color: var(--color-ink-muted);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
   line-height: 1.25;
   padding: 7px 10px;
   cursor: pointer;
@@ -85,8 +85,8 @@
 
 .cad-btn:hover {
   border-color: rgba(59, 130, 246, 0.4);
-  background: #ffffff;
-  color: #1d4ed8;
+  background: var(--color-white);
+  color: var(--color-blue-700);
 }
 
 .cad-btn--wide {
@@ -104,14 +104,14 @@
 
 .cad-btn--neutral {
   border-color: rgba(148, 163, 184, 0.45);
-  background: #f8fafc;
-  color: #475569;
+  background: var(--color-bg);
+  color: var(--color-ink-muted);
 }
 
 .cad-btn--active {
-  border-color: #2563eb;
-  background: #2563eb;
-  color: #ffffff;
+  border-color: var(--color-blue-600);
+  background: var(--color-blue-600);
+  color: var(--color-white);
   box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
 }
 
@@ -125,10 +125,10 @@
 .cad-input {
   border-radius: 7px;
   border: 1px solid rgba(148, 163, 184, 0.55);
-  background: #f8fafc;
-  color: #334155;
+  background: var(--color-bg);
+  color: var(--color-ink-muted);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
   padding: 5px 8px;
   outline: none;
 }
@@ -137,7 +137,7 @@
 .cad-input:hover,
 .cad-select:focus,
 .cad-input:focus {
-  border-color: #60a5fa;
+  border-color: var(--color-blue-500);
 }
 
 .cad-input {
@@ -151,14 +151,14 @@
   height: 20px;
   border-radius: 999px;
   border: 1px solid transparent;
-  background: #cbd5e1;
+  background: var(--color-border);
   padding: 0;
   cursor: pointer;
   transition: background-color 0.2s ease;
 }
 
 .cad-toggle--on {
-  background: #2563eb;
+  background: var(--color-blue-600);
 }
 
 .cad-toggle--disabled {
@@ -173,7 +173,7 @@
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background: #ffffff;
+  background: var(--color-white);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
   transition: transform 0.2s ease;
 }
@@ -203,7 +203,7 @@
 }
 
 .cad-color-swatch--active {
-  box-shadow: 0 0 0 2px #ffffff, 0 0 0 4px #3b82f6;
+  box-shadow: 0 0 0 2px var(--color-white), 0 0 0 4px var(--color-blue-500);
 }
 
 .cad-range-wrap {
@@ -212,7 +212,7 @@
 
 .cad-range {
   width: 100%;
-  accent-color: #2563eb;
+  accent-color: var(--color-blue-600);
 }
 
 .cad-info-box {
@@ -225,36 +225,36 @@
 .cad-info-label {
   margin-bottom: 3px;
   font-size: 10px;
-  font-weight: 700;
+  font-weight: 500;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #2563eb;
+  color: var(--color-blue-600);
 }
 
 .cad-info-value {
-  font-family: "SF Mono", "Menlo", "Consolas", monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
-  font-weight: 700;
-  color: #1d4ed8;
+  font-weight: 500;
+  color: var(--color-blue-700);
 }
 
 .cad-status {
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .cad-status--info {
-  color: #2563eb;
+  color: var(--color-blue-600);
 }
 
 .cad-status--error {
-  color: #e11d48;
+  color: var(--color-error-500);
 }
 
 .cad-debug {
   font-size: 10px;
-  color: #64748b;
-  font-family: "SF Mono", "Menlo", "Consolas", monospace;
+  color: var(--color-ink-faint);
+  font-family: var(--font-mono);
 }
 
 .cad-dims-card {
@@ -267,10 +267,10 @@
 .cad-dims-title {
   margin-bottom: 6px;
   font-size: 10px;
-  font-weight: 700;
+  font-weight: 500;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #94a3b8;
+  color: var(--color-ink-faint);
 }
 
 .cad-dims-grid {
@@ -286,14 +286,14 @@
 
 .cad-dims-axis-label {
   font-size: 10px;
-  color: #94a3b8;
+  color: var(--color-ink-faint);
 }
 
 .cad-dims-axis-value {
-  font-family: "SF Mono", "Menlo", "Consolas", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
-  font-weight: 700;
-  color: #334155;
+  font-weight: 500;
+  color: var(--color-ink-muted);
 }
 
 .cad-dims-unit {
@@ -301,8 +301,8 @@
   font-size: 10px;
   text-transform: uppercase;
   text-align: right;
-  color: #94a3b8;
-  font-weight: 600;
+  color: var(--color-ink-faint);
+  font-weight: 500;
 }
 
 .cad-parts-panel {
@@ -322,8 +322,8 @@
 
 .cad-parts-title {
   font-size: 12px;
-  font-weight: 700;
-  color: #0f172a;
+  font-weight: 500;
+  color: var(--color-ink);
 }
 
 .cad-parts-list {
@@ -351,8 +351,8 @@
 
 .cad-compare-title {
   font-size: 12px;
-  font-weight: 700;
-  color: #0f172a;
+  font-weight: 500;
+  color: var(--color-ink);
 }
 
 .cad-compare-list {
@@ -372,10 +372,10 @@
 .cad-part-row {
   border-radius: 6px;
   border: 1px solid rgba(148, 163, 184, 0.45);
-  background: #f8fafc;
-  color: #475569;
+  background: var(--color-bg);
+  color: var(--color-ink-muted);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
   padding: 6px 8px;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -383,13 +383,13 @@
 
 .cad-part-row:hover {
   border-color: rgba(59, 130, 246, 0.45);
-  background: #ffffff;
+  background: var(--color-white);
 }
 
 .cad-part-row--active {
-  border-color: #2563eb;
-  background: #2563eb;
-  color: #ffffff;
+  border-color: var(--color-blue-600);
+  background: var(--color-blue-600);
+  color: var(--color-white);
   box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
 }
 
@@ -414,12 +414,12 @@
 }
 
 .cad-icon-btn--enabled {
-  color: #334155;
+  color: var(--color-ink-muted);
   cursor: pointer;
 }
 
 .cad-icon-btn--enabled:hover {
-  color: #1d4ed8;
+  color: var(--color-blue-700);
   border-color: rgba(59, 130, 246, 0.45);
 }
 
@@ -442,8 +442,8 @@
 .cad-part-message {
   border-radius: 6px;
   border: 1px solid rgba(148, 163, 184, 0.4);
-  background: #f8fafc;
-  color: #475569;
+  background: var(--color-bg);
+  color: var(--color-ink-muted);
   font-size: 11px;
   padding: 6px 8px;
 }
@@ -451,10 +451,10 @@
 .cad-part-selected {
   border-radius: 6px;
   border: 1px solid rgba(147, 197, 253, 0.8);
-  background: #eff6ff;
-  color: #1d4ed8;
+  background: var(--color-blue-50);
+  color: var(--color-blue-700);
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 500;
   padding: 6px 8px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -503,7 +503,7 @@
   z-index: 1;
   width: 40px;
   height: 40px;
-  color: #2563eb;
+  color: var(--color-blue-600);
   animation: cadSpin 0.9s linear infinite;
 }
 
@@ -516,14 +516,14 @@
 
 .cad-loading-title {
   font-size: 14px;
-  font-weight: 700;
-  color: #0f172a;
+  font-weight: 500;
+  color: var(--color-ink);
 }
 
 .cad-loading-subtitle {
   font-size: 11px;
   font-weight: 500;
-  color: #64748b;
+  color: var(--color-ink-faint);
 }
 
 .cad-error-overlay {
@@ -547,7 +547,7 @@
   text-align: center;
   border-radius: 16px;
   border: 1px solid rgba(251, 113, 133, 0.35);
-  background: #ffffff;
+  background: var(--color-white);
   box-shadow: 0 24px 40px rgba(15, 23, 42, 0.22);
   padding: 24px;
 }
@@ -556,7 +556,7 @@
   width: 48px;
   height: 48px;
   border-radius: 999px;
-  background: #fef2f2;
+  background: var(--color-error-50);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -575,32 +575,32 @@
 .cad-error-title {
   margin: 0;
   font-size: 14px;
-  font-weight: 700;
-  color: #0f172a;
+  font-weight: 500;
+  color: var(--color-ink);
 }
 
 .cad-error-message {
   margin: 0;
   font-size: 12px;
   line-height: 1.45;
-  color: #64748b;
+  color: var(--color-ink-faint);
 }
 
 .cad-error-retry {
   margin-top: 2px;
   border-radius: 8px;
-  border: 1px solid #0f172a;
-  background: #0f172a;
-  color: #ffffff;
+  border: 1px solid var(--color-ink);
+  background: var(--color-ink);
+  color: var(--color-white);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 500;
   padding: 8px 14px;
   cursor: pointer;
 }
 
 .cad-error-retry:hover {
-  background: #1e293b;
-  border-color: #1e293b;
+  background: var(--color-ink);
+  border-color: var(--color-ink);
 }
 
 .cad-sheet-modal-overlay {
@@ -653,7 +653,7 @@
   padding: 56px 20px 20px;
   border-radius: 16px;
   border: 1px solid rgba(148, 163, 184, 0.35);
-  background: #ffffff;
+  background: var(--color-white);
   box-shadow: 0 30px 60px rgba(15, 23, 42, 0.35);
 }
 
@@ -669,16 +669,16 @@
   height: 32px;
   border-radius: 999px;
   border: 1px solid rgba(148, 163, 184, 0.5);
-  background: #f8fafc;
-  color: #475569;
+  background: var(--color-bg);
+  color: var(--color-ink-muted);
   cursor: pointer;
   transition: all 0.15s ease;
 }
 
 .cad-sheet-modal-close:hover {
-  background: #ffffff;
+  background: var(--color-white);
   border-color: rgba(59, 130, 246, 0.4);
-  color: #1d4ed8;
+  color: var(--color-blue-700);
 }
 
 .cad-sheet-modal-canvas-wrap {
@@ -702,8 +702,8 @@
      Adjust Drawing/Annotations click-drag handlers on the canvas itself. */
   overflow: auto;
   border-radius: 10px;
-  border: 1px solid #d7dce3;
-  background: #f0f2f5;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-alt);
 }
 
 /* max-width/max-height: 100% here are only the pre-measurement FALLBACK
@@ -745,23 +745,23 @@
   height: 26px;
   border-radius: 999px;
   border: 1px solid rgba(220, 38, 38, 0.4);
-  background: #fef2f2;
-  color: #dc2626;
+  background: var(--color-error-50);
+  color: var(--color-error-500);
   cursor: pointer;
   box-shadow: 0 2px 6px rgba(15, 23, 42, 0.2);
   transition: all 0.15s ease;
 }
 
 .cad-sheet-delete-icon:hover {
-  background: #dc2626;
-  border-color: #dc2626;
-  color: #ffffff;
+  background: var(--color-error-500);
+  border-color: var(--color-error-500);
+  color: var(--color-white);
 }
 
 .cad-sheet-modal-hint {
   text-align: center;
   font-size: 12.5px;
-  color: #64748b;
+  color: var(--color-ink-faint);
   padding: 2px 0;
 }
 
@@ -775,21 +775,21 @@
 
 .cad-sheet-scale-busy {
   font-size: 11.5px;
-  font-weight: 600;
-  color: #64748b;
+  font-weight: 500;
+  color: var(--color-ink-faint);
 }
 
 /* Error state (task 4) - a visible red border on the Scale control exactly
    while content crosses the frame margin at the current scale/position, so
    the error is visible at the control itself, not just in the banner below. */
 .cad-select--error {
-  border-color: #dc2626 !important;
+  border-color: var(--color-error-500) !important;
   box-shadow: 0 0 0 1px rgba(220, 38, 38, 0.25);
 }
 
 .cad-select--error:hover,
 .cad-select--error:focus {
-  border-color: #dc2626 !important;
+  border-color: var(--color-error-500) !important;
 }
 
 /* Floating toast (replaces the old in-flow scale-change banner) - absolutely
@@ -807,7 +807,7 @@
   z-index: 5;
   text-align: center;
   font-size: 12.5px;
-  color: #2563eb;
+  color: var(--color-blue-600);
   background: rgba(219, 234, 254, 0.95);
   border: 1px solid rgba(96, 165, 250, 0.45);
   border-radius: 8px;
@@ -881,7 +881,7 @@
   border: 1px solid rgba(148, 163, 184, 0.5);
   border-radius: 8px;
   padding: 4px 6px;
-  background: #f8fafc;
+  background: var(--color-bg);
 }
 
 .cad-sheet-zoom-btn {
@@ -892,8 +892,8 @@
   height: 24px;
   border-radius: 6px;
   border: 1px solid rgba(148, 163, 184, 0.5);
-  background: #ffffff;
-  color: #334155;
+  background: var(--color-white);
+  color: var(--color-ink-muted);
   font-size: 15px;
   line-height: 1;
   cursor: pointer;
@@ -901,9 +901,9 @@
 }
 
 .cad-sheet-zoom-btn:hover:not(:disabled) {
-  background: #eff6ff;
+  background: var(--color-blue-50);
   border-color: rgba(59, 130, 246, 0.4);
-  color: #1d4ed8;
+  color: var(--color-blue-700);
 }
 
 .cad-sheet-zoom-btn:disabled {
@@ -917,8 +917,8 @@
   border: none;
   background: transparent;
   font-size: 12.5px;
-  font-weight: 600;
-  color: #1e293b;
+  font-weight: 500;
+  color: var(--color-ink);
 }
 
 .cad-sheet-zoom-input:focus {
@@ -927,7 +927,7 @@
 
 .cad-sheet-zoom-suffix {
   font-size: 12.5px;
-  color: #64748b;
+  color: var(--color-ink-faint);
   margin-right: 2px;
 }
 
@@ -938,8 +938,8 @@
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  font-weight: 600;
-  color: #334155;
+  font-weight: 500;
+  color: var(--color-ink-muted);
   cursor: pointer;
 }
 
@@ -958,17 +958,17 @@
   height: 26px;
   border-radius: 999px;
   border: 1px solid rgba(37, 99, 235, 0.4);
-  background: #eff6ff;
-  color: #1d4ed8;
+  background: var(--color-blue-50);
+  color: var(--color-blue-700);
   cursor: pointer;
   box-shadow: 0 2px 6px rgba(15, 23, 42, 0.2);
   transition: all 0.15s ease;
 }
 
 .cad-sheet-notes-pencil:hover {
-  background: #2563eb;
-  border-color: #2563eb;
-  color: #ffffff;
+  background: var(--color-blue-600);
+  border-color: var(--color-blue-600);
+  color: var(--color-white);
 }
 
 /* Direct in-document notes editing - one borderless input per point
@@ -985,13 +985,13 @@
   border-bottom: 1.5px solid transparent;
   background: rgba(255, 255, 255, 0.92);
   font: 15px sans-serif;
-  color: #000000;
+  color: #000000; /* intentionally pure black: matches the untouched drawing-sheet text it overlays, not brand ink */
   padding: 0 2px;
   outline: none;
 }
 
 .cad-sheet-notes-line-input:focus {
-  border-bottom-color: #2563eb;
+  border-bottom-color: var(--color-blue-600);
 }
 
 /* Static stand-in text for every title block cell NOT actively being edited
@@ -1008,7 +1008,7 @@
   overflow: hidden;
   padding: 0 8px;
   font: 11px sans-serif;
-  color: #000000;
+  color: #000000; /* intentionally pure black: matches the untouched drawing-sheet text it overlays, not brand ink */
   white-space: nowrap;
   text-overflow: ellipsis;
   pointer-events: none;
@@ -1031,7 +1031,7 @@
   background: rgba(255, 255, 255, 0.92);
   outline: 1.5px dashed transparent;
   font: 11px sans-serif;
-  color: #000000;
+  color: #000000; /* intentionally pure black: matches the untouched drawing-sheet text it overlays, not brand ink */
   padding: 0 4px;
 }
 
@@ -1040,11 +1040,11 @@
 }
 
 .cad-titleblock-cell-input:focus {
-  outline-color: #2563eb;
+  outline-color: var(--color-blue-600);
 }
 
 .cad-titleblock-cell-input::placeholder {
-  color: #94a3b8;
+  color: var(--color-ink-faint);
 }
 
 /* Contextual toolbar (task 2: SELECT/INSERT/DELETE/MERGE/SPLIT), anchored
@@ -1062,7 +1062,7 @@
   padding: 4px;
   border-radius: 8px;
   border: 1px solid rgba(148, 163, 184, 0.5);
-  background: #ffffff;
+  background: var(--color-white);
   box-shadow: 0 4px 14px rgba(15, 23, 42, 0.25);
 }
 
@@ -1075,14 +1075,14 @@
   border-radius: 5px;
   border: none;
   background: transparent;
-  color: #334155;
+  color: var(--color-ink-muted);
   cursor: pointer;
   transition: all 0.15s ease;
 }
 
 .cad-titleblock-toolbar button:hover:not(:disabled) {
-  background: #eff6ff;
-  color: #1d4ed8;
+  background: var(--color-blue-50);
+  color: var(--color-blue-700);
 }
 
 .cad-titleblock-toolbar button:disabled {
@@ -1091,8 +1091,8 @@
 }
 
 .cad-titleblock-toolbar button.cad-titleblock-toolbar-danger:hover:not(:disabled) {
-  background: #fef2f2;
-  color: #dc2626;
+  background: var(--color-error-50);
+  color: var(--color-error-500);
 }
 
 .cad-titleblock-toolbar-divider {
@@ -1139,7 +1139,7 @@
   width: 22px;
   height: 22px;
   border-radius: 999px;
-  color: #ffffff;
+  color: var(--color-white);
   font: 600 11px sans-serif;
   flex-shrink: 0;
 }
@@ -1151,13 +1151,13 @@
   background: rgba(255, 255, 255, 0.9);
   outline: 1px dashed rgba(37, 99, 235, 0.35);
   font: 10px sans-serif;
-  color: #000000;
+  color: #000000; /* intentionally pure black: matches the untouched drawing-sheet text it overlays, not brand ink */
   text-align: center;
   padding: 1px 3px;
 }
 
 .cad-titleblock-logo-name-input:focus {
-  outline-color: #2563eb;
+  outline-color: var(--color-blue-600);
 }
 
 .cad-titleblock-logo-upload {
@@ -1167,14 +1167,14 @@
   width: 100%;
   border-radius: 4px;
   font: 600 10px sans-serif;
-  color: #2563eb;
+  color: var(--color-blue-600);
   text-align: center;
   cursor: pointer;
   transition: background 0.15s ease;
 }
 
 .cad-titleblock-logo-upload:hover {
-  background: #eff6ff;
+  background: var(--color-blue-50);
 }
 
 .cad-titleblock-logo-upload input[type="file"] {
@@ -1198,17 +1198,17 @@
   height: 20px;
   border-radius: 999px;
   border: 1px solid rgba(148, 163, 184, 0.5);
-  background: #ffffff;
-  color: #475569;
+  background: var(--color-white);
+  color: var(--color-ink-muted);
   cursor: pointer;
   box-shadow: 0 2px 6px rgba(15, 23, 42, 0.2);
   transition: all 0.15s ease;
 }
 
 .cad-titleblock-logo-remove:hover {
-  background: #fef2f2;
+  background: var(--color-error-50);
   border-color: rgba(220, 38, 38, 0.4);
-  color: #dc2626;
+  color: var(--color-error-500);
 }
 
 @keyframes cadSpin {

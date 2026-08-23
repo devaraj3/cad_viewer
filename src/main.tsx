@@ -1,10 +1,12 @@
 import { lazy, Suspense } from "react";
 import { ClientOnly, Head, ViteReactSSG } from "vite-react-ssg";
 import type { RouteRecord } from "vite-react-ssg";
+import "./styles/design-tokens.css";
 import About from "./pages/About";
 import Landing from "./pages/Landing";
 import SplitStepAssembly from "./pages/guides/SplitStepAssembly";
 import StepFileTo2dDrawing from "./pages/guides/StepFileTo2dDrawing";
+import MarketingLayout from "./ui/MarketingLayout";
 
 const App = lazy(() => import("./ui/App"));
 
@@ -50,12 +52,18 @@ function NotFound() {
 }
 
 export const routes: RouteRecord[] = [
-  { path: "/", element: <Landing /> },
-  { path: "/about", Component: About },
-  { path: "/guides/split-step-assembly", Component: SplitStepAssembly },
   {
-    path: "/guides/step-file-to-2d-drawing",
-    Component: StepFileTo2dDrawing,
+    path: "/",
+    Component: MarketingLayout,
+    children: [
+      { index: true, Component: Landing },
+      { path: "about", Component: About },
+      { path: "guides/split-step-assembly", Component: SplitStepAssembly },
+      {
+        path: "guides/step-file-to-2d-drawing",
+        Component: StepFileTo2dDrawing,
+      },
+    ],
   },
   {
     path: "/viewer",

@@ -4826,7 +4826,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
           height: "100%",
           minHeight: "200px",
           overflow: "hidden",
-          backgroundColor: "#ffffff",
+          backgroundColor: "var(--color-white)",
           ...style,
         }}
       >
@@ -4861,7 +4861,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
               boxShadow: "0 6px 18px rgba(120, 53, 15, 0.14)",
               padding: "8px 12px",
               fontSize: "12px",
-              fontWeight: 600,
+              fontWeight: 500,
               lineHeight: 1.35,
               color: "#7c2d12",
               pointerEvents: "none",
@@ -4899,8 +4899,8 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
               <div
                 style={{
                   fontSize: "12px",
-                  fontWeight: 700,
-                  color: "#0f172a",
+                  fontWeight: 500,
+                  color: "var(--color-ink)",
                   letterSpacing: "0.02em",
                 }}
               >
@@ -4923,10 +4923,10 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                     style={{
                       borderRadius: "8px",
                       border: "1px solid rgba(148, 163, 184, 0.6)",
-                      background: showDimensions ? "#0f172a" : "#f8fafc",
-                      color: showDimensions ? "#f8fafc" : "#0f172a",
+                      background: showDimensions ? "var(--color-ink)" : "var(--color-bg)",
+                      color: showDimensions ? "var(--color-bg)" : "var(--color-ink)",
                       fontSize: "11px",
-                      fontWeight: 700,
+                      fontWeight: 500,
                       padding: "5px 8px",
                       cursor: "pointer",
                     }}
@@ -4941,10 +4941,10 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                     style={{
                       borderRadius: "8px",
                       border: "1px solid rgba(148, 163, 184, 0.6)",
-                      background: "#f8fafc",
-                      color: "#0f172a",
+                      background: "var(--color-bg)",
+                      color: "var(--color-ink)",
                       fontSize: "11px",
-                      fontWeight: 700,
+                      fontWeight: 500,
                       padding: "5px 8px",
                       cursor: "pointer",
                     }}
@@ -4959,10 +4959,10 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                     style={{
                       borderRadius: "8px",
                       border: "1px solid rgba(148, 163, 184, 0.6)",
-                      background: "#f8fafc",
-                      color: "#0f172a",
+                      background: "var(--color-bg)",
+                      color: "var(--color-ink)",
                       fontSize: "11px",
-                      fontWeight: 700,
+                      fontWeight: 500,
                       padding: "5px 8px",
                       cursor: "pointer",
                     }}
@@ -5039,10 +5039,10 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                 padding: "5px 10px",
                 borderRadius: "7px",
                 border: "1px solid rgba(148, 163, 184, 0.5)",
-                background: "#f8fafc",
-                color: "#0f172a",
+                background: "var(--color-bg)",
+                color: "var(--color-ink)",
                 fontSize: "12px",
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: "pointer",
               }}
             >
@@ -5057,10 +5057,10 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                 padding: "5px 10px",
                 borderRadius: "7px",
                 border: "1px solid rgba(148, 163, 184, 0.5)",
-                background: "#f8fafc",
-                color: "#0f172a",
+                background: "var(--color-bg)",
+                color: "var(--color-ink)",
                 fontSize: "12px",
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: "pointer",
               }}
             >
@@ -5075,10 +5075,10 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                 padding: "5px 10px",
                 borderRadius: "7px",
                 border: "1px solid rgba(148, 163, 184, 0.5)",
-                background: "#f8fafc",
-                color: "#0f172a",
+                background: "var(--color-bg)",
+                color: "var(--color-ink)",
                 fontSize: "12px",
-                fontWeight: 600,
+                fontWeight: 500,
                 cursor: "pointer",
               }}
             >
@@ -5775,6 +5775,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
+              transition={{ duration: 0.15 }}
               className="cad-sheet-modal-overlay"
               onClick={() => setDrawingSheetModalOpen(false)}
             >
@@ -5782,6 +5783,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                 initial={{ opacity: 0, scale: 0.96 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.96 }}
+                transition={{ duration: 0.15 }}
                 className="cad-sheet-modal"
                 onClick={(e) => e.stopPropagation()}
               >

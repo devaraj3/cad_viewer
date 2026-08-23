@@ -1,0 +1,78 @@
+/* Design tokens — single source of truth for color and type across the
+ * site. Every color/font reference sitewide should resolve through these
+ * custom properties rather than a hardcoded literal. Mirrors the
+ * "one canonical file" pattern used by drafting-rules.ts for the drawing
+ * sheet — this is the equivalent file for the brand/UI layer, and is a
+ * completely separate system from that one (see drafting-rules.ts).
+ */
+
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("/fonts/ibm-plex-sans-400.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("/fonts/ibm-plex-sans-500.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/fonts/ibm-plex-mono-400.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/fonts/ibm-plex-mono-500.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  /* Brand blue ramp */
+  --color-blue-50: #eff6ff;
+  --color-blue-100: #dbeafe;
+  --color-blue-500: #3b82f6;
+  --color-blue-600: #2563eb;
+  --color-blue-700: #1d4ed8;
+
+  /* The one "blueprint" accent surface — used sparingly, one per page */
+  --color-navy-900: #0f2557;
+
+  /* Secondary accent — export/download actions only, at most one per page */
+  --color-amber-50: #fef3c7;
+  --color-amber-500: #f59e0b;
+  --color-amber-700: #b45309;
+
+  /* Ink / neutral ramp — consolidates the three near-duplicate grayscales
+   * that previously existed independently in Landing.module.css, the
+   * guide/About pages, and src/ui/App.css. */
+  --color-ink: #0f172a;
+  --color-ink-muted: #475569;
+  --color-ink-faint: #64748b;
+  --color-border: #d9dee5;
+  --color-bg: #f7f8fa;
+  --color-bg-alt: #eef1f5;
+  --color-white: #ffffff;
+
+  /* Destructive/error — not part of the brand ramp, kept separate on
+   * purpose so error states never get confused with brand blue/navy/amber. */
+  --color-error-500: #dc2626;
+  --color-error-50: #fef2f2;
+
+  /* Type */
+  --font-display: "IBM Plex Sans", "Segoe UI", -apple-system, BlinkMacSystemFont,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", "SFMono-Regular", Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+}

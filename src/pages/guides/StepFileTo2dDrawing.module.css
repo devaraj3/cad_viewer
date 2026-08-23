@@ -2,6 +2,7 @@
   overflow-y: auto;
   height: auto;
   min-height: 100vh;
+  font-family: var(--font-display);
 }
 
 :global(body.guide-page #root) {
@@ -11,11 +12,11 @@
 
 .page {
   min-height: 100vh;
-  background: #fafafa;
-  color: #1a1a1a;
+  background: var(--color-bg);
+  color: var(--color-ink);
   display: flex;
   justify-content: center;
-  padding: 4rem 1.5rem 6rem;
+  padding: 4rem 1.5rem 0;
 }
 
 .article {
@@ -23,9 +24,11 @@
   display: flex;
   flex-direction: column;
   gap: clamp(3rem, 5vw, 4rem);
+  padding-bottom: clamp(3rem, 5vw, 4rem);
 }
 
 .section {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 1.25rem;
@@ -34,21 +37,24 @@
 .breadcrumb {
   display: inline-flex;
   align-self: flex-start;
-  color: #4b5563;
+  color: var(--color-ink-muted);
   font-size: 0.9rem;
   text-decoration: none;
 }
 
 .breadcrumb:hover {
-  color: #3b82f6;
+  color: var(--color-blue-500);
+}
+
+.breadcrumb:focus-visible {
+  outline: 2px solid var(--color-blue-500);
+  outline-offset: 2px;
 }
 
 .eyebrow {
   margin: 0;
-  color: #6b7280;
-  font-family:
-    "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono",
-    "Courier New", monospace;
+  color: var(--color-ink-faint);
+  font-family: var(--font-mono);
   font-size: 0.75rem;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -56,36 +62,36 @@
 
 .headline {
   margin: 0.5rem 0 0;
-  color: #1a1a1a;
+  color: var(--color-ink);
   font-size: 2.25rem;
   line-height: 1.2;
-  font-weight: 700;
+  font-weight: 500;
 }
 
 .intro {
   margin: 0;
-  color: #4b5563;
+  color: var(--color-ink-muted);
   font-size: 1.1rem;
   line-height: 1.7;
 }
 
 .lede {
   margin: 0;
-  color: #1f2937;
+  color: var(--color-ink);
   font-size: 1.1rem;
   line-height: 1.7;
 }
 
 .sectionHeading {
   margin: 0;
-  color: #1a1a1a;
+  color: var(--color-ink);
   font-size: 1.5rem;
-  font-weight: 700;
+  font-weight: 500;
 }
 
 .paragraph {
   margin: 0;
-  color: #4b5563;
+  color: var(--color-ink-muted);
   font-size: 1.05rem;
   line-height: 1.7;
 }
@@ -93,7 +99,7 @@
 .list {
   margin: 0;
   padding-left: 1.25rem;
-  color: #4b5563;
+  color: var(--color-ink-muted);
   font-size: 1.05rem;
   line-height: 1.7;
   display: flex;
@@ -102,13 +108,18 @@
 }
 
 .externalLink {
-  color: #2563eb;
+  color: var(--color-blue-600);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 
 .externalLink:hover {
-  color: #1d4ed8;
+  color: var(--color-blue-700);
+}
+
+.externalLink:focus-visible {
+  outline: 2px solid var(--color-blue-500);
+  outline-offset: 2px;
 }
 
 /* Numbered step cards */
@@ -122,13 +133,20 @@
 }
 
 .stepCard {
+  position: relative;
   display: flex;
   align-items: flex-start;
   gap: 1.1rem;
-  background: #ffffff;
-  border: 1px solid #e5e7eb;
+  background: var(--color-white);
+  border: 1px solid var(--color-border);
   border-radius: 12px;
   padding: 1.25rem 1.5rem;
+  transition: border-color 0.14s ease-out;
+}
+
+.stepCard:hover,
+.stepCard:focus-within {
+  border-color: var(--color-blue-500);
 }
 
 .stepNumber {
@@ -139,10 +157,11 @@
   width: 2.5rem;
   height: 2.5rem;
   border-radius: 999px;
-  background: #eff6ff;
-  color: #3b82f6;
+  background: var(--color-blue-50);
+  color: var(--color-blue-500);
+  font-family: var(--font-mono);
   font-size: 1.15rem;
-  font-weight: 700;
+  font-weight: 500;
 }
 
 .stepBody {
@@ -153,19 +172,20 @@
 
 .stepTitle {
   margin: 0;
-  color: #1a1a1a;
+  color: var(--color-ink);
   font-size: 1.05rem;
-  font-weight: 700;
+  font-weight: 500;
 }
 
 .stepDescription {
   margin: 0;
-  color: #4b5563;
+  color: var(--color-ink-muted);
   font-size: 1rem;
   line-height: 1.6;
 }
 
 .stepImageWrap {
+  position: relative;
   margin: 0.5rem 0;
 }
 
@@ -177,7 +197,7 @@
   margin: 0.5rem 0;
   border-radius: 8px;
   overflow: hidden;
-  background: #000;
+  background: var(--color-ink);
 }
 
 .videoWrap iframe {
@@ -195,83 +215,65 @@
   gap: 0.75rem;
 }
 
-.faqItem {
-  background: #ffffff;
-  border: 1px solid #e5e7eb;
-  border-radius: 12px;
-  padding: 0.35rem 1.5rem;
-}
-
-.faqItem[open] {
-  padding-bottom: 1.25rem;
-}
-
-.faqQuestion {
-  margin: 0;
-  padding: 1rem 0;
-  color: #1a1a1a;
-  font-size: 1.05rem;
-  font-weight: 600;
-  cursor: pointer;
-  list-style: none;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-}
-
-.faqQuestion::-webkit-details-marker {
-  display: none;
-}
-
-.faqQuestion::after {
-  content: "+";
-  flex: none;
-  color: #3b82f6;
-  font-size: 1.3rem;
-  font-weight: 400;
-  transition: transform 0.15s ease;
-}
-
-.faqItem[open] .faqQuestion::after {
-  transform: rotate(45deg);
-}
-
-.faqAnswer {
-  margin: 0.25rem 0 0;
-  color: #4b5563;
-  font-size: 1rem;
-  line-height: 1.65;
-}
-
 .ctaRow {
   margin-top: 0.25rem;
 }
 
 .cta {
   display: inline-block;
-  background: #3b82f6;
-  color: #ffffff;
+  background: var(--color-blue-500);
+  color: var(--color-white);
   border: none;
   border-radius: 8px;
   padding: 0.85rem 2.25rem;
   font-size: 1rem;
-  font-weight: 600;
+  font-weight: 500;
   text-decoration: none;
   box-shadow: 0 8px 24px -8px rgba(59, 130, 246, 0.45);
   transition:
-    background 0.15s ease,
-    transform 0.15s ease;
+    background 0.15s ease-out,
+    transform 0.15s ease-out;
 }
 
 .cta:hover {
-  background: #2563eb;
+  background: var(--color-blue-600);
   transform: translateY(-1px);
+}
+
+.cta:focus-visible {
+  outline: 2px solid var(--color-blue-500);
+  outline-offset: 4px;
+}
+
+/* The one deliberate navy accent surface on this page — closing CTA band. */
+.ctaBand {
+  width: 100vw;
+  margin-left: calc(50% - 50vw);
+  background: var(--color-navy-900);
+  padding: clamp(3rem, 6vw, 4.5rem) 1.5rem;
+  display: flex;
+  justify-content: center;
+}
+
+.ctaBandInner {
+  width: min(560px, 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.25rem;
+  text-align: center;
+}
+
+.ctaBandHeading {
+  margin: 0;
+  color: var(--color-white);
+  font-size: 1.5rem;
+  font-weight: 500;
 }
 
 @media (max-width: 768px) {
   .page {
-    padding: 2.5rem 1.25rem 4rem;
+    padding: 2.5rem 1.25rem 0;
   }
 
   .article {

@@ -51,7 +51,7 @@ export default function LoadingOverlay({
     >
       <div
         style={{
-          background: "#ffffff",
+          background: "var(--color-white)",
           borderRadius: "16px",
           boxShadow: "0 8px 40px rgba(0,0,0,0.12), 0 1px 4px rgba(0,0,0,0.06)",
           padding: "2rem 2.4rem",
@@ -59,20 +59,21 @@ export default function LoadingOverlay({
           display: "flex",
           flexDirection: "column",
           gap: "1.2rem",
+          fontFamily: "var(--font-display)",
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: "0.9rem" }}>
           <div
             style={{
-              background: "#eff6ff",
-              border: "1px solid #bfdbfe",
+              background: "var(--color-blue-50)",
+              border: "1px solid var(--color-blue-100)",
               borderRadius: "8px",
               padding: "0.4rem 0.65rem",
               fontSize: "0.7rem",
-              fontWeight: 700,
-              color: "#2563eb",
+              fontWeight: 500,
+              color: "var(--color-blue-600)",
               letterSpacing: "0.08em",
-              fontFamily: "monospace",
+              fontFamily: "var(--font-mono)",
               flexShrink: 0,
             }}
           >
@@ -82,8 +83,8 @@ export default function LoadingOverlay({
             <div
               style={{
                 fontSize: "0.88rem",
-                fontWeight: 600,
-                color: "#111827",
+                fontWeight: 500,
+                color: "var(--color-ink)",
                 whiteSpace: "nowrap",
                 overflow: "hidden",
                 textOverflow: "ellipsis",
@@ -92,14 +93,24 @@ export default function LoadingOverlay({
               {fileName}
             </div>
             <div
-              style={{ fontSize: "0.75rem", color: "#6b7280", marginTop: "0.1rem" }}
+              style={{
+                fontSize: "0.75rem",
+                color: "var(--color-ink-faint)",
+                marginTop: "0.1rem",
+              }}
             >
               {fmtSize(fileSize)}
             </div>
           </div>
         </div>
 
-        <div style={{ fontSize: "0.82rem", color: "#4b5563", fontFamily: "monospace" }}>
+        <div
+          style={{
+            fontSize: "0.82rem",
+            color: "var(--color-ink-muted)",
+            fontFamily: "var(--font-mono)",
+          }}
+        >
           {stage}
           {dots}
         </div>
@@ -112,13 +123,15 @@ export default function LoadingOverlay({
               marginBottom: "0.4rem",
             }}
           >
-            <span style={{ fontSize: "0.75rem", color: "#6b7280" }}>Loading</span>
+            <span style={{ fontSize: "0.75rem", color: "var(--color-ink-faint)" }}>
+              Loading
+            </span>
             <span
               style={{
                 fontSize: "0.75rem",
-                fontWeight: 600,
-                color: "#2563eb",
-                fontFamily: "monospace",
+                fontWeight: 500,
+                color: "var(--color-blue-600)",
+                fontFamily: "var(--font-mono)",
               }}
             >
               {Math.round(progress)}%
@@ -128,7 +141,7 @@ export default function LoadingOverlay({
             style={{
               width: "100%",
               height: "6px",
-              background: "#e5e7eb",
+              background: "var(--color-border)",
               borderRadius: "999px",
               overflow: "hidden",
             }}
@@ -137,7 +150,8 @@ export default function LoadingOverlay({
               style={{
                 height: "100%",
                 width: `${progress}%`,
-                background: "linear-gradient(90deg, #3b82f6, #60a5fa)",
+                background:
+                  "linear-gradient(90deg, var(--color-blue-500), #60a5fa)",
                 borderRadius: "999px",
                 transition: "width 0.35s ease",
               }}
@@ -148,7 +162,7 @@ export default function LoadingOverlay({
         <div
           style={{
             fontSize: "0.72rem",
-            color: "#9ca3af",
+            color: "var(--color-ink-faint)",
             textAlign: "center",
           }}
         >

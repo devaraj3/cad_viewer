@@ -1,7 +1,14 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { Head } from "vite-react-ssg";
+import AccordionItem from "../../components/AccordionItem";
+import CornerMark from "../../components/CornerMark";
+import Reveal from "../../components/Reveal";
 import styles from "./SplitStepAssembly.module.css";
+
+const MARK_STAGGER_MS = 130;
+const cardMarkDelay = (index: number, offset: number) =>
+  index * 90 + offset;
 
 function ExternalLink({
   href,
@@ -166,6 +173,12 @@ export default function SplitStepAssembly() {
       <main className={styles.page}>
         <article className={styles.article}>
           <section className={styles.section}>
+            <CornerMark corner="top-left" animate delay={0} />
+            <CornerMark
+              corner="bottom-right"
+              animate
+              delay={MARK_STAGGER_MS}
+            />
             <Link to="/" className={styles.breadcrumb}>
               ← Back to CAD Viewer
             </Link>
@@ -208,10 +221,25 @@ export default function SplitStepAssembly() {
               Why you'd need to do this
             </h2>
             <ul className={styles.cardList}>
-              {WHY_REASONS.map((reason) => (
-                <li className={styles.reasonCard} key={reason}>
+              {WHY_REASONS.map((reason, index) => (
+                <Reveal
+                  as="li"
+                  className={`${styles.reasonCard} cornerMarkSharpen`}
+                  key={reason}
+                  delayMs={index * 70}
+                >
+                  <CornerMark
+                    corner="top-left"
+                    animate
+                    delay={cardMarkDelay(index, 0)}
+                  />
+                  <CornerMark
+                    corner="bottom-right"
+                    animate
+                    delay={cardMarkDelay(index, MARK_STAGGER_MS)}
+                  />
                   {reason}
-                </li>
+                </Reveal>
               ))}
             </ul>
           </section>
@@ -237,7 +265,22 @@ export default function SplitStepAssembly() {
             </h2>
             <ol className={styles.stepList}>
               {earlySteps.map((step, index) => (
-                <li className={styles.stepCard} key={step.title}>
+                <Reveal
+                  as="li"
+                  className={`${styles.stepCard} cornerMarkSharpen`}
+                  key={step.title}
+                  delayMs={index * 70}
+                >
+                  <CornerMark
+                    corner="top-left"
+                    animate
+                    delay={cardMarkDelay(index, 0)}
+                  />
+                  <CornerMark
+                    corner="bottom-right"
+                    animate
+                    delay={cardMarkDelay(index, MARK_STAGGER_MS)}
+                  />
                   <span className={styles.stepNumber}>{index + 1}</span>
                   <div className={styles.stepBody}>
                     <p className={styles.stepTitle}>{step.title}</p>
@@ -245,11 +288,17 @@ export default function SplitStepAssembly() {
                       {step.description}
                     </p>
                   </div>
-                </li>
+                </Reveal>
               ))}
             </ol>
 
             <div className={styles.stepImageWrap}>
+              <CornerMark corner="top-left" animate delay={0} />
+              <CornerMark
+                corner="bottom-right"
+                animate
+                delay={MARK_STAGGER_MS}
+              />
               <img
                 src="/guides/split-step-assembly-demo.png"
                 alt="CAD Viewer showing a multi-part STEP assembly disassembled into separate components, with one part selected and ready to export as its own STEP file"
@@ -262,7 +311,25 @@ export default function SplitStepAssembly() {
 
             <ol className={styles.stepList} start={earlySteps.length + 1}>
               {laterSteps.map((step, index) => (
-                <li className={styles.stepCard} key={step.title}>
+                <Reveal
+                  as="li"
+                  className={`${styles.stepCard} cornerMarkSharpen`}
+                  key={step.title}
+                  delayMs={index * 70}
+                >
+                  <CornerMark
+                    corner="top-left"
+                    animate
+                    delay={cardMarkDelay(earlySteps.length + index, 0)}
+                  />
+                  <CornerMark
+                    corner="bottom-right"
+                    animate
+                    delay={cardMarkDelay(
+                      earlySteps.length + index,
+                      MARK_STAGGER_MS,
+                    )}
+                  />
                   <span className={styles.stepNumber}>
                     {earlySteps.length + index + 1}
                   </span>
@@ -272,7 +339,7 @@ export default function SplitStepAssembly() {
                       {step.description}
                     </p>
                   </div>
-                </li>
+                </Reveal>
               ))}
             </ol>
 
@@ -284,26 +351,43 @@ export default function SplitStepAssembly() {
           <section className={styles.section}>
             <h2 className={styles.sectionHeading}>Frequently asked</h2>
             <div className={styles.faqGrid}>
-              {FAQS.map((faq) => (
-                <details className={styles.faqItem} key={faq.question}>
-                  <summary className={styles.faqQuestion}>
-                    {faq.question}
-                  </summary>
-                  <p className={styles.faqAnswer}>{faq.answer}</p>
-                </details>
+              {FAQS.map((faq, index) => (
+                <Reveal as="div" key={faq.question} delayMs={index * 70}>
+                  <AccordionItem
+                    question={faq.question}
+                    answer={faq.answer}
+                    className="cornerMarkSharpen"
+                  >
+                    <CornerMark
+                      corner="top-left"
+                      animate
+                      delay={cardMarkDelay(index, 0)}
+                    />
+                    <CornerMark
+                      corner="bottom-right"
+                      animate
+                      delay={cardMarkDelay(index, MARK_STAGGER_MS)}
+                    />
+                  </AccordionItem>
+                </Reveal>
               ))}
-            </div>
-          </section>
-
-          <section className={styles.section}>
-            <div className={styles.ctaRow}>
-              <a className={styles.cta} href="/viewer">
-                Try it now — upload your STEP file
-              </a>
             </div>
           </section>
         </article>
       </main>
+
+      <div className={styles.ctaBand}>
+        <div className={styles.ctaBandInner}>
+          <h2 className={styles.ctaBandHeading}>
+            Ready to pull that part out?
+          </h2>
+          <div className={styles.ctaRow}>
+            <a className={styles.cta} href="/viewer">
+              Try it now — upload your STEP file
+            </a>
+          </div>
+        </div>
+      </div>
     </>
   );
 }
