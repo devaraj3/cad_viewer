@@ -1,27 +1,37 @@
 # CAD Viewer
 
-> Free, browser-based 3D CAD viewer supporting STEP, IGES, STL, OBJ, 3MF, BREP, GLB, and DXF files — no install, no account, no subscription.
+> Free, browser-based 3D CAD viewer and 2D engineering drawing generator
+> supporting STEP, IGES, STL, OBJ, 3MF, BREP, GLB, and DXF files — no
+> install, no account, no subscription.
 
-CAD Viewer is an open-source, in-browser CAD file viewer built on the OpenCascade (OCCT) engine. It runs entirely client-side and requires no software installation or account signup.
+CAD Viewer is an open-source, in-browser CAD file viewer built on the
+OpenCascade (OCCT) engine. It runs entirely client-side and requires no
+software installation or account signup.
 
 ## Features
 - 3D viewing for CAD and mesh formats
+- Automatic 2D engineering drawing generation with true-to-scale PDF export
+  (third-angle projection, standard dimensioning)
+- Assembly explode/disassemble with per-part STEP export
 - Measurement tools
 - Section/cross-section controls
 - Snapshot capture (normal and outline)
-- Assembly/part-focused workflows
 - DXF preview support
 
 ## Supported formats
 - CAD solids: STEP, STP, IGES, IGS, BREP
 - Mesh/assembly formats: STL, OBJ, 3MF, GLTF, GLB
-- 2D drawing format: DXF
+- 2D drawing format: DXF (import), PDF (drawing export)
 
 ## Pricing
 Free to use, no subscription required.
 
 ## Guides
 - [How to Split a STEP Assembly Into Separate Part Files (Free, Online)](https://cadviewer.xyz/guides/split-step-assembly)
+- [How to Turn a STEP File into a 2D Engineering Drawing (Free)](https://cadviewer.xyz/guides/step-file-to-2d-drawing)
+
+## About
+[About CADViewer](https://cadviewer.xyz/about)
 
 ## Live app
 [CAD Viewer](https://cadviewer.xyz/)

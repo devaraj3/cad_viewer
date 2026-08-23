@@ -11,8 +11,71 @@ const FEATURE_PILLS = [
   "Orbit & Pan",
   "Edge Measurements",
   "Section Planes",
-  "Snapshot Export",
+  "2D Drawing Export",
 ];
+
+const CAPABILITIES: { title: string; description: string }[] = [
+  {
+    title: "View any CAD format, instantly.",
+    description:
+      "STEP, IGES, STL, OBJ, 3MF, BREP, and GLB open directly in the browser. Orbit, pan, section, and measure edges — no plugin, no viewer app to install separately.",
+  },
+  {
+    title: "Generate a real 2D engineering drawing.",
+    description:
+      "Click Generate 2D Drawing and get Front, Top, and Right orthographic views in third-angle projection, an isometric reference view, and automatic dimensioning — hole sizes, locations, and overall dimensions placed per standard drafting convention, not just wherever fits visually. Export as a true-to-scale PDF: printed at 100%, the dimensions on the page match the real part.",
+  },
+  {
+    title: "Work with assemblies.",
+    description:
+      "Explode and disassemble multi-part files, and export any individual part as its own STEP file.",
+  },
+  {
+    title: "Measure what matters.",
+    description:
+      "Click-to-measure edges, apply section planes, and compare scale against common reference objects.",
+  },
+];
+
+const FAQS: { question: string; answer: string }[] = [
+  {
+    question: "Is my file uploaded anywhere?",
+    answer:
+      "No. Everything is processed client-side in your browser. Files never touch a server.",
+  },
+  {
+    question: "What file formats are supported?",
+    answer:
+      "STEP, STP, IGES, IGS, BREP, STL, OBJ, 3MF, GLTF, GLB for viewing, and DXF for 2D preview. Generated drawings export as PDF.",
+  },
+  {
+    question: "Can I use the generated drawing for actual manufacturing?",
+    answer:
+      "For getting a dimensioned drawing for a quote, a personal project, or a student assignment — yes, it's true-to-scale and follows standard drafting convention. For full GD&T with feature control frames and formal revision control, a dedicated CAD package is still the right tool.",
+  },
+  {
+    question: "Is there a catch — will this become paid later?",
+    answer: "The viewing and drawing generation tools you see today are free to use.",
+  },
+  {
+    question: "Does this work offline?",
+    answer:
+      "Yes, once the page and your file are loaded, the viewer runs entirely client-side.",
+  },
+];
+
+const FAQ_JSON_LD = {
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  mainEntity: FAQS.slice(0, 4).map((faq) => ({
+    "@type": "Question",
+    name: faq.question,
+    acceptedAnswer: {
+      "@type": "Answer",
+      text: faq.answer,
+    },
+  })),
+};
 
 export default function Landing() {
   const navigate = useNavigate();
@@ -45,13 +108,17 @@ export default function Landing() {
     <>
       <Head>
         <title>
-          CAD Viewer — View STEP, IGES, STL & OBJ Files in Your Browser
+          CAD Viewer — View STEP/IGES Files & Generate 2D Drawings Free
         </title>
         <meta
           name="description"
-          content="Free browser-based CAD viewer. Drop a STEP, IGES, STL, OBJ, 3MF, BREP, GLB, or DXF file to orbit, pan, measure edges, apply section planes, and export snapshots — no install, works offline."
+          content="Free browser-based CAD viewer. View STEP, IGES, STL, OBJ, 3MF, BREP, GLB, and DXF files, then generate a fully dimensioned, true-to-scale 2D engineering drawing — no install, no signup, runs entirely in your browser."
         />
         <link rel="canonical" href="https://cadviewer.xyz/" />
+        <body className="landing-page" />
+        <script type="application/ld+json">
+          {JSON.stringify(FAQ_JSON_LD)}
+        </script>
       </Head>
       <div
         onDragOver={handleDragOver}
@@ -129,7 +196,8 @@ export default function Landing() {
             </h1>
             <p className={styles.subheadline}>
               Drop a STEP, IGES, STL, OBJ, 3MF, BREP, or GLB file and orbit,
-              measure, and snapshot in seconds.
+              measure, and snapshot in seconds — or generate a dimensioned 2D
+              engineering drawing straight from the model.
             </p>
 
             <div className={styles.pillRow}>
@@ -191,6 +259,79 @@ export default function Landing() {
           </motion.section>
         </main>
       </div>
+
+      <section className={styles.section}>
+        <div className={styles.sectionInner}>
+          <h2 className={styles.sectionHeading}>What you can do with it</h2>
+          <div className={styles.capabilityGrid}>
+            {CAPABILITIES.map((capability) => (
+              <div key={capability.title} className={styles.capabilityCard}>
+                <h3 className={styles.capabilityTitle}>{capability.title}</h3>
+                <p className={styles.capabilityDescription}>
+                  {capability.description}
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section className={styles.sectionAlt}>
+        <div className={styles.sectionInner}>
+          <h2 className={styles.sectionHeading}>Why it&rsquo;s free</h2>
+          <p className={styles.sectionParagraph}>
+            Every file you load is processed entirely in your browser —
+            nothing is uploaded to a server. That&rsquo;s not a privacy
+            feature bolted on top; it&rsquo;s the whole architecture, built
+            on OpenCascade compiled to WebAssembly. Because nothing runs
+            server-side, there&rsquo;s no hosting cost that scales with
+            usage, which is what makes it possible to keep this free rather
+            than metered or subscription-gated.
+          </p>
+        </div>
+      </section>
+
+      <section className={styles.section}>
+        <div className={styles.sectionInner}>
+          <h2 className={styles.sectionHeading}>
+            Frequently asked questions
+          </h2>
+          <div className={styles.faqGrid}>
+            {FAQS.map((faq) => (
+              <details className={styles.faqItem} key={faq.question}>
+                <summary className={styles.faqQuestion}>
+                  {faq.question}
+                </summary>
+                <p className={styles.faqAnswer}>{faq.answer}</p>
+              </details>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <footer className={styles.footer}>
+        <a className={styles.footerLink} href="/about">
+          About
+        </a>
+        <span className={styles.footerDivider} aria-hidden="true">
+          ·
+        </span>
+        <a
+          className={styles.footerLink}
+          href="/guides/step-file-to-2d-drawing"
+        >
+          Guides
+        </a>
+        <span className={styles.footerDivider} aria-hidden="true">
+          ·
+        </span>
+        <a
+          className={styles.footerLink}
+          href="mailto:devarajhello@gmail.com"
+        >
+          Report an issue
+        </a>
+      </footer>
     </>
   );
 }

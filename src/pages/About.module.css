@@ -1,0 +1,126 @@
+:global(body.about-page) {
+  overflow-y: auto;
+  height: auto;
+  min-height: 100vh;
+}
+
+:global(body.about-page #root) {
+  height: auto;
+  min-height: 100vh;
+}
+
+.page {
+  min-height: 100vh;
+  background: #fafafa;
+  color: #1a1a1a;
+  display: flex;
+  justify-content: center;
+  padding: 4rem 1.5rem 6rem;
+}
+
+.article {
+  width: min(720px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: clamp(3rem, 5vw, 4rem);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.breadcrumb {
+  display: inline-flex;
+  align-self: flex-start;
+  color: #4b5563;
+  font-size: 0.9rem;
+  text-decoration: none;
+}
+
+.breadcrumb:hover {
+  color: #3b82f6;
+}
+
+.eyebrow {
+  margin: 0;
+  color: #6b7280;
+  font-family:
+    "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono",
+    "Courier New", monospace;
+  font-size: 0.75rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.headline {
+  margin: 0.5rem 0 0;
+  color: #1a1a1a;
+  font-size: 2.25rem;
+  line-height: 1.2;
+  font-weight: 700;
+}
+
+.sectionHeading {
+  margin: 0;
+  color: #1a1a1a;
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+
+.paragraph {
+  margin: 0;
+  color: #4b5563;
+  font-size: 1.05rem;
+  line-height: 1.7;
+}
+
+.externalLink {
+  color: #2563eb;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.externalLink:hover {
+  color: #1d4ed8;
+}
+
+.ctaRow {
+  margin-top: 0.25rem;
+}
+
+.cta {
+  display: inline-block;
+  background: #3b82f6;
+  color: #ffffff;
+  border: none;
+  border-radius: 8px;
+  padding: 0.85rem 2.25rem;
+  font-size: 1rem;
+  font-weight: 600;
+  text-decoration: none;
+  box-shadow: 0 8px 24px -8px rgba(59, 130, 246, 0.45);
+  transition:
+    background 0.15s ease,
+    transform 0.15s ease;
+}
+
+.cta:hover {
+  background: #2563eb;
+  transform: translateY(-1px);
+}
+
+@media (max-width: 768px) {
+  .page {
+    padding: 2.5rem 1.25rem 4rem;
+  }
+
+  .article {
+    gap: clamp(2.25rem, 8vw, 3rem);
+  }
+
+  .headline {
+    font-size: 1.75rem;
+  }
+}
