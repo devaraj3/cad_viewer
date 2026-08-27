@@ -17,6 +17,8 @@ import {
   type CompareObjectId,
   type CompareObjectTier,
   type HiddenLineViewSetResult,
+  type ExplodeDebugEntry,
+  type ExplodeAxisOverride,
 } from "./viewer";
 import {
   analyzeCadSheetMetal,
@@ -120,13 +122,16 @@ import {
   ArrowDownFromLine,
   ArrowLeft,
   ArrowLeftFromLine,
+  ArrowLeftRight,
   ArrowRightFromLine,
   ArrowUpFromLine,
   Columns3,
   Combine,
   Download,
   ExternalLink,
+  GripVertical,
   Pencil,
+  RotateCcw,
   Rows3,
   Trash2,
   Ungroup,
@@ -212,6 +217,14 @@ type PartsModeTransition = {
 // Wireframe density is locked in at 25% / 65% (see state defaults below).
 // Flip to true to re-expose the tuning sliders in the sidebar.
 const SHOW_WIREFRAME_DENSITY_CONTROLS = false;
+
+// Explode View's automatic direction/stage detection (bbox-sweep +
+// headed-fastener rule in viewer.ts) has real, permanent limits on
+// non-trivial assemblies - interlocks, coaxial neighbors, ambiguous
+// cylindrical faces. The "Order" panel (drag-to-reorder, per-part axis
+// buttons, direction flip, reset) is the recourse for exactly those cases -
+// kept intact behind this flag for whenever it's needed again, hidden for now.
+const SHOW_EXPLODE_MANUAL_OVERRIDE_UI = false;
 
 export const CAD_EXTS: ReadonlySet<CADExt> = new Set<CADExt>([
   "step",
@@ -825,6 +838,13 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
     const [assemblyMode, setAssemblyMode] = useState<AssemblyLoadMode>(
       assemblyLoadModeProp ?? "flat",
     );
+    // Whether the user has explicitly opened the "Assembly parts" panel
+    // (parts list, its Isolate/Show All/Clear row, viewport part-click
+    // menu). Deliberately separate from assemblyMode: assemblyMode also
+    // gets flipped to "parts" by Explode View (which needs the same
+    // per-part mesh loading) without the user having opened this panel -
+    // see the Explode View toggle and the two "Assembly parts" gates below.
+    const [assemblyPanelOpen, setAssemblyPanelOpen] = useState(false);
     const [parts, setParts] = useState<LoadedPart[]>([]);
     const [modelSession, setModelSession] = useState<ModelSession | null>(null);
     const modelSessionRef = useRef<ModelSession | null>(null);
@@ -832,6 +852,34 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       kind: "assembly",
     });
     const [selectedPartKey, setSelectedPartKey] = useState<string | null>(null);
+    const [explodeActive, setExplodeActive] = useState(false);
+    const [explodeAmount, setExplodeAmount] = useState(0);
+    const [explodePlaying, setExplodePlaying] = useState(false);
+    // Which direction is driving the in-progress animation (1 = Play/explode,
+    // 0 = Reverse/assemble) - null when not animating. Lets Play/Reverse's
+    // disabled state distinguish "the button that started this animation"
+    // from "the other one", instead of disabling both during any animation.
+    const [explodePlayDirection, setExplodePlayDirection] = useState<
+      0 | 1 | null
+    >(null);
+    // Set when the user turns Explode View on before "Assembly parts" mode
+    // has finished loading (it's now reachable from the main panel before
+    // that load happens) - the activation effect below watches for parts to
+    // actually become ready and finishes the job then.
+    const [explodePendingParts, setExplodePendingParts] = useState(false);
+    // Latest per-part plan data (stage, axis, override status) from the
+    // viewer, for the "Order" panel's list - populated by every call that
+    // (re)computes the plan, including override mutations, so the list
+    // stays in sync with drag-reorder/flip/axis-override/reset actions.
+    const [explodeEntries, setExplodeEntries] = useState<ExplodeDebugEntry[]>(
+      [],
+    );
+    const [explodeDraggedPartKey, setExplodeDraggedPartKey] = useState<
+      string | null
+    >(null);
+    const [explodeDragOverIndex, setExplodeDragOverIndex] = useState<
+      number | null
+    >(null);
     const [partExportMessage, setPartExportMessage] = useState<string | null>(
       null,
     );
@@ -1057,6 +1105,22 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       setViewerMode({ kind: "assembly" });
       setSelectedPartKey(null);
       setPartExportMessage(null);
+      // Explode View must never carry state across a file swap - the plan
+      // it was computed from belongs to the part positions of the PREVIOUS
+      // model. viewer.clear() (called below for the no-file case, and at the
+      // start of every load for the new-file case) already discards the
+      // viewer's own plan/amount/animation, but the React-side toggle/
+      // slider/order-list state doesn't follow that automatically, so it's
+      // reset explicitly here on every file identity change.
+      viewerRef.current?.resetExplode();
+      setExplodeActive(false);
+      setExplodeAmount(0);
+      setExplodePlaying(false);
+      setExplodePlayDirection(null);
+      setExplodePendingParts(false);
+      setExplodeEntries([]);
+      setExplodeDraggedPartKey(null);
+      setExplodeDragOverIndex(null);
       setLoadedDxfDocument(null);
       setDxfPreviewPanelState(createDefaultDxfPreviewPanelState());
       setSheetPaintBase(null);
@@ -2678,6 +2742,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       };
 
       if (
+        !assemblyPanelOpen ||
         assemblyMode !== "parts" ||
         measureMode ||
         viewerMode.kind !== "assembly"
@@ -2834,6 +2899,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       if (detectedCount > 1) return;
 
       setAssemblyMode("flat");
+      setAssemblyPanelOpen(false);
       viewerRef.current?.showAllParts();
       viewerRef.current?.clearIsolation();
       setPartMenu(null);
@@ -2846,6 +2912,61 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       supportsAssemblyMode,
       partsModeTransition,
     ]);
+
+    // Finishes an Explode View activation requested before "Assembly parts"
+    // mode had loaded (see the Explode View toggle) - waits for the same
+    // load this effect's sibling above reacts to, then computes the plan.
+    // If that load turns out not to be a real assembly (assemblyMode flips
+    // back to "flat"), just drops the pending request instead of activating
+    // an explode with nothing to explode.
+    useEffect(() => {
+      if (!explodePendingParts) return;
+      if (isLoading) return;
+      if (assemblyMode !== "parts") {
+        setExplodePendingParts(false);
+        return;
+      }
+      if (parts.length === 0) return;
+      viewerRef.current?.clearIsolation();
+      const entries = viewerRef.current?.computeExplodePlan() ?? [];
+      console.debug("[ExplodeView] rules fired", entries);
+      setExplodeEntries(entries);
+      setExplodeActive(true);
+      setExplodePendingParts(false);
+    }, [explodePendingParts, isLoading, assemblyMode, parts]);
+
+    // Display order for the "Order" panel's list - sorted by final stage,
+    // tied parts kept in their original (raw part-array) order so the sort
+    // is stable and matches the tiebreak reorderExplodePart/
+    // mergeManualStageOverrides use internally in viewer.ts. Drag targetIndex
+    // math below is computed against THIS array's positions.
+    const sortedExplodeEntries = useMemo(() => {
+      return explodeEntries
+        .map((entry, originalIndex) => ({ entry, originalIndex }))
+        .sort(
+          (a, b) =>
+            a.entry.stage - b.entry.stage || a.originalIndex - b.originalIndex,
+        )
+        .map((x) => x.entry);
+    }, [explodeEntries]);
+
+    // Which world axis (if any) is the ACTIVE manual override for a part -
+    // derived from the dominant component of its final resolved axis, only
+    // when axisOverridden is set (an auto-computed axis can coincidentally
+    // align with a world axis too, e.g. a principal-axis part, and that
+    // must not read as an active override).
+    const explodeActiveAxisOverride = (
+      entry: ExplodeDebugEntry,
+    ): ExplodeAxisOverride | null => {
+      if (!entry.axisOverridden) return null;
+      const { x, y, z } = entry.axis;
+      const ax = Math.abs(x);
+      const ay = Math.abs(y);
+      const az = Math.abs(z);
+      if (ax >= ay && ax >= az) return "x";
+      if (ay >= az) return "y";
+      return "z";
+    };
 
     const baseFlattenEligible =
       showControls && assemblyMode !== "parts" && isCadExt(currentExt);
@@ -5098,18 +5219,27 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                   type="button"
                   disabled={isLoading}
                   onClick={() => {
-                    if (assemblyMode === "parts") {
-                      setAssemblyMode("flat");
-                      viewerRef.current?.showAllParts();
-                      viewerRef.current?.clearIsolation();
+                    if (assemblyPanelOpen) {
+                      setAssemblyPanelOpen(false);
                       setPartMenu(null);
                       setSelectedPartKey(null);
+                      // Explode View also needs assemblyMode === "parts" -
+                      // only tear the per-part load down if it's not still
+                      // in use for that (see the Explode View toggle below).
+                      if (!explodeActive && !explodePendingParts) {
+                        setAssemblyMode("flat");
+                        viewerRef.current?.showAllParts();
+                        viewerRef.current?.clearIsolation();
+                      }
                       return;
                     }
-                    setAssemblyMode("parts");
+                    setAssemblyPanelOpen(true);
+                    if (assemblyMode !== "parts") {
+                      setAssemblyMode("parts");
+                    }
                   }}
                   className={`cad-btn cad-btn--wide ${
-                    assemblyMode === "parts" ? "cad-btn--active" : "cad-btn--neutral"
+                    assemblyPanelOpen ? "cad-btn--active" : "cad-btn--neutral"
                   } ${
                     isLoading
                       ? "cad-btn--disabled"
@@ -5120,7 +5250,337 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                 </button>
               )}
 
-              {hasAssembly && (
+              {assemblyDetected && (
+                <div className="cad-section">
+                  <div className="cad-row cad-row--between">
+                    <span className="cad-label">Explode View</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (explodeActive) {
+                          viewerRef.current?.resetExplode();
+                          setExplodeActive(false);
+                          setExplodeAmount(0);
+                          setExplodePlaying(false);
+                          setExplodePlayDirection(null);
+                          setExplodePendingParts(false);
+                          setExplodeEntries([]);
+                          setExplodeDraggedPartKey(null);
+                          setExplodeDragOverIndex(null);
+                          // Mirror image of the Assembly Parts close handler
+                          // above - only tear the per-part load down if that
+                          // panel isn't still relying on it.
+                          if (!assemblyPanelOpen) {
+                            setAssemblyMode("flat");
+                            viewerRef.current?.showAllParts();
+                            viewerRef.current?.clearIsolation();
+                          }
+                        } else if (assemblyMode === "parts" && parts.length > 0) {
+                          viewerRef.current?.clearIsolation();
+                          setPartMenu(null);
+                          const entries =
+                            viewerRef.current?.computeExplodePlan() ?? [];
+                          console.debug("[ExplodeView] rules fired", entries);
+                          setExplodeEntries(entries);
+                          setExplodeActive(true);
+                        } else {
+                          // Needs the same per-part mesh load "Assembly
+                          // parts" triggers, but deliberately does NOT set
+                          // assemblyPanelOpen - Explode View must not open
+                          // that panel's UI (list/Isolate/Show All/Clear).
+                          // Finishes activating once the load lands, in the
+                          // effect watching explodePendingParts below.
+                          setPartMenu(null);
+                          setExplodePendingParts(true);
+                          setAssemblyMode("parts");
+                        }
+                      }}
+                      className={`cad-toggle ${
+                        explodeActive || explodePendingParts ? "cad-toggle--on" : ""
+                      }`}
+                    >
+                      <span className="cad-toggle__thumb" />
+                    </button>
+                  </div>
+
+                  {explodePendingParts && !explodeActive && (
+                    <div className="cad-debug">Loading assembly parts…</div>
+                  )}
+
+                  {explodeActive && (
+                    <>
+                      <div className="cad-range-wrap">
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          value={explodeAmount}
+                          disabled={explodePlaying}
+                          onChange={(e) => {
+                            const v = Number(e.target.value);
+                            setExplodeAmount(v);
+                            viewerRef.current?.setExplodeAmount(v / 100);
+                          }}
+                          className="cad-range"
+                        />
+                      </div>
+                      <div className="cad-row cad-row--two">
+                        <button
+                          type="button"
+                          disabled={
+                            explodeAmount >= 100 ||
+                            (explodePlaying && explodePlayDirection !== 1)
+                          }
+                          onClick={() => {
+                            setExplodePlaying(true);
+                            setExplodePlayDirection(1);
+                            viewerRef.current?.playExplode(
+                              1,
+                              (a) => setExplodeAmount(a * 100),
+                              () => {
+                                setExplodePlaying(false);
+                                setExplodePlayDirection(null);
+                              },
+                            );
+                          }}
+                          className="cad-btn cad-btn--small cad-btn--neutral"
+                        >
+                          Play
+                        </button>
+                        <button
+                          type="button"
+                          disabled={
+                            explodeAmount <= 0 ||
+                            (explodePlaying && explodePlayDirection !== 0)
+                          }
+                          onClick={() => {
+                            setExplodePlaying(true);
+                            setExplodePlayDirection(0);
+                            viewerRef.current?.playExplode(
+                              0,
+                              (a) => setExplodeAmount(a * 100),
+                              () => {
+                                setExplodePlaying(false);
+                                setExplodePlayDirection(null);
+                              },
+                            );
+                          }}
+                          className="cad-btn cad-btn--small cad-btn--neutral"
+                        >
+                          Reverse
+                        </button>
+                      </div>
+
+                      {SHOW_EXPLODE_MANUAL_OVERRIDE_UI && (
+                      <div className="cad-explode-order">
+                        <div className="cad-explode-order-header">
+                          <span className="cad-label">Order</span>
+                          <button
+                            type="button"
+                            disabled={!sortedExplodeEntries.some((e) => e.overridden)}
+                            onClick={() => {
+                              const next =
+                                viewerRef.current?.resetAllExplodeOverrides() ?? [];
+                              setExplodeEntries(next);
+                            }}
+                            className={`cad-btn cad-btn--small ${
+                              sortedExplodeEntries.some((e) => e.overridden)
+                                ? "cad-btn--neutral"
+                                : "cad-btn--disabled"
+                            }`}
+                            title="Discard all manual stage/axis/direction overrides"
+                          >
+                            <RotateCcw className="cad-icon-sm" /> Reset all
+                          </button>
+                        </div>
+                        <div
+                          className="cad-explode-order-list"
+                          onDragOver={(e) => e.preventDefault()}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            const draggedKey = e.dataTransfer.getData("text/plain");
+                            if (draggedKey) {
+                              const next =
+                                viewerRef.current?.reorderExplodePart(
+                                  draggedKey,
+                                  sortedExplodeEntries.length,
+                                ) ?? [];
+                              setExplodeEntries(next);
+                            }
+                            setExplodeDraggedPartKey(null);
+                            setExplodeDragOverIndex(null);
+                          }}
+                        >
+                          {sortedExplodeEntries.map((entry, index) => {
+                            const activeAxis = explodeActiveAxisOverride(entry);
+                            return (
+                              <div
+                                key={entry.partKey}
+                                draggable
+                                onDragStart={(e) => {
+                                  // The dragged part's identity travels in the
+                                  // native DataTransfer payload, not React
+                                  // state - state alone isn't reliably visible
+                                  // yet inside the DROP handler's closure by
+                                  // the time drop fires (that closure was
+                                  // created at an earlier render, before
+                                  // dragstart's setState commits). DataTransfer
+                                  // is synchronous and part of the browser's
+                                  // own drag session, so it's always correct
+                                  // regardless of React's render timing.
+                                  // explodeDraggedPartKey state is kept only
+                                  // for the visual dragging/drag-over styling.
+                                  e.dataTransfer.setData("text/plain", entry.partKey);
+                                  e.dataTransfer.effectAllowed = "move";
+                                  setExplodeDraggedPartKey(entry.partKey);
+                                }}
+                                onDragOver={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setExplodeDragOverIndex(index);
+                                }}
+                                onDragLeave={() => {
+                                  setExplodeDragOverIndex((cur) =>
+                                    cur === index ? null : cur,
+                                  );
+                                }}
+                                onDrop={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  const draggedKey = e.dataTransfer.getData("text/plain");
+                                  if (draggedKey && draggedKey !== entry.partKey) {
+                                    const draggedOldIndex =
+                                      sortedExplodeEntries.findIndex(
+                                        (x) => x.partKey === draggedKey,
+                                      );
+                                    let target = index;
+                                    if (
+                                      draggedOldIndex !== -1 &&
+                                      draggedOldIndex < target
+                                    ) {
+                                      target -= 1;
+                                    }
+                                    const next =
+                                      viewerRef.current?.reorderExplodePart(
+                                        draggedKey,
+                                        target,
+                                      ) ?? [];
+                                    setExplodeEntries(next);
+                                  }
+                                  setExplodeDraggedPartKey(null);
+                                  setExplodeDragOverIndex(null);
+                                }}
+                                onDragEnd={() => {
+                                  setExplodeDraggedPartKey(null);
+                                  setExplodeDragOverIndex(null);
+                                }}
+                                className={`cad-explode-order-row ${
+                                  explodeDraggedPartKey === entry.partKey
+                                    ? "cad-explode-order-row--dragging"
+                                    : ""
+                                } ${
+                                  explodeDragOverIndex === index
+                                    ? "cad-explode-order-row--drag-over"
+                                    : ""
+                                }`}
+                                title={entry.detail}
+                                data-part-key={entry.partKey}
+                              >
+                                <div className="cad-explode-order-row-main">
+                                  <span className="cad-explode-order-grip">
+                                    <GripVertical className="cad-icon-sm" />
+                                  </span>
+                                  <span className="cad-explode-order-stage">
+                                    S{entry.stage}
+                                  </span>
+                                  <span className="cad-explode-order-name">
+                                    {entry.name}
+                                  </span>
+                                  {entry.overridden && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const next =
+                                          viewerRef.current?.resetExplodePartOverride(
+                                            entry.partKey,
+                                          ) ?? [];
+                                        setExplodeEntries(next);
+                                      }}
+                                      className="cad-icon-btn cad-icon-btn--enabled"
+                                      title="Reset this part to its automatic computation"
+                                      aria-label={`Reset ${entry.name} to automatic`}
+                                    >
+                                      <RotateCcw className="cad-icon-sm" />
+                                    </button>
+                                  )}
+                                </div>
+                                <div className="cad-explode-order-row-controls">
+                                  <span
+                                    className={`cad-explode-order-tag ${
+                                      entry.overridden
+                                        ? "cad-explode-order-tag--manual"
+                                        : ""
+                                    }`}
+                                  >
+                                    {entry.overridden ? "Manual" : "Auto"}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const next =
+                                        viewerRef.current?.setExplodePartDirectionFlip(
+                                          entry.partKey,
+                                          !entry.directionFlipped,
+                                        ) ?? [];
+                                      setExplodeEntries(next);
+                                    }}
+                                    className={`cad-btn cad-btn--small ${
+                                      entry.directionFlipped
+                                        ? "cad-btn--active"
+                                        : "cad-btn--neutral"
+                                    }`}
+                                    title="Reverse this part's exit direction"
+                                    aria-label={`Flip direction for ${entry.name}`}
+                                  >
+                                    <ArrowLeftRight className="cad-icon-sm" />
+                                  </button>
+                                  {(["x", "y", "z"] as const).map((axis) => (
+                                    <button
+                                      key={axis}
+                                      type="button"
+                                      onClick={() => {
+                                        const isActive = activeAxis === axis;
+                                        const next =
+                                          viewerRef.current?.setExplodePartAxisOverride(
+                                            entry.partKey,
+                                            isActive ? null : axis,
+                                          ) ?? [];
+                                        setExplodeEntries(next);
+                                      }}
+                                      className={`cad-btn cad-explode-axis-btn ${
+                                        activeAxis === axis
+                                          ? "cad-btn--active"
+                                          : "cad-btn--neutral"
+                                      }`}
+                                      title={`Force axis to ${axis.toUpperCase()}`}
+                                      aria-label={`Force ${entry.name}'s axis to ${axis.toUpperCase()}`}
+                                    >
+                                      {axis.toUpperCase()}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+
+              {assemblyPanelOpen && hasAssembly && (
                 <div className="cad-row cad-row--three">
                   <button
                     type="button"
@@ -5561,7 +6021,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
               )}
             </div>
 
-            {assemblyMode === "parts" && parts.length > 0 && (
+            {assemblyPanelOpen && assemblyMode === "parts" && parts.length > 0 && (
               <div className="cad-parts-panel">
                 <div className="cad-parts-title">
                   Parts ({parts.length})
@@ -5580,7 +6040,13 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                             onClick={() => {
                               setSelectedPartKey(part.key);
                               setPartExportMessage(null);
-                              viewerRef.current?.isolateObject(part.object);
+                              if (explodeActive) {
+                                // Explode View stays fully visible for context - dim
+                                // the rest instead of isolating (hiding) them.
+                                viewerRef.current?.highlightExplodePart(part.key);
+                              } else {
+                                viewerRef.current?.isolateObject(part.object);
+                              }
                               setPartMenu(null);
                             }}
                             className={`cad-part-row ${selectedPartKey === part.key ? "cad-part-row--active" : ""}`}

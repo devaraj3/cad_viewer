@@ -433,6 +433,111 @@
   height: 14px;
 }
 
+.cad-explode-order {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cad-explode-order-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.cad-explode-order-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.cad-explode-order-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-radius: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  background: var(--color-bg);
+  padding: 6px 8px;
+  transition: opacity 0.15s ease, border-color 0.15s ease;
+}
+
+.cad-explode-order-row--dragging {
+  opacity: 0.4;
+}
+
+.cad-explode-order-row--drag-over {
+  border-color: var(--color-blue-600);
+  box-shadow: 0 0 0 1px var(--color-blue-600) inset;
+}
+
+.cad-explode-order-row-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cad-explode-order-grip {
+  color: var(--color-ink-faint);
+  cursor: grab;
+  flex-shrink: 0;
+  display: flex;
+}
+
+.cad-explode-order-stage {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--font-mono, monospace);
+  color: var(--color-ink-muted);
+  background: rgba(148, 163, 184, 0.2);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.cad-explode-order-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-ink);
+}
+
+.cad-explode-order-row-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.cad-explode-order-tag {
+  font-size: 9px;
+  text-transform: uppercase;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--color-ink-faint);
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: rgba(148, 163, 184, 0.15);
+  margin-right: auto;
+}
+
+.cad-explode-order-tag--manual {
+  color: var(--color-blue-700);
+  background: rgba(59, 130, 246, 0.15);
+}
+
+.cad-explode-axis-btn {
+  min-width: 22px;
+  padding: 2px 6px;
+  font-size: 10px;
+  font-family: var(--font-mono, monospace);
+}
+
 .cad-inline-icon {
   display: inline-flex;
   align-items: center;

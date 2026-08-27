@@ -8,6 +8,7 @@ import {
   acceleratedRaycast,
   computeBoundsTree,
   disposeBoundsTree,
+  type MeshBVH,
 } from "three-mesh-bvh";
 import { Line2 } from "three/examples/jsm/lines/Line2.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
@@ -42,7 +43,7 @@ import type {
 type BufferGeometryWithBVH = THREE.BufferGeometry & {
   computeBoundsTree?: () => unknown;
   disposeBoundsTree?: () => unknown;
-  boundsTree?: unknown;
+  boundsTree?: MeshBVH;
 };
 
 const bufferGeometryPrototype =
@@ -347,6 +348,40 @@ function buildHiddenLineDebugTestGeometry(): THREE.BufferGeometry {
   return geom;
 }
 
+export type ExplodeRule =
+  | "cylinder"
+  | "flat-face"
+  | "radial-fallback"
+  | "principal-axis"
+  | "occupied-hole-axis"
+  | "manual-override";
+
+/** World-aligned axis a user can force a part's explode direction onto, overriding whatever geometry detection chose. */
+export type ExplodeAxisOverride = "x" | "y" | "z";
+
+export type ExplodeDebugEntry = {
+  partKey: string;
+  name: string;
+  rule: ExplodeRule;
+  axis: { x: number; y: number; z: number };
+  distance: number;
+  detail: string;
+  /** Removal-order stage (0 = moves first). Parts sharing a stage move simultaneously. Reflects manual stage reordering if any is active for this part. */
+  stage: number;
+  /** Names of parts whose assembled bounding box lies in this part's swept extraction path - i.e. must move first. Always reflects the AUTOMATIC blocking graph, even when this part's displayed stage has been manually reordered. */
+  blockedBy: string[];
+  /** True if this part was part of a mutual-blocking cycle, resolved by distance-from-centroid instead of true topological order. */
+  cycleFallback: boolean;
+  /** True if ANY manual override (stage, axis, or direction) is active for this part - see the Explode View "Order" panel. */
+  overridden: boolean;
+  /** True if this part's stage was manually reordered (drag-to-reorder), independent of whether its axis/direction were also touched. */
+  stageOverridden: boolean;
+  /** True if this part's axis was manually forced to a world axis, discarding the auto-detected one. */
+  axisOverridden: boolean;
+  /** True if this part's exit direction was manually reversed relative to whatever axis (auto or overridden) is in effect. */
+  directionFlipped: boolean;
+};
+
 export type Viewer = {
   loadMeshFromGeometry: (geom: THREE.BufferGeometry) => void;
   replacePrimaryGeometry: (
@@ -387,6 +422,45 @@ export type Viewer = {
   isolateObject: (object: THREE.Object3D) => void;
   clearIsolation: () => void;
   showAllParts: () => void;
+  /**
+   * Computes (or recomputes) the geometry-aware explode plan for every
+   * top-level assembly part - see computeExplodeAxisForPart for the
+   * cylinder-axis / dominant-flat-face / radial-fallback priority chain.
+   * Safe to call again after re-toggling Explode View on; always rebuilds
+   * fresh from current part positions. Returns one debug entry per part
+   * (which rule fired, the resolved axis, the resolved distance) for the
+   * UI's debug list and console logging.
+   */
+  computeExplodePlan: () => ExplodeDebugEntry[];
+  /** amount in [0,1]: 0 = assembled, 1 = fully exploded per the last computeExplodePlan(). No-op if no plan exists. */
+  setExplodeAmount: (amount: number) => void;
+  /** Self-scheduling rAF ease-out tween of the explode amount toward `target`, ~1.75s. onTick fires each frame so UI (e.g. the slider) can stay in sync. */
+  playExplode: (
+    target: 0 | 1,
+    onTick?: (amount: number) => void,
+    onDone?: () => void,
+  ) => void;
+  stopExplodeAnimation: () => void;
+  /** Restores every part to its assembled position (amount 0), clears any explode-part highlight. Does not discard the computed plan. */
+  resetExplode: () => void;
+  /** Dims every part except `partKey` (opacity only, nothing is hidden); null clears the dim. */
+  highlightExplodePart: (partKey: string | null) => void;
+  /** Forces a part's explode axis to a world-aligned direction (discarding auto-detected geometry); pass null to clear just this override. Recomputes the plan and returns fresh debug entries. */
+  setExplodePartAxisOverride: (
+    partKey: string,
+    axis: ExplodeAxisOverride | null,
+  ) => ExplodeDebugEntry[];
+  /** Reverses a part's exit direction relative to whatever axis is currently in effect. Recomputes the plan and returns fresh debug entries. */
+  setExplodePartDirectionFlip: (
+    partKey: string,
+    flipped: boolean,
+  ) => ExplodeDebugEntry[];
+  /** Moves a part to `targetIndex` within the order the last computeExplodePlan()/override call returned (drag-to-reorder). Recomputes the plan and returns fresh debug entries. */
+  reorderExplodePart: (partKey: string, targetIndex: number) => ExplodeDebugEntry[];
+  /** Clears every override (stage, axis, direction) for one part. Recomputes the plan and returns fresh debug entries. */
+  resetExplodePartOverride: (partKey: string) => ExplodeDebugEntry[];
+  /** Clears every override on every part, restoring the fully automatic plan. Recomputes the plan and returns fresh debug entries. */
+  resetAllExplodeOverrides: () => ExplodeDebugEntry[];
   highlightEdgeAtScreenPosition: (
     ndcX: number,
     ndcY: number,
@@ -3618,6 +3692,1718 @@ export function createViewer(container: HTMLElement): Viewer {
     isolationVisibilitySnapshot = null;
   }
 
+  // --- Explode view state -------------------------------------------------
+  type ExplodePlanEntry = {
+    object: THREE.Object3D;
+    originalPosition: THREE.Vector3;
+    axis: THREE.Vector3;
+    distance: number;
+    rule: ExplodeRule;
+    detail: string;
+    // Exact-CAD edge/curve-feature overlay objects (and their fat/pick twins)
+    // belonging to this part. These live under the global featureEdgesGroup,
+    // not as children of the part's own Object3D (see that group's doc
+    // comment), and their geometry is baked in world space at load time - so
+    // without this, translating the part during explode would leave its edge
+    // outline behind at the assembled position. Each one gets the same delta
+    // applied as the part itself (see setExplodeAmount). Empty for mesh-only
+    // parts (STL/OBJ etc.), whose approximate edge overlays are already
+    // parented under the mesh and move with it automatically.
+    edgeObjects: THREE.Object3D[];
+    // Needed to recompute edgeObjects after an adaptive curve resample -
+    // see reapplyExplodeEdgeDeltasAfterRebuild.
+    cadPartId: string | null;
+    // Last delta applied to object/edgeObjects (axis * distance * amount).
+    // rebuildExactCadEdges (triggered by camera/zoom-driven adaptive curve
+    // resampling, entirely independent of explode) recreates the exact-edge
+    // render objects from scratch at their baked assembled position, which
+    // would silently undo the explode offset on every affected part's edges -
+    // reapplyExplodeEdgeDeltasAfterRebuild uses this to restore it.
+    currentDelta: THREE.Vector3;
+    // Sequenced explosion: this part's own motion only spans [stageStart,
+    // stageEnd] of the global [0,1] slider/animation range (see
+    // computeBlockingOrder + computeExplodeStageWindows) - setExplodeAmount
+    // remaps the global amount into this part's local window instead of
+    // applying it directly, so parts move in physical removal order rather
+    // than all simultaneously.
+    stageStart: number;
+    stageEnd: number;
+  };
+  let explodePlan: Map<string, ExplodePlanEntry> | null = null;
+  let explodeAmount = 0;
+  let explodeAnimRAF: number | null = null;
+  // The world-origin axesHelper's colored (red/green/blue) arms are normally
+  // occluded by whatever solid geometry sits at the origin, so they're
+  // invisible in the assembled view - but explosion opens gaps between parts
+  // that used to hide them, exposing stray colored lines with no relation to
+  // the exploded parts. Hidden for the duration of an active explode plan and
+  // restored to whatever it was set to once that plan is torn down.
+  let axesVisibleBeforeExplode: boolean | null = null;
+
+  /**
+   * Manual per-part corrections layered on top of the automatic explode
+   * computation - see the Explode View "Order" panel in cad-viewer.tsx.
+   * Persists across recomputes (a toggle-off/on of Explode View, or a
+   * slider drag, does NOT discard these) since automatic detection can't
+   * be complete on every assembly (blocking/interlock/retention/headed-
+   * fastener geometry all have real limits) and a user's correction to a
+   * SPECIFIC part shouldn't be silently lost by an unrelated recompute.
+   * Only cleared by resetExplodePartOverride/resetAllExplodeOverrides
+   * (explicit user action) or resetExplodeForNewModel (a genuinely new
+   * model, where the old overrides can't mean anything).
+   */
+  type ExplodePartOverride = {
+    /** Fractional sort key from drag-to-reorder - see mergeManualStageOverrides. Not a literal stage number; final stage numbers are re-derived by dense-ranking every part's effective key together. */
+    stageKey?: number;
+    axisOverride?: ExplodeAxisOverride;
+    directionFlipped?: boolean;
+  };
+  const explodeOverridesByPartKey = new Map<string, ExplodePartOverride>();
+  /** Every part's key, in current final-stage order (ties broken stably) - refreshed at the end of every computeExplodePlan() call. Lets reorderExplodePart() find a dragged part's new neighbors without recomputing the whole plan just to discover the current order. */
+  let lastExplodeOrder: string[] = [];
+  /** Each part's effective sort key (manual stageKey override, or its auto stage) from the most recent computeExplodePlan() - the raw values mergeManualStageOverrides dense-ranked into final stage numbers. reorderExplodePart() reads a dragged part's new neighbors' keys from here to compute its own new fractional key. */
+  let lastEffectiveStageKeyByPartKey = new Map<string, number>();
+
+  const EXPLODE_BASE_SCALE = 0.5;
+  // Final per-part display distance is derived from its resolved stage
+  // (Pass 7): first-to-move parts (assembly-core fasteners like a knuckle
+  // pin) travel LESS than later, peripheral parts - matches how a real
+  // disassembly clears itself outward, rather than every part popping the
+  // same distance regardless of how deep it sits.
+  const EXPLODE_STAGE_DISTANCE_MIN_MULTIPLIER = 0.6;
+  const EXPLODE_STAGE_DISTANCE_MAX_MULTIPLIER = 1.8;
+  // Consecutive stage windows overlap by this fraction of a stage's own
+  // duration, so later parts start easing in while earlier ones are still
+  // finishing rather than snapping in strict lockstep - still clearly
+  // sequential, just not robotic.
+  const EXPLODE_STAGE_OVERLAP = 0.3;
+  // A part is FASTENER-LIKE (pin/bolt/dowel/collar - exits along its own
+  // cylinder axis) when it's small relative to the assembly AND not a
+  // paper-thin disc. Anything else with a cylindrical candidate face is a
+  // BODY PART: that face may be a bore another part passes through rather
+  // than its own shaft, so it needs the hole-vs-shaft check (see
+  // candidateCylinderIsHole) before the axis is trusted.
+  const FASTENER_VOLUME_RATIO_MAX = 0.15;
+  const FASTENER_ASPECT_RATIO_MIN = 0.6;
+
+  function stopExplodeAnimation(): void {
+    if (explodeAnimRAF !== null) {
+      cancelAnimationFrame(explodeAnimRAF);
+      explodeAnimRAF = null;
+    }
+  }
+
+  function restoreAxesVisibilityAfterExplode(): void {
+    if (axesHelper && axesVisibleBeforeExplode !== null) {
+      axesHelper.visible = axesVisibleBeforeExplode;
+    }
+    axesVisibleBeforeExplode = null;
+  }
+
+  /** Full teardown for a model unload/reload - unlike resetExplode(), also discards the cached plan. */
+  function resetExplodeForNewModel(): void {
+    stopExplodeAnimation();
+    restoreAxesVisibilityAfterExplode();
+    explodePlan = null;
+    explodeAmount = 0;
+    explodeOverridesByPartKey.clear();
+    lastExplodeOrder = [];
+    lastEffectiveStageKeyByPartKey = new Map();
+  }
+
+  /**
+   * Finds every candidate cylindrical-face axis for a part, using the exact
+   * CAD topology already extracted for stepped-hole detection (see
+   * findSteppedPartner below). Buckets cylinder faces by axis direction
+   * (sign-agnostic) so coaxial faces - e.g. a screw's head and shank - land
+   * in one bucket, then ranks buckets by max radius (largest first). Each
+   * bucket also carries the average face origin along that axis, used by
+   * callers that need to test whether the axis LINE (not just direction)
+   * lines up with another part's - see axisLinesCoaxial. Returns [] if the
+   * part has no CAD topology (mesh-only formats) or no cylindrical faces.
+   */
+  function computeCylinderAxisCandidates(
+    partId: string,
+  ): { axis: THREE.Vector3; radius: number; origin: THREE.Vector3 }[] {
+    const buckets: {
+      axis: THREE.Vector3;
+      maxRadius: number;
+      originSum: THREE.Vector3;
+      originCount: number;
+    }[] = [];
+    for (const face of facesById.values()) {
+      if (face.kind !== "cylinder" || face.partId !== partId) continue;
+      const rawAxis = face.analytic?.axis;
+      const radius = face.analytic?.radius;
+      if (!rawAxis || typeof radius !== "number" || !Number.isFinite(radius)) {
+        continue;
+      }
+      const axis = new THREE.Vector3(rawAxis[0], rawAxis[1], rawAxis[2]);
+      if (axis.lengthSq() < 1e-12) continue;
+      axis.normalize();
+      const rawOrigin = face.analytic?.origin;
+      const origin = rawOrigin
+        ? new THREE.Vector3(rawOrigin[0], rawOrigin[1], rawOrigin[2])
+        : new THREE.Vector3();
+      const bucket = buckets.find((b) => Math.abs(b.axis.dot(axis)) > 0.999);
+      if (bucket) {
+        bucket.maxRadius = Math.max(bucket.maxRadius, radius);
+        bucket.originSum.add(origin);
+        bucket.originCount += 1;
+      } else {
+        buckets.push({
+          axis,
+          maxRadius: radius,
+          originSum: origin.clone(),
+          originCount: 1,
+        });
+      }
+    }
+    buckets.sort((a, b) => b.maxRadius - a.maxRadius);
+    return buckets.map((b) => ({
+      axis: b.axis.clone(),
+      radius: b.maxRadius,
+      origin: b.originSum.clone().divideScalar(b.originCount),
+    }));
+  }
+
+  /**
+   * Two cylindrical faces on DIFFERENT parts sharing (approximately) the
+   * same axis line is strong evidence of a genuine mating/pivot feature (a
+   * pin seated in a bore, a shaft in a bearing, etc.) - see the axis
+   * selection in computeExplodePlan, which prefers this over a part's own
+   * largest-radius face: radius alone can't tell a functional bore or shaft
+   * apart from an unrelated same-size (or larger) boss/chamfer that has no
+   * mating partner. Direction must be near-parallel (sign-agnostic - a bore
+   * and its mating shaft can each report their axis in either direction)
+   * and the perpendicular offset between the two lines small relative to
+   * the larger feature's radius (a generous multiple, not exact zero - real
+   * assemblies have fit clearance, and these axes are analytic/mesh-derived
+   * approximations, not exact CAD values).
+   */
+  function axisLinesCoaxial(
+    axisA: THREE.Vector3,
+    originA: THREE.Vector3,
+    axisB: THREE.Vector3,
+    originB: THREE.Vector3,
+    referenceRadius: number,
+  ): boolean {
+    if (Math.abs(axisA.dot(axisB)) < 0.98) return false;
+    const delta = originB.clone().sub(originA);
+    const along = delta.dot(axisA);
+    const perp = delta.sub(axisA.clone().multiplyScalar(along));
+    const tolerance = Math.max(referenceRadius * 1.5, 2);
+    return perp.length() <= tolerance;
+  }
+
+  /**
+   * Finds the part's dominant flat face by clustering mesh triangles (world
+   * space) by normal direction and summing area per cluster - there is no
+   * OCC-level per-face area anywhere in the tessellation pipeline, so this
+   * works directly off the rendered geometry instead (also makes it work for
+   * mesh-only parts, not just CAD topology). Each cluster is seeded by its
+   * first triangle's normal and never re-averaged, so a continuously curving
+   * surface can't chain-drift into one falsely "flat" cluster. Returns null
+   * unless the top cluster clearly dominates (>= 1.5x the runner-up and >=
+   * ~25% of the part's largest bounding-box face) - deliberately conservative
+   * so ambiguous parts fall through to the radial fallback instead of
+   * guessing a wrong flat-face direction.
+   */
+  function computeDominantFlatNormal(
+    partObject: THREE.Object3D,
+  ): { normal: THREE.Vector3; area: number } | null {
+    const clusters: { normal: THREE.Vector3; area: number }[] = [];
+    const va = new THREE.Vector3();
+    const vb = new THREE.Vector3();
+    const vc = new THREE.Vector3();
+    const edge1 = new THREE.Vector3();
+    const edge2 = new THREE.Vector3();
+    const triNormal = new THREE.Vector3();
+
+    partObject.updateWorldMatrix(true, true);
+    partObject.traverse((node: any) => {
+      if (!node?.isMesh) return;
+      if (node.userData?.__isFeatureEdge || node.userData?.__edgeOverlay) return;
+      const geom: THREE.BufferGeometry | undefined = node.geometry;
+      const pos = geom?.attributes?.position as THREE.BufferAttribute | undefined;
+      if (!geom || !pos) return;
+      const index = geom.index;
+      const triCount = index ? index.count / 3 : pos.count / 3;
+      const matrixWorld = node.matrixWorld as THREE.Matrix4;
+
+      for (let t = 0; t < triCount; t++) {
+        const i0 = index ? index.getX(t * 3) : t * 3;
+        const i1 = index ? index.getX(t * 3 + 1) : t * 3 + 1;
+        const i2 = index ? index.getX(t * 3 + 2) : t * 3 + 2;
+        va.fromBufferAttribute(pos, i0).applyMatrix4(matrixWorld);
+        vb.fromBufferAttribute(pos, i1).applyMatrix4(matrixWorld);
+        vc.fromBufferAttribute(pos, i2).applyMatrix4(matrixWorld);
+        edge1.subVectors(vb, va);
+        edge2.subVectors(vc, va);
+        triNormal.crossVectors(edge1, edge2);
+        const area = triNormal.length() * 0.5;
+        if (area < 1e-9) continue;
+        triNormal.normalize();
+
+        const cluster = clusters.find((c) => c.normal.dot(triNormal) > 0.999);
+        if (cluster) {
+          cluster.area += area;
+        } else {
+          clusters.push({ normal: triNormal.clone(), area });
+        }
+      }
+    });
+
+    if (clusters.length === 0) return null;
+    clusters.sort((a, b) => b.area - a.area);
+    const best = clusters[0];
+    const runnerUp = clusters[1];
+
+    const box = new THREE.Box3().setFromObject(partObject);
+    const size = box.getSize(new THREE.Vector3());
+    const dims = [size.x, size.y, size.z].sort((a, b) => b - a);
+    const largestBBoxFaceArea = dims[0] * dims[1];
+
+    const dominantEnough =
+      (!runnerUp || best.area >= runnerUp.area * 1.5) &&
+      (largestBBoxFaceArea <= 0 || best.area >= largestBBoxFaceArea * 0.25);
+    if (!dominantEnough) return null;
+
+    return { normal: best.normal.clone(), area: best.area };
+  }
+
+  /** Projects an AABB onto an arbitrary (not necessarily world-aligned) unit axis via its 8 corners - the standard support-function technique, robust regardless of how the axis is oriented. Used for fastener-aspect-ratio, hole-vs-shaft, and clearance-direction tests below. */
+  function projectBoxOntoAxis(
+    box: THREE.Box3,
+    axis: THREE.Vector3,
+  ): { min: number; max: number } {
+    let min = Infinity;
+    let max = -Infinity;
+    for (let i = 0; i < 8; i++) {
+      const x = i & 1 ? box.max.x : box.min.x;
+      const y = i & 2 ? box.max.y : box.min.y;
+      const z = i & 4 ? box.max.z : box.min.z;
+      const d = x * axis.x + y * axis.y + z * axis.z;
+      if (d < min) min = d;
+      if (d > max) max = d;
+    }
+    return { min, max };
+  }
+
+  /**
+   * Closed-form t-interval (clamped to [tRangeMin, tRangeMax]) over which
+   * box0, translated by axis*t, can possibly overlap otherBox0. Translating
+   * an AABB along a fixed vector keeps it axis-aligned (both corners just
+   * shift by the same vector), so per-dimension overlap is one linear
+   * inequality in t; intersecting the three dimensions' resulting intervals
+   * gives the exact combined interval with no sampling needed. Returns null
+   * when overlap is impossible for every t - either the combined interval
+   * is empty, or axis has ~zero component along some dimension where the
+   * two boxes already don't overlap (motion along the other dimensions can
+   * never fix that one).
+   */
+  function computeSweptBoxOverlapInterval(
+    box0: THREE.Box3,
+    axis: THREE.Vector3,
+    otherBox0: THREE.Box3,
+    tRangeMin: number,
+    tRangeMax: number,
+  ): { lo: number; hi: number } | null {
+    let lo = tRangeMin;
+    let hi = tRangeMax;
+    const dims: ("x" | "y" | "z")[] = ["x", "y", "z"];
+    for (const dim of dims) {
+      const a = axis[dim];
+      const bMin = box0.min[dim];
+      const bMax = box0.max[dim];
+      const oMin = otherBox0.min[dim];
+      const oMax = otherBox0.max[dim];
+      if (Math.abs(a) < 1e-9) {
+        if (bMax < oMin || bMin > oMax) return null;
+        continue;
+      }
+      const t1 = (oMax - bMin) / a;
+      const t2 = (oMin - bMax) / a;
+      const dimLo = Math.min(t1, t2);
+      const dimHi = Math.max(t1, t2);
+      lo = Math.max(lo, dimLo);
+      hi = Math.min(hi, dimHi);
+      if (lo > hi) return null;
+    }
+    return lo > hi ? null : { lo, hi };
+  }
+
+  /**
+   * Bounding-box blocker list for ONE signed direction (axis already carries
+   * its sign): every other part whose assembled box genuinely lies AHEAD of
+   * this part along axis - overlapping its cross-section once translated
+   * far enough to clear its OWN projected extent (ownExtent =
+   * |axis.x|*size.x + |axis.y|*size.y + |axis.z|*size.z, via
+   * projectBoxOntoAxis). No finite travel cap: whether something is in the
+   * way is a property of the exit LINE, not of how far the animation will
+   * eventually display it moving (see EXPLODE_STAGE_DISTANCE_*_MULTIPLIER
+   * for that, applied only after staging). A fixed finite probe here
+   * previously produced false blockers on large, spread-out assemblies
+   * (unrelated parts on the far side happened to fall within the probe
+   * length) - Infinity removes that arbitrary tuning knob entirely.
+   * Skipping a part's own extent before testing is what keeps two merely-
+   * touching neighbors (a pin seated in its bore, a shoulder against a
+   * face) from registering as mutual blockers - without it, every
+   * physically-touching neighbor in the assembly would flag as blocked in
+   * every direction, turning a normal linear chain into a near-total cycle.
+   */
+  function computeBboxBlockersForSignedAxis(
+    selfBox0: THREE.Box3,
+    axis: THREE.Vector3,
+    others: { partKey: string; box0: THREE.Box3 }[],
+  ): string[] {
+    const ownProj = projectBoxOntoAxis(selfBox0, axis);
+    const ownExtent = ownProj.max - ownProj.min;
+    const blockers: string[] = [];
+    for (const other of others) {
+      const interval = computeSweptBoxOverlapInterval(
+        selfBox0,
+        axis,
+        other.box0,
+        ownExtent,
+        Infinity,
+      );
+      if (interval) blockers.push(other.partKey);
+    }
+    return blockers;
+  }
+
+  /**
+   * Picks the least-blocked SIGN along one axis line: tests both +axis and
+   * -axis via computeBboxBlockersForSignedAxis, prefers whichever has fewer
+   * blockers, and on an exact tie prefers whichever side has more open room
+   * before the assembly's own bounding-box edge.
+   */
+  function pickBestSignByBbox(
+    selfBox0: THREE.Box3,
+    axisLine: THREE.Vector3,
+    assemblyBox0: THREE.Box3,
+    others: { partKey: string; box0: THREE.Box3 }[],
+  ): { axis: THREE.Vector3; blockedBy: string[] } {
+    const plusAxis = axisLine.clone();
+    const minusAxis = axisLine.clone().negate();
+    const plusBlockers = computeBboxBlockersForSignedAxis(
+      selfBox0,
+      plusAxis,
+      others,
+    );
+    const minusBlockers = computeBboxBlockersForSignedAxis(
+      selfBox0,
+      minusAxis,
+      others,
+    );
+    if (plusBlockers.length !== minusBlockers.length) {
+      return plusBlockers.length < minusBlockers.length
+        ? { axis: plusAxis, blockedBy: plusBlockers }
+        : { axis: minusAxis, blockedBy: minusBlockers };
+    }
+    const proj = projectBoxOntoAxis(selfBox0, plusAxis);
+    const assemblyProj = projectBoxOntoAxis(assemblyBox0, plusAxis);
+    const openPlus = assemblyProj.max - proj.max;
+    const openMinus = proj.min - assemblyProj.min;
+    return openPlus >= openMinus
+      ? { axis: plusAxis, blockedBy: plusBlockers }
+      : { axis: minusAxis, blockedBy: minusBlockers };
+  }
+
+  /**
+   * Distinguishes a genuine fastener (pin/bolt/dowel/collar - small relative
+   * to the assembly, not a paper-thin disc) from a BODY part, per the
+   * FASTENER_VOLUME_RATIO_MAX / FASTENER_ASPECT_RATIO_MIN thresholds. Only
+   * fastener-like parts trust their own dominant cylindrical face outright -
+   * a body part's cylindrical face needs the hole-vs-shaft check below,
+   * since it's frequently a bore another part passes through rather than
+   * the part's own exit shaft (see the Knuckle Joint eye/fork bug this
+   * fixes: both nested a pin through the same bore and inherited its axis).
+   */
+  function isFastenerLikePart(
+    partBox0: THREE.Box3,
+    assemblyBox0: THREE.Box3,
+    candidate: { axis: THREE.Vector3; radius: number },
+  ): boolean {
+    const partSize = partBox0.getSize(new THREE.Vector3());
+    const assemblySize = assemblyBox0.getSize(new THREE.Vector3());
+    const partVolume = partSize.x * partSize.y * partSize.z;
+    const assemblyVolume = assemblySize.x * assemblySize.y * assemblySize.z;
+    const volumeRatio = assemblyVolume > 1e-9 ? partVolume / assemblyVolume : 0;
+
+    const proj = projectBoxOntoAxis(partBox0, candidate.axis);
+    const axisLength = proj.max - proj.min;
+    const diameter = candidate.radius * 2;
+    const aspectRatio = diameter > 1e-9 ? axisLength / diameter : 0;
+
+    return (
+      volumeRatio <= FASTENER_VOLUME_RATIO_MAX &&
+      aspectRatio >= FASTENER_ASPECT_RATIO_MIN
+    );
+  }
+
+  /** Any two unit vectors spanning the plane perpendicular to axis - arbitrarily oriented within that plane (only used for size/containment comparisons, which don't care about in-plane orientation). */
+  function perpendicularBasis(axis: THREE.Vector3): [THREE.Vector3, THREE.Vector3] {
+    const helper =
+      Math.abs(axis.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+    const u = new THREE.Vector3().crossVectors(axis, helper).normalize();
+    const v = new THREE.Vector3().crossVectors(axis, u).normalize();
+    return [u, v];
+  }
+
+  /**
+   * Is this candidate cylindrical face a HOLE (another part's body occupies
+   * its interior, e.g. a pin through a bore) rather than the part's own
+   * solid shaft? For each other part: (a) its box must genuinely overlap
+   * this part's own extent along the candidate axis (not just graze it),
+   * (b) its cross-sectional footprint (projected onto the plane
+   * perpendicular to the axis) must be meaningfully smaller than the
+   * candidate's own diameter - too big to be "a shaft passing through," and
+   * (c) that footprint must sit within this part's own cross-sectional
+   * footprint, with some slack.
+   *
+   * Deliberately avoids the candidate face's analytic `origin` (the
+   * bucket-averaged location from computeCylinderAxisCandidates) and any
+   * whole-body centroid as a reference point on the axis line: origin
+   * turned out unreliable on real data (confirmed on Knuckle Joint - two
+   * unrelated parts' bucket origins converged on the same implausible
+   * value, tens of mm from either part's actual mesh position), and a
+   * whole-body centroid is equally unreliable for a part that's elongated
+   * perpendicular to its own candidate axis (e.g. an eye/fork's rod length
+   * drags its centroid away from its hub's true transverse position). Pure
+   * box-corner projections along the axis and its perpendicular plane don't
+   * need either - this part's own bounding box already necessarily contains
+   * its own hub, wherever within the box that hub actually sits.
+   */
+  /**
+   * Returns the partKeys of every other part whose geometry occupies this
+   * candidate cylindrical face's interior (empty if none - i.e. it's this
+   * part's own shaft, not a bore). See the interlock-constraint pass in
+   * computeExplodePlan: a part with something occupying its bore can only
+   * ever slide out along that bore's own axis, so identifying WHICH part(s)
+   * occupy it (not just whether any do) lets the caller add a hard
+   * blocking edge when this part's actual chosen exit axis ends up being a
+   * different direction than the bore.
+   *
+   * crossSizeThresholdMultiplier controls how much bigger than the
+   * candidate's own diameter an occupant's cross-section is allowed to be.
+   * Default (0.9) assumes a clearance fit - a genuinely smaller shaft in a
+   * bigger bore - which is what axis-selection callers want (conservative,
+   * so a real shaft doesn't get misclassified as a hole). The
+   * interlock-edge scan in computeExplodePlan passes a looser multiplier:
+   * a taper pin or dowel retaining another fastener is routinely fabricated
+   * at or slightly ABOVE the nominal hole diameter (interference/press fit,
+   * not clearance), confirmed on Knuckle Joint - the lock pin's own
+   * cross-section (6.5mm) is larger than the 5mm transverse hole it's
+   * driven into, which the strict default wrongly excludes.
+   */
+  function findCylinderHoleOccupants(
+    candidate: { axis: THREE.Vector3; radius: number },
+    ownBox0: THREE.Box3,
+    otherParts: { box0: THREE.Box3; partKey: string }[],
+    crossSizeThresholdMultiplier = 0.9,
+  ): string[] {
+    const ownProj = projectBoxOntoAxis(ownBox0, candidate.axis);
+    const [u, v] = perpendicularBasis(candidate.axis);
+    const ownU = projectBoxOntoAxis(ownBox0, u);
+    const ownV = projectBoxOntoAxis(ownBox0, v);
+    const diameter = candidate.radius * 2;
+    const margin = candidate.radius * 0.25;
+
+    const occupants: string[] = [];
+    for (const other of otherParts) {
+      const otherProj = projectBoxOntoAxis(other.box0, candidate.axis);
+      const overlap =
+        Math.min(ownProj.max, otherProj.max) -
+        Math.max(ownProj.min, otherProj.min);
+      const minSpan = Math.min(
+        ownProj.max - ownProj.min,
+        otherProj.max - otherProj.min,
+      );
+      if (overlap <= minSpan * 0.3) continue;
+
+      const otherU = projectBoxOntoAxis(other.box0, u);
+      const otherV = projectBoxOntoAxis(other.box0, v);
+      const otherCrossSize = Math.max(
+        otherU.max - otherU.min,
+        otherV.max - otherV.min,
+      );
+      if (otherCrossSize >= diameter * crossSizeThresholdMultiplier) continue;
+
+      const containedU = otherU.min >= ownU.min - margin && otherU.max <= ownU.max + margin;
+      const containedV = otherV.min >= ownV.min - margin && otherV.max <= ownV.max + margin;
+      if (containedU && containedV) occupants.push(other.partKey);
+    }
+    return occupants;
+  }
+
+  /**
+   * Priority chain (a) cylinder axis - resolved by the caller, which picks
+   * among a part's candidate cylindrical faces preferring one that lines up
+   * with a neighboring part's axis (see axisLinesCoaxial) over blindly
+   * taking the largest radius, but ONLY trusted outright when the part is
+   * fastener-like (isFastenerLikePart); a body part's candidate is trusted
+   * only if it's provably not a bore (candidateCylinderIsHole) - otherwise
+   * the part's own principal axis (its longest AABB dimension - the
+   * direction it actually extends along, e.g. an eye/fork's rod-shaft
+   * length) replaces it -> (b) a hole this part is KNOWN to occupy in
+   * another part (see occupiedHoleAxis - the interlock-scan pass in
+   * computeExplodePlan already identified this part as the occupant of
+   * some other part's bore; that bore's own axis is definitionally this
+   * part's true exit line too, and is a stronger signal than a generic
+   * flat-face/radial guess for a part with no cylindrical candidate of its
+   * own, e.g. a tapered lock pin the analytic extractor never classifies
+   * as "cylinder" kind) -> (c) dominant flat-face normal -> (d) radial
+   * fallback. Returns an axis LINE only (unit vector, arbitrary sign) -
+   * direction is resolved separately by resolveExplodeDirectionSign, which
+   * clearance-tests both signs rather than assuming "outward from centroid"
+   * is correct.
+   */
+  function computeExplodeAxisForPart(
+    partObject: THREE.Object3D,
+    partBox0: THREE.Box3,
+    partCentroid: THREE.Vector3,
+    assemblyBox0: THREE.Box3,
+    assemblyCentroid: THREE.Vector3,
+    cylinderCandidate: { axis: THREE.Vector3; radius: number; origin: THREE.Vector3 } | null,
+    otherParts: { box0: THREE.Box3; centroid: THREE.Vector3; partKey: string }[],
+    occupiedHoleAxis: THREE.Vector3 | null,
+  ): { axis: THREE.Vector3; rule: ExplodeRule; detail: string } {
+    let axis: THREE.Vector3 | null = null;
+    let rule: ExplodeRule = "radial-fallback";
+    let detail = "";
+
+    if (cylinderCandidate) {
+      if (isFastenerLikePart(partBox0, assemblyBox0, cylinderCandidate)) {
+        axis = cylinderCandidate.axis;
+        rule = "cylinder";
+        detail = `fastener-like, dominant cylindrical face, radius ${cylinderCandidate.radius.toFixed(2)}mm`;
+      } else {
+        const occupants = findCylinderHoleOccupants(cylinderCandidate, partBox0, otherParts);
+        if (occupants.length === 0) {
+          axis = cylinderCandidate.axis;
+          rule = "cylinder";
+          detail = `body part, own shaft (not a bore), radius ${cylinderCandidate.radius.toFixed(2)}mm`;
+        } else {
+          const size = partBox0.getSize(new THREE.Vector3());
+          axis =
+            size.x >= size.y && size.x >= size.z
+              ? new THREE.Vector3(1, 0, 0)
+              : size.y >= size.z
+                ? new THREE.Vector3(0, 1, 0)
+                : new THREE.Vector3(0, 0, 1);
+          rule = "principal-axis";
+          detail = `body part; radius ${cylinderCandidate.radius.toFixed(2)}mm face is a bore another part passes through - using own longest dimension instead`;
+        }
+      }
+    }
+
+    if (!axis && occupiedHoleAxis) {
+      axis = occupiedHoleAxis.clone();
+      rule = "occupied-hole-axis";
+      detail = "no cylindrical candidate of its own; occupies another part's hole - exits along that hole's axis";
+    }
+
+    if (!axis) {
+      const flat = computeDominantFlatNormal(partObject);
+      if (flat) {
+        axis = flat.normal;
+        rule = "flat-face";
+        detail = `dominant flat face, area ${flat.area.toFixed(1)}mm^2`;
+      }
+    }
+
+    if (!axis) {
+      rule = "radial-fallback";
+      const outward = new THREE.Vector3().subVectors(partCentroid, assemblyCentroid);
+      if (outward.lengthSq() < 1e-6) {
+        axis = new THREE.Vector3(0, 1, 0);
+        detail = "part centroid coincides with assembly centroid; defaulted to +Y";
+      } else {
+        axis = outward.normalize();
+        detail = "radial direction from assembly centroid";
+      }
+    }
+
+    return { axis, rule, detail };
+  }
+
+  /**
+   * Whether the special-case headed-fastener sign override (below) runs.
+   * The clearance test in Pass 3 only sweeps a part's BOUNDING BOX against
+   * others, which can't see a head's true radius profile (a fastener head
+   * and its narrower shaft share one box) - this special case approximates
+   * that from mesh vertices directly, forcing the head-first exit a plain
+   * box sweep would otherwise miss. See detectHeadedFastenerAxisSign's own
+   * doc comment for why it compares the two ends directly.
+   */
+  const HEADED_FASTENER_SPECIAL_CASE_ENABLED = true;
+
+  const HEADED_FASTENER_END_FRACTION = 0.15;
+  const HEADED_FASTENER_RADIUS_RATIO = 1.25;
+
+  /**
+   * Does this fastener-like part have a HEAD (a flange, bolt head, rivet
+   * head, or shoulder) at one end of its dominant cylinder axis, clearly
+   * wider than the other end? A head can only pass back out the way it
+   * came in - the clearance sweep in resolveExplodeDirectionSign sees both
+   * directions as equally open because it only tests the part's own AABB
+   * against OTHER parts, and a head sitting proud of its own shaft doesn't
+   * intersect anything; the real constraint is the hole the SHAFT sits in,
+   * which the head is too wide to pass back through.
+   *
+   * Detected directly off mesh vertices (the AABB alone can't reveal a
+   * radius PROFILE along the axis): compares the max perpendicular-from-
+   * axis distance among vertices in the outer HEADED_FASTENER_END_FRACTION
+   * of the part's length at EACH end directly against each other, rather
+   * than against a "shaft baseline" sampled from the middle of the part.
+   * That baseline approach was tried first and failed on real data: a
+   * plain cylindrical wall needs no tessellation vertices between its
+   * ends (a straight extrusion has nothing to bend around), so the middle
+   * of a simple stepped shaft can have ZERO sample vertices at all - e.g.
+   * the Knuckle Joint's own pin, whose 4132 vertices split almost
+   * entirely between its wide r19 main body at one end and its narrower
+   * r12 reduced end, with nothing in between. Comparing the two ends
+   * directly needs no middle data at all, and still correctly treats a
+   * stepped/shouldered shaft as headed - that IS the shoulder-screw case
+   * this is meant to catch, per the same asymmetric-radius principle.
+   *
+   * Returns the sign that points FROM the narrow end TOWARD the wide end
+   * (pulling the wide end out leads the motion) if exactly one end is
+   * clearly wider; null if neither end qualifies (no head/step) - callers
+   * should fall back to the ordinary clearance test in that case.
+   */
+  function detectHeadedFastenerAxisSign(
+    partObject: THREE.Object3D,
+    axis: THREE.Vector3,
+    refPoint: THREE.Vector3,
+  ): 1 | -1 | null {
+    const worldPos = new THREE.Vector3();
+    const toRef = new THREE.Vector3();
+    const perp = new THREE.Vector3();
+    const samples: { t: number; r: number }[] = [];
+    let tMin = Infinity;
+    let tMax = -Infinity;
+
+    partObject.updateWorldMatrix(true, true);
+    partObject.traverse((node: any) => {
+      if (!node?.isMesh) return;
+      if (node.userData?.__isFeatureEdge || node.userData?.__edgeOverlay) return;
+      const geom: THREE.BufferGeometry | undefined = node.geometry;
+      const pos = geom?.attributes?.position as THREE.BufferAttribute | undefined;
+      if (!pos) return;
+      const matrixWorld = node.matrixWorld as THREE.Matrix4;
+      for (let i = 0; i < pos.count; i++) {
+        worldPos.fromBufferAttribute(pos, i).applyMatrix4(matrixWorld);
+        toRef.subVectors(worldPos, refPoint);
+        const t = toRef.dot(axis);
+        perp.copy(toRef).addScaledVector(axis, -t);
+        samples.push({ t, r: perp.length() });
+        if (t < tMin) tMin = t;
+        if (t > tMax) tMax = t;
+      }
+    });
+
+    const span = tMax - tMin;
+    if (samples.length === 0 || span < 1e-6) return null;
+
+    const edgeWidth = span * HEADED_FASTENER_END_FRACTION;
+    let lowEndRadius = 0;
+    let highEndRadius = 0;
+    for (const s of samples) {
+      if (s.t <= tMin + edgeWidth && s.r > lowEndRadius) lowEndRadius = s.r;
+      if (s.t >= tMax - edgeWidth && s.r > highEndRadius) highEndRadius = s.r;
+    }
+    if (lowEndRadius < 1e-6 && highEndRadius < 1e-6) return null;
+
+    if (lowEndRadius > highEndRadius * HEADED_FASTENER_RADIUS_RATIO) return -1;
+    if (highEndRadius > lowEndRadius * HEADED_FASTENER_RADIUS_RATIO) return 1;
+    return null;
+  }
+
+  /**
+   * Exact-CAD edge/curve-feature overlay objects (plus their cosmetic fat-line
+   * and pick twins) for one part, so explode can translate them in lockstep
+   * with the part's mesh - see the ExplodePlanEntry.edgeObjects doc comment.
+   * Each render object already carries userData.__cadPartId (see
+   * rebuildExactCadEdges), so this is a simple filter, no new indexing needed.
+   */
+  function collectExplodeEdgeObjectsForPart(
+    cadPartId: string | null,
+  ): THREE.Object3D[] {
+    if (!cadPartId) return [];
+    const objects: THREE.Object3D[] = [];
+    for (const [id, line] of exactEdgeRenderObjectsById) {
+      if (line.userData?.__cadPartId !== cadPartId) continue;
+      objects.push(line);
+      const fat = exactEdgeFatOverlayById.get(id);
+      if (fat) objects.push(fat);
+    }
+    for (const [id, line] of curveFeatureRenderObjectsById) {
+      if (line.userData?.__cadPartId !== cadPartId) continue;
+      objects.push(line);
+      const fat = curveFeatureFatOverlayById.get(id);
+      if (fat) objects.push(fat);
+    }
+    for (const line of curveFeaturePickObjectsById.values()) {
+      if (line.userData?.__cadPartId !== cadPartId) continue;
+      objects.push(line);
+    }
+    return objects;
+  }
+
+  /**
+   * rebuildExactCadEdges (camera/zoom-driven adaptive curve resampling, see
+   * scheduleExactCurveFeatureResample) recreates every exact-edge/curve-
+   * feature render object from scratch at its baked assembled position,
+   * which would silently snap an exploded part's edge outline back to the
+   * assembled layout the next time the view triggers a resample - even
+   * though the part's own mesh stays correctly exploded. Called at the end
+   * of rebuildExactCadEdges whenever an explode plan is active: refreshes
+   * each part's edgeObjects list against the newly rebuilt maps and
+   * re-applies its last-known delta immediately, before the next paint.
+   */
+  function reapplyExplodeEdgeDeltasAfterRebuild(): void {
+    if (!explodePlan) return;
+    for (const entry of explodePlan.values()) {
+      entry.edgeObjects = collectExplodeEdgeObjectsForPart(entry.cadPartId);
+      for (const edgeObject of entry.edgeObjects) {
+        edgeObject.position.copy(entry.currentDelta);
+      }
+    }
+  }
+
+  type ExplodeBlockingInput = {
+    partKey: string;
+    centroidDist: number;
+    /** Bounding-box blockers for this part's resolved direction (see pickBestSignByBbox), unioned with the hard interlock edges (see the interlock-constraint pass in computeExplodePlan) before Kahn's algorithm runs - both edge sources feed the same dependency graph, this function doesn't care which produced an edge. */
+    blockedBy: string[];
+  };
+  type ExplodeBlockingResult = {
+    stage: number;
+    blockedBy: string[];
+    cycleFallback: boolean;
+  };
+
+  /**
+   * Sequence-aware blocking order: a real exploded view removes parts in the
+   * order they can physically come out, not all at once. Each part's
+   * blockedBy set (already resolved by the caller via bounding-box sweeps -
+   * see pickBestSignByBbox - unioned with hard interlock edges) becomes a
+   * dependency edge j -> i (j must be
+   * staged before i) for every j it names. A part with nothing blocking it
+   * can move first; a part blocked by another can only move once its
+   * blocker's own stage has started. Kahn's algorithm turns this into
+   * "waves" (parts with no remaining blockers get the next stage, then
+   * their removal unblocks whatever they were blocking, repeat) - parts
+   * that land in the same wave share a stage and move simultaneously.
+   *
+   * Two real parts can mutually block each other (e.g. two pins crossing
+   * through a shared bore from opposite sides) - a cycle with no valid
+   * topological order. Whatever's left after the wave-processing loop is
+   * exactly that: broken by falling back to distance-from-assembly-centroid
+   * (furthest/most peripheral first, consistent with the nesting-distance
+   * heuristic elsewhere), each such part getting its own subsequent stage,
+   * logged so it's visible when it happens rather than silently guessed at.
+   */
+  function computeExplodeBlockingOrder(
+    inputs: ExplodeBlockingInput[],
+  ): Map<string, ExplodeBlockingResult> {
+    const centroidDistByKey = new Map<string, number>();
+    for (const input of inputs) {
+      centroidDistByKey.set(input.partKey, input.centroidDist);
+    }
+
+    const blockedBy = new Map<string, Set<string>>();
+    for (const input of inputs) {
+      blockedBy.set(input.partKey, new Set(input.blockedBy));
+    }
+
+    // dependents[j] = parts that j blocks - removing j can unblock them.
+    const dependents = new Map<string, string[]>();
+    for (const input of inputs) dependents.set(input.partKey, []);
+    for (const [partKey, blockers] of blockedBy) {
+      for (const blocker of blockers) {
+        dependents.get(blocker)!.push(partKey);
+      }
+    }
+
+    const inDegree = new Map<string, number>();
+    for (const input of inputs) inDegree.set(input.partKey, blockedBy.get(input.partKey)!.size);
+
+    const stageOf = new Map<string, number>();
+    const cycleFallback = new Set<string>();
+    const processed = new Set<string>();
+
+    let queue = inputs
+      .filter((i) => inDegree.get(i.partKey) === 0)
+      .map((i) => i.partKey);
+    let stage = 0;
+    while (queue.length > 0) {
+      const nextSet = new Set<string>();
+      for (const partKey of queue) {
+        stageOf.set(partKey, stage);
+        processed.add(partKey);
+      }
+      for (const partKey of queue) {
+        for (const dependent of dependents.get(partKey) ?? []) {
+          const remaining = (inDegree.get(dependent) ?? 0) - 1;
+          inDegree.set(dependent, remaining);
+          if (remaining === 0 && !processed.has(dependent)) {
+            nextSet.add(dependent);
+          }
+        }
+      }
+      queue = Array.from(nextSet);
+      stage += 1;
+    }
+
+    const remaining = inputs
+      .filter((i) => !processed.has(i.partKey))
+      .sort(
+        (a, b) =>
+          (centroidDistByKey.get(b.partKey) ?? 0) -
+          (centroidDistByKey.get(a.partKey) ?? 0),
+      );
+    if (remaining.length > 0) {
+      console.warn(
+        "[ExplodeView] blocking cycle detected (parts mutually block each other's extraction path) - falling back to distance-from-centroid order for these parts",
+        remaining.map((r) => r.partKey),
+      );
+      for (const item of remaining) {
+        stageOf.set(item.partKey, stage);
+        cycleFallback.add(item.partKey);
+        stage += 1;
+      }
+    }
+
+    const result = new Map<string, ExplodeBlockingResult>();
+    for (const input of inputs) {
+      result.set(input.partKey, {
+        stage: stageOf.get(input.partKey) ?? 0,
+        blockedBy: Array.from(blockedBy.get(input.partKey) ?? []),
+        cycleFallback: cycleFallback.has(input.partKey),
+      });
+    }
+    return result;
+  }
+
+  /** Maps stage indices (0..totalStages-1) to [start,end] windows within the global [0,1] explode timeline - see EXPLODE_STAGE_OVERLAP. */
+  function computeExplodeStageWindows(
+    totalStages: number,
+  ): { start: number; end: number }[] {
+    if (totalStages <= 1) return [{ start: 0, end: 1 }];
+    const width = 1 / totalStages;
+    const raw: { start: number; end: number }[] = [];
+    for (let i = 0; i < totalStages; i++) {
+      const start = i * width * (1 - EXPLODE_STAGE_OVERLAP);
+      raw.push({ start, end: start + width });
+    }
+    const maxEnd = raw[raw.length - 1]!.end;
+    const scale = maxEnd > 1e-9 ? 1 / maxEnd : 1;
+    return raw.map((w) => ({ start: w.start * scale, end: w.end * scale }));
+  }
+
+  /**
+   * Folds manual drag-to-reorder overrides into the automatically-computed
+   * stage numbers, producing the FINAL stage every part actually animates
+   * on. Each part's "effective key" is its manual stageKey override if one
+   * is set, else its automatic stage; sorting by that key (stable tiebreak
+   * on original pending order, so untouched parts keep their relative
+   * order) and then dense-ranking the sorted sequence (equal keys collapse
+   * into the same final stage; distinct keys become consecutive integers)
+   * naturally closes any gaps a manual insertion leaves and keeps ties
+   * among untouched auto-computed parts intact. reorderExplodePart() later
+   * assigns a NEW part's stageKey using fractional indexing (the midpoint
+   * between its new neighbors' effective keys, from the second returned
+   * map) - a standard reorderable-list technique that lets a single drag
+   * be applied without renumbering every other override in the map.
+   */
+  function mergeManualStageOverrides(
+    autoStageByPartKey: Map<string, number>,
+    order: string[],
+    overrides: Map<string, ExplodePartOverride>,
+  ): {
+    finalStageByPartKey: Map<string, number>;
+    sortedOrder: string[];
+    effectiveKeyByPartKey: Map<string, number>;
+  } {
+    const withKey = order.map((partKey, index) => ({
+      partKey,
+      effectiveKey: overrides.get(partKey)?.stageKey ?? autoStageByPartKey.get(partKey) ?? 0,
+      tiebreak: index,
+    }));
+    withKey.sort((a, b) => a.effectiveKey - b.effectiveKey || a.tiebreak - b.tiebreak);
+
+    const finalStageByPartKey = new Map<string, number>();
+    const effectiveKeyByPartKey = new Map<string, number>();
+    let currentStage = -1;
+    let lastKey: number | null = null;
+    for (const w of withKey) {
+      if (lastKey === null || Math.abs(w.effectiveKey - lastKey) > 1e-9) {
+        currentStage++;
+        lastKey = w.effectiveKey;
+      }
+      finalStageByPartKey.set(w.partKey, currentStage);
+      effectiveKeyByPartKey.set(w.partKey, w.effectiveKey);
+    }
+    return {
+      finalStageByPartKey,
+      sortedOrder: withKey.map((w) => w.partKey),
+      effectiveKeyByPartKey,
+    };
+  }
+
+  function computeExplodePlan(): ExplodeDebugEntry[] {
+    stopExplodeAnimation();
+
+    const parts = getTopLevelModelChildren();
+    if (parts.length === 0) {
+      explodePlan = null;
+      explodeAmount = 0;
+      return [];
+    }
+
+    const assemblyBox = getPartOnlyBox();
+    const assemblyCentroid = assemblyBox.getCenter(new THREE.Vector3());
+    const diag = assemblyBox.getSize(new THREE.Vector3()).length();
+    const baseOffset = diag * EXPLODE_BASE_SCALE;
+
+    type Pending = {
+      object: THREE.Object3D;
+      partKey: string;
+      name: string;
+      originalPosition: THREE.Vector3;
+      box0: THREE.Box3;
+      centroidDist: number;
+      centroid: THREE.Vector3;
+      axis: THREE.Vector3;
+      isFastenerLike: boolean;
+      rule: ExplodeRule;
+      detail: string;
+      distance: number;
+      edgeObjects: THREE.Object3D[];
+      cadPartId: string | null;
+      /** Bounding-box blockers for this part's currently-resolved (signed) axis - see pickBestSignByBbox. Kept up to date through Pass 5's opposition correction. */
+      blockedBy: string[];
+    };
+    const pending: Pending[] = [];
+    let maxCentroidDist = 0;
+
+    // Pass 1: gather every part's identity/geometry plus its FULL list of
+    // candidate cylinder-face axes (not just the largest) - the winning
+    // candidate can't be chosen per-part in isolation, since it depends on
+    // what other parts' axes look like (see Pass 2 below).
+    type RawPart = {
+      object: THREE.Object3D;
+      partKey: string;
+      name: string;
+      cadPartId: string | null;
+      originalPosition: THREE.Vector3;
+      box0: THREE.Box3;
+      centroid: THREE.Vector3;
+      cylinderCandidates: { axis: THREE.Vector3; radius: number; origin: THREE.Vector3 }[];
+    };
+    const raw: RawPart[] = [];
+    for (const object of parts) {
+      object.updateWorldMatrix(true, true);
+      const partBox = new THREE.Box3().setFromObject(object);
+      const centroid = partBox.isEmpty()
+        ? object.getWorldPosition(new THREE.Vector3())
+        : partBox.getCenter(new THREE.Vector3());
+      const partKey =
+        typeof object.userData?.__partKey === "string"
+          ? object.userData.__partKey
+          : object.uuid;
+      const name =
+        typeof object.name === "string" && object.name.length > 0
+          ? object.name
+          : partKey;
+      const cadPartId =
+        typeof object.userData?.__cadPartId === "string"
+          ? object.userData.__cadPartId
+          : null;
+      raw.push({
+        object,
+        partKey,
+        name,
+        cadPartId,
+        originalPosition: object.position.clone(),
+        box0: partBox,
+        centroid,
+        cylinderCandidates: cadPartId
+          ? computeCylinderAxisCandidates(cadPartId)
+          : [],
+      });
+    }
+
+    // Interlock constraints (independent of axis selection): scan EVERY
+    // candidate cylindrical face on EVERY part - not just whichever one
+    // ends up chosen as that part's own exit axis in Pass 2 below - for
+    // occupancy by another part's geometry. This applies uniformly
+    // regardless of fastener/body classification: a small taper pin
+    // retaining a larger pin through a transverse hole (confirmed on
+    // Knuckle Joint: the main pin's own r19/X shaft candidate is correctly
+    // trusted as its exit axis, but it ALSO has a separate r2.5/Y candidate
+    // - its transverse hole - that the lock pin occupies) is the same
+    // physical relationship as a pin through a fork's bore, just at a
+    // smaller scale. The fastener/body distinction in Pass 2 only decides
+    // WHICH axis a part exits along; it has no bearing on whether
+    // something is physically threaded through one of its OTHER holes.
+    // Uses the looser interlock cross-size threshold (see
+    // findCylinderHoleOccupants) since a retaining pin is routinely an
+    // interference fit, at or slightly above its hole's nominal diameter.
+    const INTERLOCK_CROSS_SIZE_THRESHOLD_MULTIPLIER = 1.5;
+    const interlocksByPartKey = new Map<
+      string,
+      { boreAxis: THREE.Vector3; boreRadius: number; occupiedBy: string[] }[]
+    >();
+    for (const r of raw) {
+      const others = raw
+        .filter((o) => o.partKey !== r.partKey)
+        .map((o) => ({ box0: o.box0, partKey: o.partKey }));
+      const entries: { boreAxis: THREE.Vector3; boreRadius: number; occupiedBy: string[] }[] = [];
+      for (const candidate of r.cylinderCandidates) {
+        const occupants = findCylinderHoleOccupants(
+          candidate,
+          r.box0,
+          others,
+          INTERLOCK_CROSS_SIZE_THRESHOLD_MULTIPLIER,
+        );
+        if (occupants.length > 0) {
+          entries.push({
+            boreAxis: candidate.axis.clone(),
+            boreRadius: candidate.radius,
+            occupiedBy: occupants,
+          });
+        }
+      }
+      interlocksByPartKey.set(r.partKey, entries);
+    }
+
+    // Inverse of the above: for a part that OCCUPIES another's hole (e.g.
+    // the lock pin, sitting inside the main pin's transverse hole), that
+    // hole's own axis is definitionally this part's true exit line too -
+    // used as a fallback in Pass 2 below for parts with no cylindrical
+    // candidate of their own (a tapered pin's faces are "cone" kind, never
+    // classified as "cylinder", so it would otherwise fall through to a
+    // generic flat-face/radial-fallback guess unrelated to the hole it's
+    // actually seated in). Prefers the SMALLEST-radius bore a part occupies
+    // when it satisfies more than one: a small part sitting near a much
+    // bigger part's own overall cross-section can incidentally satisfy
+    // that bigger candidate's containment test too (confirmed on Knuckle
+    // Joint - the lock pin's small body also nominally "fits inside" the
+    // main pin's own 38mm-diameter shaft cross-section), but the smallest
+    // match is the tightest, most specific fit and therefore the most
+    // reliable evidence of which hole this part actually sits in.
+    const occupiedHoleAxisByPartKey = new Map<string, THREE.Vector3>();
+    const occupiedHoleRadiusByPartKey = new Map<string, number>();
+    for (const entries of interlocksByPartKey.values()) {
+      for (const entry of entries) {
+        for (const occupantKey of entry.occupiedBy) {
+          const bestRadius = occupiedHoleRadiusByPartKey.get(occupantKey);
+          if (bestRadius === undefined || entry.boreRadius < bestRadius) {
+            occupiedHoleAxisByPartKey.set(occupantKey, entry.boreAxis);
+            occupiedHoleRadiusByPartKey.set(occupantKey, entry.boreRadius);
+          }
+        }
+      }
+    }
+
+    // Each part's naive top-radius pick (what the old single-pass algorithm
+    // would have chosen) doubles as the reference set Pass 2 checks other
+    // parts' candidates against - a shared axis line between two DIFFERENT
+    // parts is the actual signal of a mating feature.
+    const referenceAxes = raw
+      .filter((r) => r.cylinderCandidates.length > 0)
+      .map((r) => ({
+        partKey: r.partKey,
+        axis: r.cylinderCandidates[0]!.axis,
+        origin: r.cylinderCandidates[0]!.origin,
+        radius: r.cylinderCandidates[0]!.radius,
+      }));
+
+    // Pass 2: resolve each part's axis LINE (unsigned) - preferring a
+    // cylinder candidate that lines up with another part's axis over its
+    // own largest-radius candidate, then classified fastener-vs-body (see
+    // computeExplodeAxisForPart) so a body part's bore doesn't get inherited
+    // as its own exit direction.
+    for (const r of raw) {
+      const cylinderCandidate =
+        r.cylinderCandidates.find((candidate) =>
+          referenceAxes.some(
+            (ref) =>
+              ref.partKey !== r.partKey &&
+              axisLinesCoaxial(
+                candidate.axis,
+                candidate.origin,
+                ref.axis,
+                ref.origin,
+                Math.max(candidate.radius, ref.radius),
+              ),
+          ),
+        ) ?? r.cylinderCandidates[0] ?? null;
+
+      const otherParts = raw
+        .filter((other) => other.partKey !== r.partKey)
+        .map((other) => ({ box0: other.box0, centroid: other.centroid, partKey: other.partKey }));
+
+      const { axis, rule, detail } = computeExplodeAxisForPart(
+        r.object,
+        r.box0,
+        r.centroid,
+        assemblyBox,
+        assemblyCentroid,
+        cylinderCandidate,
+        otherParts,
+        occupiedHoleAxisByPartKey.get(r.partKey) ?? null,
+      );
+      const isFastenerLike = cylinderCandidate
+        ? isFastenerLikePart(r.box0, assemblyBox, cylinderCandidate)
+        : false;
+      const centroidDist = r.centroid.distanceTo(assemblyCentroid);
+      maxCentroidDist = Math.max(maxCentroidDist, centroidDist);
+
+      pending.push({
+        object: r.object,
+        partKey: r.partKey,
+        name: r.name,
+        originalPosition: r.originalPosition,
+        box0: r.box0,
+        centroidDist,
+        centroid: r.centroid,
+        axis,
+        isFastenerLike,
+        rule,
+        detail,
+        blockedBy: [],
+        distance: 0,
+        edgeObjects: collectExplodeEdgeObjectsForPart(r.cadPartId),
+        cadPartId: r.cadPartId,
+      });
+    }
+
+    // Interlock constraints: a part with something occupying one of its
+    // holes (per the scan above) can only physically exit along THAT
+    // hole's own axis - any other direction is blocked regardless of what
+    // a swept-box test reports, since the sweep only checks this part's
+    // OWN box against others along its OWN travel direction and has no
+    // notion of "something is threaded through me." Concretely: the
+    // Knuckle Joint's eye/fork use their own principal (rod-length) axis
+    // instead of the pin's bore, but a plain box sweep along that axis
+    // never crosses the pin's box (the pin sits on a different axis
+    // entirely) and so never discovers that the pin has to come out
+    // first - same for the main pin's own r19/X exit axis relative to its
+    // separate r2.5/Y transverse hole that the lock pin occupies.
+    // Parallelism is sign-independent (checked via abs(dot)), so this can
+    // be resolved right here, before Pass 3 ever assigns a sign - Pass 3
+    // and Pass 5 (opposition correction) only ever flip sign or swap in a
+    // parallel line, never change which line a part's axis represents. A
+    // part can have more than one occupied hole in general, so blockers
+    // from every qualifying entry are unioned together.
+    const INTERLOCK_PARALLEL_THRESHOLD = 0.9;
+    const forcedBlockedByKey = new Map<string, string[]>();
+    for (const item of pending) {
+      const entries = interlocksByPartKey.get(item.partKey) ?? [];
+      const chosen = item.axis.clone().normalize();
+      const blockers = new Set<string>();
+      for (const entry of entries) {
+        const boreAxis = entry.boreAxis.clone().normalize();
+        if (Math.abs(chosen.dot(boreAxis)) >= INTERLOCK_PARALLEL_THRESHOLD) continue;
+        for (const key of entry.occupiedBy) blockers.add(key);
+      }
+      if (blockers.size > 0) forcedBlockedByKey.set(item.partKey, Array.from(blockers));
+    }
+
+    // Pass 3: resolve each part's direction (sign along its Pass 2 axis
+    // line) by sweeping its bounding box along each candidate sign, testing
+    // for overlap against every other part's static, assembled box (see
+    // pickBestSignByBbox / computeBboxBlockersForSignedAxis). A bbox sweep
+    // can't tell a fastener's head from its narrower shaft - both share one
+    // box - so HEADED_FASTENER_SPECIAL_CASE_ENABLED covers that case
+    // separately, off real mesh vertices, before the bbox test runs.
+    for (const item of pending) {
+      if (HEADED_FASTENER_SPECIAL_CASE_ENABLED) {
+        const headSign =
+          item.isFastenerLike && item.rule === "cylinder"
+            ? detectHeadedFastenerAxisSign(item.object, item.axis, item.centroid)
+            : null;
+        if (headSign !== null) {
+          if (headSign < 0) item.axis = item.axis.clone().negate();
+          item.detail += "; headed fastener - forced head-first exit";
+          continue;
+        }
+      }
+      const others = pending
+        .filter((other) => other.partKey !== item.partKey)
+        .map((other) => ({ partKey: other.partKey, box0: other.box0 }));
+      const { axis, blockedBy } = pickBestSignByBbox(
+        item.box0,
+        item.axis,
+        assemblyBox,
+        others,
+      );
+      item.axis = axis;
+      item.blockedBy = blockedBy;
+    }
+
+    // Manual axis/direction overrides (see the Explode View "Order" panel)
+    // replace whatever Pass 2/3 automatic detection chose, applied here -
+    // before blocking is computed - so a user's correction correctly
+    // participates in blocking detection instead of being layered on
+    // after the fact. axisOverride replaces the axis LINE outright;
+    // directionFlipped negates whatever axis is now in effect (auto or
+    // overridden), so the two controls compose predictably.
+    for (const item of pending) {
+      const override = explodeOverridesByPartKey.get(item.partKey);
+      if (!override) continue;
+      if (override.axisOverride) {
+        item.axis =
+          override.axisOverride === "x"
+            ? new THREE.Vector3(1, 0, 0)
+            : override.axisOverride === "y"
+              ? new THREE.Vector3(0, 1, 0)
+              : new THREE.Vector3(0, 0, 1);
+        item.rule = "manual-override";
+        item.detail = `manually overridden: axis forced to ${override.axisOverride.toUpperCase()}`;
+      }
+      if (override.directionFlipped) {
+        item.axis = item.axis.clone().negate();
+        item.detail = item.detail
+          ? `${item.detail}; direction manually flipped`
+          : "manually overridden: direction flipped";
+      }
+    }
+
+    // Pass 5: mutual-opposition correction. When two parts directly block
+    // each other AND share (anti)parallel axis lines, their independent
+    // collision resolutions can both win by picking the same side (see the
+    // Knuckle Joint eye/fork bug: both resolved to -X). Force them to pull
+    // apart instead, using which side of the shared axis each centroid sits
+    // on. Scoped to pairs where NEITHER part is fastener-like - a fastener
+    // nested against a body part (e.g. a collar capping one end of a pin)
+    // is a sequential stack that should move the SAME way, not a
+    // mating-body pair that should separate. Also skips either side of a
+    // pair that has a manual axis/direction override active - a user's
+    // explicit choice is never second-guessed or auto-adjusted to "pair"
+    // with a neighboring part. Reads Pass 3's blockedBy directly - no
+    // separate bootstrap pass needed since Pass 3 already computed
+    // blockers for every part's resolved sign.
+    const AXIS_PARALLEL_THRESHOLD = 0.9;
+    const byKey = new Map(pending.map((item) => [item.partKey, item]));
+    const hasManualDirection = (partKey: string): boolean => {
+      const o = explodeOverridesByPartKey.get(partKey);
+      return Boolean(o?.axisOverride || o?.directionFlipped);
+    };
+    const flippedByPass5 = new Set<string>();
+    for (const item of pending) {
+      if (item.isFastenerLike || hasManualDirection(item.partKey)) continue;
+      for (const blockerKey of item.blockedBy) {
+        const blocker = byKey.get(blockerKey);
+        if (!blocker || blocker.isFastenerLike || hasManualDirection(blockerKey)) continue;
+        const dot = item.axis.dot(blocker.axis);
+        if (Math.abs(dot) < AXIS_PARALLEL_THRESHOLD) continue;
+
+        const reference = blocker.axis;
+        const side = new THREE.Vector3()
+          .subVectors(item.centroid, blocker.centroid)
+          .dot(reference);
+        const itemSign = side >= 0 ? 1 : -1;
+        const blockerSign = -itemSign * Math.sign(dot || 1);
+
+        const currentItemSign = Math.sign(item.axis.dot(reference)) || 1;
+        if (currentItemSign !== itemSign) {
+          item.axis = reference.clone().multiplyScalar(itemSign);
+          flippedByPass5.add(item.partKey);
+        }
+        const currentBlockerSign = Math.sign(blocker.axis.dot(reference)) || 1;
+        if (currentBlockerSign !== blockerSign) {
+          blocker.axis = reference.clone().multiplyScalar(blockerSign);
+          flippedByPass5.add(blocker.partKey);
+        }
+      }
+    }
+    // Any part whose axis Pass 5 just flipped has a stale blockedBy list
+    // (computed for its PREVIOUS sign) - recompute it for the sign that's
+    // actually in effect now, so Pass 6's blocking graph (and the debug
+    // entries reported below) reflect the post-correction sign.
+    for (const partKey of flippedByPass5) {
+      const item = byKey.get(partKey)!;
+      const others = pending
+        .filter((other) => other.partKey !== item.partKey)
+        .map((other) => ({ partKey: other.partKey, box0: other.box0 }));
+      item.blockedBy = computeBboxBlockersForSignedAxis(
+        item.box0,
+        item.axis,
+        others,
+      );
+    }
+
+    // Pass 6: final blocking order for staging, using the
+    // opposition-corrected signs' bbox blockers (unioned with the hard
+    // interlock edges from the scan above - both sources feed the same
+    // dependency graph, computeExplodeBlockingOrder doesn't care which
+    // produced an edge) - Kahn's-algorithm/cycle-fallback logic below.
+    const blockingResults = computeExplodeBlockingOrder(
+      pending.map((item) => {
+        const forced = forcedBlockedByKey.get(item.partKey);
+        const merged = forced
+          ? Array.from(new Set([...item.blockedBy, ...forced]))
+          : item.blockedBy;
+        return {
+          partKey: item.partKey,
+          centroidDist: item.centroidDist,
+          blockedBy: merged,
+        };
+      }),
+    );
+    // Manual stage reordering (drag-to-reorder in the "Order" panel) is
+    // folded in here, AFTER the automatic blocking graph is fully resolved
+    // - see mergeManualStageOverrides. blockedBy/cycleFallback reported
+    // below still reflect the pure automatic graph (useful context for
+    // WHY auto computed what it did) even when a part's displayed stage
+    // has been manually moved.
+    const autoStageByPartKey = new Map(
+      pending.map((item) => [item.partKey, blockingResults.get(item.partKey)?.stage ?? 0]),
+    );
+    const { finalStageByPartKey, sortedOrder, effectiveKeyByPartKey } =
+      mergeManualStageOverrides(
+        autoStageByPartKey,
+        pending.map((item) => item.partKey),
+        explodeOverridesByPartKey,
+      );
+    lastExplodeOrder = sortedOrder;
+    lastEffectiveStageKeyByPartKey = effectiveKeyByPartKey;
+
+    const totalStages =
+      1 + Math.max(0, ...Array.from(finalStageByPartKey.values()));
+    const stageWindows = computeExplodeStageWindows(totalStages);
+
+    // Pass 7: final display distance scales with resolved stage - a part
+    // that moves first (deep assembly-core fastener) travels LESS than a
+    // part that moves later (peripheral), matching how a real disassembly
+    // clears itself outward rather than every part popping the same
+    // distance regardless of depth.
+    for (const item of pending) {
+      const stage = finalStageByPartKey.get(item.partKey) ?? 0;
+      const multiplier =
+        totalStages > 1
+          ? THREE.MathUtils.lerp(
+              EXPLODE_STAGE_DISTANCE_MIN_MULTIPLIER,
+              EXPLODE_STAGE_DISTANCE_MAX_MULTIPLIER,
+              stage / (totalStages - 1),
+            )
+          : (EXPLODE_STAGE_DISTANCE_MIN_MULTIPLIER +
+              EXPLODE_STAGE_DISTANCE_MAX_MULTIPLIER) /
+            2;
+      item.distance = baseOffset * multiplier;
+    }
+
+    console.debug(
+      "[ExplodeView] blocking/stage analysis",
+      pending.map((item) => {
+        const blocking = blockingResults.get(item.partKey);
+        return {
+          name: item.name,
+          partKey: item.partKey,
+          stage: finalStageByPartKey.get(item.partKey) ?? 0,
+          autoStage: blocking?.stage ?? 0,
+          blockedBy: (blocking?.blockedBy ?? []).map(
+            (key) => pending.find((p) => p.partKey === key)?.name ?? key,
+          ),
+          cycleFallback: blocking?.cycleFallback ?? false,
+        };
+      }),
+    );
+
+    const plan = new Map<string, ExplodePlanEntry>();
+    const debugEntries: ExplodeDebugEntry[] = [];
+
+    for (const item of pending) {
+      const blocking = blockingResults.get(item.partKey) ?? {
+        stage: 0,
+        blockedBy: [],
+        cycleFallback: false,
+      };
+      const finalStage = finalStageByPartKey.get(item.partKey) ?? 0;
+      const window = stageWindows[finalStage] ?? { start: 0, end: 1 };
+      const blockedByNames = blocking.blockedBy.map(
+        (key) => pending.find((p) => p.partKey === key)?.name ?? key,
+      );
+      const override = explodeOverridesByPartKey.get(item.partKey);
+      const stageOverridden = override?.stageKey !== undefined;
+      const axisOverridden = Boolean(override?.axisOverride);
+      const directionFlipped = Boolean(override?.directionFlipped);
+
+      plan.set(item.partKey, {
+        object: item.object,
+        originalPosition: item.originalPosition,
+        axis: item.axis,
+        distance: item.distance,
+        rule: item.rule,
+        detail: item.detail,
+        edgeObjects: item.edgeObjects,
+        cadPartId: item.cadPartId,
+        currentDelta: new THREE.Vector3(),
+        stageStart: window.start,
+        stageEnd: window.end,
+      });
+
+      debugEntries.push({
+        partKey: item.partKey,
+        name: item.name,
+        rule: item.rule,
+        axis: { x: item.axis.x, y: item.axis.y, z: item.axis.z },
+        distance: item.distance,
+        detail: item.detail,
+        stage: finalStage,
+        blockedBy: blockedByNames,
+        cycleFallback: blocking.cycleFallback,
+        overridden: stageOverridden || axisOverridden || directionFlipped,
+        stageOverridden,
+        axisOverridden,
+        directionFlipped,
+      });
+    }
+
+    explodePlan = plan;
+    explodeAmount = 0;
+    if (axesHelper && axesVisibleBeforeExplode === null) {
+      axesVisibleBeforeExplode = axesHelper.visible;
+      axesHelper.visible = false;
+    }
+
+    console.debug("[ExplodeView] plan computed", debugEntries);
+    return debugEntries;
+  }
+
+  function setExplodeAmount(amount: number): void {
+    if (!explodePlan) return;
+    explodeAmount = THREE.MathUtils.clamp(amount, 0, 1);
+    for (const entry of explodePlan.values()) {
+      // Sequenced explosion: remap the global slider/animation amount into
+      // this part's own [stageStart, stageEnd] window (see
+      // computeExplodeStageWindows) so parts in an earlier stage finish
+      // moving before parts in a later one begin, instead of every part
+      // interpolating 0->1 in lockstep.
+      const span = entry.stageEnd - entry.stageStart;
+      const localAmount =
+        span > 1e-9
+          ? THREE.MathUtils.clamp(
+              (explodeAmount - entry.stageStart) / span,
+              0,
+              1,
+            )
+          : explodeAmount >= entry.stageStart
+            ? 1
+            : 0;
+      entry.currentDelta
+        .copy(entry.axis)
+        .multiplyScalar(entry.distance * localAmount);
+      entry.object.position.copy(entry.originalPosition).add(entry.currentDelta);
+      // Exact-CAD edge overlays for this part aren't parented under it (see
+      // ExplodePlanEntry.edgeObjects) and start at identity position, so the
+      // same delta - not originalPosition + delta - keeps them glued to the
+      // part's moved mesh.
+      for (const edgeObject of entry.edgeObjects) {
+        edgeObject.position.copy(entry.currentDelta);
+      }
+    }
+    markVisibleMeshRaycastTargetsDirty();
+    requestUpdateSilhouette?.();
+    requestRender("set_explode_amount");
+  }
+
+  function playExplode(
+    target: 0 | 1,
+    onTick?: (amount: number) => void,
+    onDone?: () => void,
+  ): void {
+    if (!explodePlan) {
+      onDone?.();
+      return;
+    }
+    stopExplodeAnimation();
+    const start = explodeAmount;
+    if (Math.abs(target - start) < 1e-6) {
+      onTick?.(target);
+      onDone?.();
+      return;
+    }
+    const duration = 1750;
+    const startTime = performance.now();
+
+    const tick = () => {
+      const elapsed = performance.now() - startTime;
+      const progress = Math.min(elapsed / duration, 1);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      const amount = THREE.MathUtils.lerp(start, target, eased);
+      setExplodeAmount(amount);
+      onTick?.(amount);
+      if (progress < 1) {
+        explodeAnimRAF = requestAnimationFrame(tick);
+      } else {
+        explodeAnimRAF = null;
+        onDone?.();
+      }
+    };
+    explodeAnimRAF = requestAnimationFrame(tick);
+  }
+
+  function resetExplode(): void {
+    stopExplodeAnimation();
+    highlightExplodePart(null);
+    restoreAxesVisibilityAfterExplode();
+    if (!explodePlan) return;
+    for (const entry of explodePlan.values()) {
+      entry.object.position.copy(entry.originalPosition);
+      entry.currentDelta.set(0, 0, 0);
+      for (const edgeObject of entry.edgeObjects) {
+        edgeObject.position.set(0, 0, 0);
+      }
+    }
+    explodeAmount = 0;
+    markVisibleMeshRaycastTargetsDirty();
+    requestUpdateSilhouette?.();
+    requestRender("reset_explode");
+  }
+
+  function highlightExplodePart(partKey: string | null): void {
+    if (!explodePlan) return;
+    for (const entry of explodePlan.values()) {
+      const dim =
+        partKey !== null && entry.object.userData?.__partKey !== partKey;
+      entry.object.traverse((child: any) => {
+        if (!child?.isMesh || !child.material) return;
+        const apply = (mat: any) => {
+          if (!mat) return;
+          mat.transparent = dim;
+          mat.opacity = dim ? 0.35 : 1.0;
+          mat.needsUpdate = true;
+        };
+        if (Array.isArray(child.material)) child.material.forEach(apply);
+        else apply(child.material);
+      });
+    }
+    requestRender("highlight_explode_part");
+  }
+
+  /**
+   * Shared by every override-mutating method below: recomputes the whole
+   * plan from scratch (computeExplodePlan reads explodeOverridesByPartKey
+   * itself, so a fresh call picks up whatever override was just changed)
+   * and puts every part back at the CURRENT slider position under the new
+   * plan. Explode amount must be reset to 0 first - computeExplodePlan
+   * captures each part's CURRENT object.position as its "assembled"
+   * baseline (originalPosition), which would silently bake in a mid-
+   * explode offset as the new "assembled" position if a recompute ran
+   * while parts were displaced.
+   */
+  function recomputeExplodePlanPreservingAmount(): ExplodeDebugEntry[] {
+    const preserved = explodeAmount;
+    setExplodeAmount(0);
+    const entries = computeExplodePlan();
+    setExplodeAmount(preserved);
+    return entries;
+  }
+
+  function getOrCreateExplodeOverride(partKey: string): ExplodePartOverride {
+    let override = explodeOverridesByPartKey.get(partKey);
+    if (!override) {
+      override = {};
+      explodeOverridesByPartKey.set(partKey, override);
+    }
+    return override;
+  }
+
+  function pruneExplodeOverrideIfEmpty(partKey: string): void {
+    const override = explodeOverridesByPartKey.get(partKey);
+    if (!override) return;
+    const isEmpty =
+      override.stageKey === undefined &&
+      override.axisOverride === undefined &&
+      override.directionFlipped !== true;
+    if (isEmpty) explodeOverridesByPartKey.delete(partKey);
+  }
+
+  /** Forces a part's explode axis to a world-aligned direction, discarding whatever geometry detection chose. Pass null to clear just this override (keeping any stage/direction overrides on the same part). */
+  function setExplodePartAxisOverride(
+    partKey: string,
+    axis: ExplodeAxisOverride | null,
+  ): ExplodeDebugEntry[] {
+    if (axis === null) {
+      const override = explodeOverridesByPartKey.get(partKey);
+      if (override) delete override.axisOverride;
+    } else {
+      getOrCreateExplodeOverride(partKey).axisOverride = axis;
+    }
+    pruneExplodeOverrideIfEmpty(partKey);
+    return recomputeExplodePlanPreservingAmount();
+  }
+
+  /** Reverses a part's exit direction relative to whatever axis (auto or overridden) is currently in effect. */
+  function setExplodePartDirectionFlip(
+    partKey: string,
+    flipped: boolean,
+  ): ExplodeDebugEntry[] {
+    if (flipped) {
+      getOrCreateExplodeOverride(partKey).directionFlipped = true;
+    } else {
+      const override = explodeOverridesByPartKey.get(partKey);
+      if (override) delete override.directionFlipped;
+    }
+    pruneExplodeOverrideIfEmpty(partKey);
+    return recomputeExplodePlanPreservingAmount();
+  }
+
+  /**
+   * Moves a part to `targetIndex` within the current displayed order (the
+   * same order the last computeExplodePlan()/override call returned, i.e.
+   * lastExplodeOrder) - the drag-to-reorder control in the Explode View
+   * "Order" panel. Computes a fractional stageKey placing the part between
+   * its new neighbors (standard fractional-indexing technique for
+   * reorderable lists) so this single move doesn't require renumbering
+   * every other part's override; mergeManualStageOverrides collapses
+   * everything back to clean consecutive stage numbers afterward.
+   */
+  function reorderExplodePart(
+    partKey: string,
+    targetIndex: number,
+  ): ExplodeDebugEntry[] {
+    const order = lastExplodeOrder.filter((key) => key !== partKey);
+    const clampedIndex = Math.max(0, Math.min(targetIndex, order.length));
+    const beforeKey = clampedIndex > 0 ? order[clampedIndex - 1] : null;
+    const afterKey = clampedIndex < order.length ? order[clampedIndex] : null;
+    const beforeVal = beforeKey
+      ? (lastEffectiveStageKeyByPartKey.get(beforeKey) ?? 0)
+      : null;
+    const afterVal = afterKey
+      ? (lastEffectiveStageKeyByPartKey.get(afterKey) ?? 0)
+      : null;
+
+    let newKey: number;
+    if (beforeVal === null && afterVal === null) newKey = 0;
+    else if (beforeVal === null) newKey = afterVal! - 1;
+    else if (afterVal === null) newKey = beforeVal + 1;
+    else newKey = (beforeVal + afterVal) / 2;
+
+    getOrCreateExplodeOverride(partKey).stageKey = newKey;
+    return recomputeExplodePlanPreservingAmount();
+  }
+
+  /** Clears every override (stage, axis, direction) for one part, restoring its automatic computation. */
+  function resetExplodePartOverride(partKey: string): ExplodeDebugEntry[] {
+    explodeOverridesByPartKey.delete(partKey);
+    return recomputeExplodePlanPreservingAmount();
+  }
+
+  /** Clears every override on every part, restoring the fully automatic plan. */
+  function resetAllExplodeOverrides(): ExplodeDebugEntry[] {
+    explodeOverridesByPartKey.clear();
+    return recomputeExplodePlanPreservingAmount();
+  }
+
   function getPartRootUnderModelRoot(
     object: THREE.Object3D | null | undefined,
   ): THREE.Object3D | null {
@@ -4732,6 +6518,7 @@ export function createViewer(container: HTMLElement): Viewer {
     });
 
     updateEngineeringEdgeVisibility();
+    reapplyExplodeEdgeDeltasAfterRebuild();
   }
 
   function collectVisibleCadMeshes(): THREE.Mesh[] {
@@ -8792,6 +10579,7 @@ export function createViewer(container: HTMLElement): Viewer {
 
   function clearModelRootChildren() {
     resetIsolationSnapshot();
+    resetExplodeForNewModel();
     markVisibleMeshRaycastTargetsDirty();
     for (const child of [...modelRoot.children]) {
       if (child === featureEdgesGroup) continue;
@@ -11204,6 +12992,17 @@ export function createViewer(container: HTMLElement): Viewer {
     isolateObject,
     clearIsolation,
     showAllParts,
+    computeExplodePlan,
+    setExplodeAmount,
+    playExplode,
+    stopExplodeAnimation,
+    resetExplode,
+    highlightExplodePart,
+    setExplodePartAxisOverride,
+    setExplodePartDirectionFlip,
+    reorderExplodePart,
+    resetExplodePartOverride,
+    resetAllExplodeOverrides,
     highlightEdgeAtScreenPosition,
     clearEdgeHighlight,
     measureEdgeAtScreenPosition,
