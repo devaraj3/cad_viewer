@@ -8,7 +8,7 @@ import {
   acceleratedRaycast,
   computeBoundsTree,
   disposeBoundsTree,
-  type MeshBVH,
+  MeshBVH,
 } from "three-mesh-bvh";
 import { Line2 } from "three/examples/jsm/lines/Line2.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
@@ -354,6 +354,7 @@ export type ExplodeRule =
   | "radial-fallback"
   | "principal-axis"
   | "occupied-hole-axis"
+  | "dominant-shaft-axis"
   | "manual-override";
 
 /** World-aligned axis a user can force a part's explode direction onto, overriding whatever geometry detection chose. */
@@ -368,7 +369,7 @@ export type ExplodeDebugEntry = {
   detail: string;
   /** Removal-order stage (0 = moves first). Parts sharing a stage move simultaneously. Reflects manual stage reordering if any is active for this part. */
   stage: number;
-  /** Names of parts whose assembled bounding box lies in this part's swept extraction path - i.e. must move first. Always reflects the AUTOMATIC blocking graph, even when this part's displayed stage has been manually reordered. */
+  /** Names of parts whose actual solid mesh lies in this part's swept extraction path (see computeMeshBlockersForSignedAxis) - i.e. must move first. Always reflects the AUTOMATIC blocking graph, even when this part's displayed stage has been manually reordered. */
   blockedBy: string[];
   /** True if this part was part of a mutual-blocking cycle, resolved by distance-from-centroid instead of true topological order. */
   cycleFallback: boolean;
@@ -380,6 +381,98 @@ export type ExplodeDebugEntry = {
   axisOverridden: boolean;
   /** True if this part's exit direction was manually reversed relative to whatever axis (auto or overridden) is in effect. */
   directionFlipped: boolean;
+};
+
+export type ExplodeGateHold = {
+  partKey: string;
+  name: string;
+  /** The part's ungated stage-window target distance this step. */
+  rawDistance: number;
+  /** Where the gate actually advanced this part to - the furthest point along [previous gated distance, rawDistance] that binary search found clear. Equal to rawDistance only when the search couldn't get all the way there this step. */
+  gatedDistance: number;
+  /** rawDistance - gatedDistance: how far short of its ungated target the part was held back by, this step. 0 would mean it reached the target (in which case no ExplodeGateHold is logged at all - see ExplodeGateStepLog.holds). */
+  shift: number;
+  heldBy: { partKey: string; name: string; depth: number }[];
+};
+
+export type ExplodeGateOverlap = {
+  a: string;
+  b: string;
+  aName: string;
+  bName: string;
+  depth: number;
+};
+
+/** One part/group's final planned {direction, stage, distance, group membership} - Phase 3 (Stage 6-7) offline-planning rebuild output, see explode-view-master-plan.md. The Phase 4 rendering hookup's concrete input, per fixture. */
+export type ExplodeStageAssignment = {
+  unitKey: string;
+  label: string;
+  /** Real partKeys this unit represents - >1 only for a component group (e.g. a bolt ring) moving as one rigid body. */
+  memberKeys: string[];
+  stage: number;
+  /** One of the 6 principal directions, e.g. "+X". */
+  direction: string;
+  distance: number;
+  /** True if this unit is a genuine non-separable group under pure translation (an SCC surviving all 6 directions) - see deadEndReason. Stays true even when resolveDeadEndSccOrder finds a validated order for it (see sccOrderValidated) - this field alone remains "is this unit a confirmed SCC member", not "is it unsafe to use". */
+  deadEnd: boolean;
+  deadEndReason?: string;
+  /** True only for a deadEnd unit whose stage/direction came from resolveDeadEndSccOrder actually finding (and full-rigor re-verifying) a clean permutation of the SCC's own members - as opposed to computeExplodeOrderAssignment's naive same-stage/least-bad-direction fallback, which never sets this. Lets Phase 4 treat a genuinely solved SCC as certified-eligible instead of blanket-routing every deadEnd unit to the legacy live-gate path. */
+  sccOrderValidated?: boolean;
+};
+
+/** Phase 3 (Stage 6-7) cached plan - one entry per part/group, ready for Stage 8 certification or eventual Phase 4 rendering playback. */
+export type ExplodeCertifiedPlan = {
+  assignments: ExplodeStageAssignment[];
+  totalStages: number;
+};
+
+export type ExplodeCertificationOverlap = {
+  a: string;
+  b: string;
+  aName: string;
+  bName: string;
+  depth: number;
+};
+
+export type ExplodeCertificationSample = {
+  amount: number;
+  phase: "forward" | "reverse";
+  overlaps: ExplodeCertificationOverlap[];
+};
+
+/** Phase 3 (Stage 8) full-plan certification report - raw per-sample overlap data across a fine-grained bidirectional sweep of the cached plan, never a pass/fail summary. */
+export type ExplodeCertificationReport = {
+  fixtureUnitCount: number;
+  totalSamples: number;
+  samplesWithOverlap: number;
+  maxDepth: number;
+  samples: ExplodeCertificationSample[];
+};
+
+/** Phase 4 (corrected, per-unit granularity), test/verification only: one unit's certified-plan-vs-legacy-live-gate routing decision, and every reason that fed it - see the "Phase 4" block in computeExplodePlan(). */
+export type ExplodeCertifiedPlanUnitStatus = {
+  unitKey: string;
+  label: string;
+  memberKeys: string[];
+  /** Stage 6's own verdict - a genuine non-separable SCC member (see ExplodeStageAssignment.deadEnd). Routes to the legacy live-gate path UNLESS sccOrderValidated is also true. */
+  deadEnd: boolean;
+  /** True only for a deadEnd unit whose stage/direction is a real, full-rigor-verified permutation-search result (see ExplodeStageAssignment.sccOrderValidated) - lets this one escape the deadEnd blanket routing below. */
+  sccOrderValidated: boolean;
+  hasMeaningfulMotion: boolean;
+  hasOverride: boolean;
+  /** True if this unit appears in ANY overlap Stage 8's real full-sweep certification found anywhere in [0,1] - expected only for deadEnd units; a non-deadEnd unit landing here is a genuine Stage 6/7 soundness gap, logged loudly at the call site. */
+  dirtyInCertification: boolean;
+  /** Final routing decision: true = this unit's members were overwritten with the certified plan's axis/distance/stage-window (still rendered through the live gate as defense-in-depth); false = members keep the legacy Pass 1-7 values, live-gate-driven exactly as before Phase 4. */
+  certifiedPlanEligible: boolean;
+};
+
+export type ExplodeGateStepLog = {
+  amount: number;
+  holds: ExplodeGateHold[];
+  /** Full-assembly overlap check (every part, incl. already-settled ones) at this step's UNGATED stage-window positions - what checkExplodeOverlapsAtAmount(amount) reports today. */
+  ungatedOverlaps: ExplodeGateOverlap[];
+  /** Same full-assembly overlap check at this step's GATED positions. */
+  gatedOverlaps: ExplodeGateOverlap[];
 };
 
 export type Viewer = {
@@ -431,7 +524,232 @@ export type Viewer = {
    * (which rule fired, the resolved axis, the resolved distance) for the
    * UI's debug list and console logging.
    */
-  computeExplodePlan: () => ExplodeDebugEntry[];
+  computeExplodePlan: () => Promise<ExplodeDebugEntry[]>;
+  /**
+   * Identifies the currently-loaded assembly (e.g. cad-viewer.tsx's own
+   * `getFileCacheKey(file)` value) so computeExplodePlan's internal
+   * dead-end-SCC permutation search can cache its result per-assembly
+   * instead of re-paying an up-to-~60s brute-force search on every single
+   * Explode View toggle. Call this whenever the loaded file changes, before
+   * computeExplodePlan runs for that load. Pass null if no stable identity
+   * is available (the search still runs and caches, just under a shared
+   * fallback key for the session).
+   */
+  setActiveAssemblyKey: (key: string | null) => void;
+  /** Test/verification only - independent of the ordering/blocking pipeline (see checkExplodeOverlapsAtAmount's doc comment). Moves every part to its real position at `amount` (restoring the prior amount afterward) and returns every part-pair with an actual solid mesh-vs-mesh overlap there, plus an approximate penetration depth for each. */
+  checkExplodeOverlapsAtAmount: (
+    amount: number,
+  ) => { a: string; b: string; aName: string; bName: string; depth: number }[];
+  /** Test/verification only - see checkExplodeOverlapsAtCurrentPosition's doc comment. Same independent oracle as checkExplodeOverlapsAtAmount but reads the CURRENT on-screen position with no setExplodeAmount call and no restore, so a caller can drive setExplodeAmount itself through a fine-grained monotonic sweep and check each real resulting frame. */
+  checkExplodeOverlapsAtCurrentPosition: () => {
+    a: string;
+    b: string;
+    aName: string;
+    bName: string;
+    depth: number;
+  }[];
+  /** Test/verification only (validation round) - see the "Strict interference oracle" module doc comment near its implementation. Real triangle-vs-triangle test on each solid offset inward by `toleranceMm` (default: the round's chosen tolerance), plus a raycast-parity containment test for fully-embedded parts. No AABB depth, no exemptions anywhere in the decision. `overridesByPartKey` adds an extra world-space translation on top of each part's position at `amount`, for testing an off-plan perturbation (e.g. nudging one part sideways). */
+  checkStrictInterferenceAtAmount: (
+    amount: number,
+    toleranceMm?: number,
+    overridesByPartKey?: Record<string, { x: number; y: number; z: number }>,
+  ) => { a: string; b: string; aName: string; bName: string; kind: "surface" | "containment" }[];
+  /** Diagnostic only (validation round) - see debugMeasureCylindricalDeviation's doc comment near its implementation. Measures the real achieved curved-surface tessellation deviation from a nominal cylinder, used to choose checkStrictInterferenceAtAmount's default tolerance. */
+  debugMeasureCylindricalDeviation: (
+    partKey: string,
+    axisPoint: { x: number; y: number; z: number },
+    axisDir: { x: number; y: number; z: number },
+    nominalRadius: number,
+  ) => { maxAbsDeviationMm: number; onSurfaceSampleCount: number; totalSampleCount: number } | null;
+  /** Diagnostic only (validation round, ad hoc) - see debugRadiusBandStats's doc comment near its implementation. Raw min/max radius in an axial band, no nominal-radius assumption. */
+  debugRadiusBandStats: (
+    partKey: string,
+    axisPoint: { x: number; y: number; z: number },
+    axisDir: { x: number; y: number; z: number },
+    alongMin: number,
+    alongMax: number,
+    toleranceMm?: number,
+  ) => { minRadius: number; maxRadius: number; sampleCount: number } | null;
+  /**
+   * Diagnostic dry-run - does not call setExplodeAmount and does not affect
+   * what's currently rendered (restores the real explode amount when done),
+   * but shares its bisection search and cached-solid overlap test with the
+   * LIVE gate that setExplodeAmount actually applies (see
+   * computeGatedDistancesForAmount), so its numbers describe real gating
+   * behavior rather than a separate approximation of it. Simulates the
+   * sequenced explode timeline in `stepPercent` increments (default 5) and,
+   * at each step, for every part whose ungated stage-window target changed
+   * this step, tries that target directly and - if it would overlap any
+   * OTHER part's current position - binary-searches back toward the part's
+   * last verified-clear distance for the furthest point that stays clear
+   * (graduated advance, not a freeze). Returns one log entry per step:
+   * which parts were held short of their target and by how much, plus a
+   * full-assembly overlap count - via the independent, slower real-geometry
+   * oracle also used by checkExplodeOverlapsAtAmount, deliberately NOT the
+   * gate's own fast cached test, so this number can catch a gate bug rather
+   * than just confirm the gate agrees with itself - at both the ungated and
+   * gated positions for that step.
+   */
+  diagnoseExplodeGate: (stepPercent?: number) => ExplodeGateStepLog[];
+  /** Test/verification only - the live gate's raw internal per-part state as of the last setExplodeAmount call: gatedDistance (what's actually on screen) and rawDistance (the ungated stage-window target that frame). Lets a test assert exact frame-to-frame advance size (e.g. that a held part's gatedDistance never jumps by more than its own rawDistance delta in one call) without reverse-engineering it from rendered positions. */
+  getExplodeGateDebugState: () => {
+    partKey: string;
+    gatedDistance: number;
+    rawDistance: number;
+  }[];
+  /** Test/verification only - the whole-assembly veto's (see the "Add a whole-assembly veto" project work) most recent outcome: null if the last setExplodeAmount call found zero real overlaps across every pair (the frame committed normally), or the amount and full overlap list from the last call that didn't (every part is currently frozen at its last independently-verified-clean position). */
+  getExplodeWholeAssemblyVetoState: () => {
+    amount: number;
+    overlaps: ExplodeGateOverlap[];
+  } | null;
+  /** DIAGNOSTIC-ONLY, temporary: partKeys in this list get a console.debug("[ExplodeGateDebug]", ...) line from computeGatedDistancesForAmount on every call, dumping that call's full internal state for the part (current/raw/rawPrev/rawDelta/remainingGap/stepMagnitude/candidate/clearAtCandidate/result). Empty by default (no perf cost, no log spam). */
+  setExplodeGateDebugWatch: (partKeys: string[]) => void;
+  /** DIAGNOSTIC-ONLY, temporary: samples `partKey`'s FULL [0, entry.distance] axis range (not just [current, candidate]) at `samples` even steps, testing each sample with the live gate's own isExplodeDistanceClear against the CURRENT explodeGatedDistanceByPartKey snapshot (or, if `onlyAgainst` is given, a pairwise-only test against just that one neighbor's current position via arePartsClearAtDistances). Answers "does any clear position exist anywhere on this part's axis right now" independent of the gate's own [current,candidate] search-window limit. */
+  debugFullRangeClearSearch: (
+    partKey: string,
+    onlyAgainst: string | null,
+    samples: number,
+  ) => { distance: number; clear: boolean }[];
+  /** Phase 3 (Stage 8), diagnostic/on-demand: certifies the cached Stage 6/7 plan (see getLastExplodeCertifiedPlan) by sampling its whole [0,1] timeline forward then back at `stepPercent`-wide increments (default 1) and checking every unit pair at every sample with the real mesh-vs-mesh oracle. Returns null if no plan has been computed yet. Does not touch rendering or the live gate. */
+  certifyExplodeFullPlan: (stepPercent?: number) => ExplodeCertificationReport | null;
+  /** Phase 3 (Stage 6-7), diagnostic: the most recently cached offline explode plan (one entry per part/group with its assigned direction/stage/distance), rebuilt on every computeExplodePlan() call. Null if no plan exists. */
+  getLastExplodeCertifiedPlan: () => ExplodeCertifiedPlan | null;
+  /** Test/verification only - true if AT LEAST ONE unit in the CURRENT explodePlan is driven by the certified Phase 3 plan (see getExplodeCertifiedPlanUnitStatus for the real per-unit breakdown - this is a per-fixture "any" summary, not "all"; a fixture can legitimately have some units on the certified path and others on the legacy live-gate path simultaneously, see explode-view-master-plan.md's Phase 4 revision). Reflects the last computeExplodePlan() call. */
+  getExplodeCertifiedPlanActive: () => boolean;
+  /** Test/verification only - the real per-unit certified-plan-vs-live-gate routing decision for every unit in the CURRENT explodePlan, and every reason that fed it (deadEnd/meaningful-motion/override/dirty-in-certification). Reflects the last computeExplodePlan() call. See ExplodeCertifiedPlanUnitStatus's own doc comment. */
+  getExplodeCertifiedPlanUnitStatus: () => ExplodeCertifiedPlanUnitStatus[];
+  /**
+   * Test/verification only - answers "given ENOUGH distance along its
+   * already-assigned axis, does this unit pair ever separate?" for a pair
+   * Stage 8 (certifyExplodeFullPlan) already reported as never clearing by
+   * amount=1. certifyExplodeCertifiedPlan's own distanceAt clamps `local`
+   * to [0,1], so it can never test past exactly each unit's assigned
+   * 100% distance - this bypasses that clamp entirely: each of `multiples`
+   * scales BOTH units' own assigned distance (unit.distance from the
+   * cached plan) independently, along each unit's own already-assigned
+   * axis (unchanged), then runs the exact same real mesh-vs-mesh oracle
+   * (arePartsClearAtDistances) and rest-exemption check
+   * (isRestExemptionActive) Stage 8 itself uses. A pair that clears at some
+   * multiple > 1 has a Stage 7 (distance) bug - the axis is fine, the
+   * assigned distance was just too short. A pair that never clears at any
+   * tested multiple has a direction/axis bug - no amount of extra distance
+   * along this axis leads away from the other unit. Returns null if no
+   * plan is cached (see getLastExplodeCertifiedPlan) or either unitKey is
+   * unknown to it.
+   */
+  debugUnitPairClearanceAtMultiples: (
+    aUnitKey: string,
+    bUnitKey: string,
+    multiples: number[],
+  ) =>
+    | {
+        multiple: number;
+        aDistance: number;
+        bDistance: number;
+        exempt: boolean;
+        clear: boolean;
+        depth: number;
+      }[]
+    | null;
+  /**
+   * Test/verification only - the same "given enough distance, does this
+   * pair ever separate" question as debugUnitPairClearanceAtMultiples, but
+   * against the LIVE per-part gate's own cached solids/axis/assigned
+   * distance (getExplodeGateSolids/explodePlan) instead of the separate
+   * offline Phase 3 unit plan - i.e. answers it for whatever the real
+   * Play/Reverse/slider path is actually driving right now, which for a
+   * fixture with zero Phase-4-certified-eligible units (e.g. Stuffing Box)
+   * is NOT the same plan debugUnitPairClearanceAtMultiples inspects. Uses
+   * the exact same live-gate exemption rule (isLiveRestExemptionActive) the
+   * real gate uses. Returns null if no live plan is cached or either
+   * partKey is unknown to it.
+   */
+  debugLivePartPairClearanceAtMultiples: (
+    aPartKey: string,
+    bPartKey: string,
+    multiples: number[],
+  ) =>
+    | {
+        multiple: number;
+        aDistance: number;
+        bDistance: number;
+        exempt: boolean;
+        clear: boolean;
+        realClear: boolean;
+        depth: number;
+        restDepth: number;
+      }[]
+    | null;
+  /**
+   * Diagnostic only - decomposes a unit's final Stage 7 distance into a
+   * per-other breakdown, to answer "which neighbor actually determined
+   * this distance, and was it assumed static while really moving away in
+   * the same plan?" (see project memory "sanity check bush stud
+   * distances"). For each OTHER unit, reports the solo minimum distance
+   * self alone would need to clear JUST that other via the same
+   * bbox-clearance test Stage 7 uses (isExplodeDistancePairClear),
+   * evaluated two ways: with the other held at rest (0 - what a
+   * same-stage first pass assumes) and with the other held at its own
+   * final plan distance (what a fully mutual/simultaneous solve would
+   * need). Whichever other's at-rest solo distance is closest to the
+   * unit's actual final distance is the real governing blocker for that
+   * final number; a much smaller at-final figure for that same other is
+   * the signature of the "assumed stationary" artifact. Returns null if
+   * no plan is cached or unitKey is unknown to it.
+   */
+  debugGoverningBlockerForUnit: (unitKey: string) =>
+    | {
+        unitKey: string;
+        finalDistance: number;
+        selfStage: number;
+        perOther: {
+          otherKey: string;
+          otherLabel: string;
+          otherStage: number;
+          otherFinalDistance: number;
+          exempt: boolean;
+          minDistanceIfOtherAtRest: number;
+          minDistanceIfOtherAtFinal: number;
+        }[];
+      }
+    | null;
+  /**
+   * Diagnostic only - ground truth for exactly what
+   * computeExplodeStageDistances's solveUnitDistance actually assumed for
+   * every OTHER unit on the call that produced `unitKey`'s CURRENT
+   * resolvedDistance (see lastSolveTraceByUnit doc comment). Unlike
+   * debugGoverningBlockerForUnit (which reconstructs/guesses each other's
+   * position independently and can suffer its own bisection-invariant
+   * artifacts when a pair is already clear at distance 0), this reads the
+   * real neighborDistances map the production solve used, no
+   * reconstruction. Returns null if no plan is cached or unitKey is
+   * unknown to it.
+   */
+  debugExplodeStageDistanceSolveTrace: (unitKey: string) =>
+    | {
+        distance: number;
+        ceiling: number;
+        doublings: number;
+        neighborDistances: { otherKey: string; otherLabel: string; distance: number }[];
+      }
+    | null;
+  /**
+   * Diagnostic only - raw rest-position bounding box (world space) and
+   * assigned axis for a cached DBG unit, straight from
+   * lastExplodePhase3State.solids with no reconstruction/derivation. Used
+   * to sanity-check WHY a unit's assigned axis does or doesn't correlate
+   * with where its neighbors actually are (see project memory on the
+   * Sheet Metal Clamp cotter pin's axis-choice defect) - the other debug*
+   * helpers all answer "what distance," never "what raw geometry." Returns
+   * null if no plan is cached or unitKey is unknown to it.
+   */
+  debugUnitGeometryInfo: (unitKey: string) =>
+    | {
+        unitKey: string;
+        axis: { x: number; y: number; z: number };
+        box0: { min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } };
+      }
+    | null;
   /** amount in [0,1]: 0 = assembled, 1 = fully exploded per the last computeExplodePlan(). No-op if no plan exists. */
   setExplodeAmount: (amount: number) => void;
   /** Self-scheduling rAF ease-out tween of the explode amount toward `target`, ~1.75s. onTick fires each frame so UI (e.g. the slider) can stay in sync. */
@@ -449,18 +767,18 @@ export type Viewer = {
   setExplodePartAxisOverride: (
     partKey: string,
     axis: ExplodeAxisOverride | null,
-  ) => ExplodeDebugEntry[];
+  ) => Promise<ExplodeDebugEntry[]>;
   /** Reverses a part's exit direction relative to whatever axis is currently in effect. Recomputes the plan and returns fresh debug entries. */
   setExplodePartDirectionFlip: (
     partKey: string,
     flipped: boolean,
-  ) => ExplodeDebugEntry[];
+  ) => Promise<ExplodeDebugEntry[]>;
   /** Moves a part to `targetIndex` within the order the last computeExplodePlan()/override call returned (drag-to-reorder). Recomputes the plan and returns fresh debug entries. */
-  reorderExplodePart: (partKey: string, targetIndex: number) => ExplodeDebugEntry[];
+  reorderExplodePart: (partKey: string, targetIndex: number) => Promise<ExplodeDebugEntry[]>;
   /** Clears every override (stage, axis, direction) for one part. Recomputes the plan and returns fresh debug entries. */
-  resetExplodePartOverride: (partKey: string) => ExplodeDebugEntry[];
+  resetExplodePartOverride: (partKey: string) => Promise<ExplodeDebugEntry[]>;
   /** Clears every override on every part, restoring the fully automatic plan. Recomputes the plan and returns fresh debug entries. */
-  resetAllExplodeOverrides: () => ExplodeDebugEntry[];
+  resetAllExplodeOverrides: () => Promise<ExplodeDebugEntry[]>;
   highlightEdgeAtScreenPosition: (
     ndcX: number,
     ndcY: number,
@@ -3732,6 +4050,107 @@ export function createViewer(container: HTMLElement): Viewer {
   let explodePlan: Map<string, ExplodePlanEntry> | null = null;
   let explodeAmount = 0;
   let explodeAnimRAF: number | null = null;
+  // Runtime clearance gate state (see the "Runtime clearance gate" section
+  // near setExplodeAmount below). explodeGateSolids is a lazily-built,
+  // per-plan cache of each part's REST-position (originalPosition, zero
+  // offset) baked geometry + BVH - built once per computeExplodePlan() call,
+  // not per frame. explodeGateRestExemptions is a per-plan cache of which
+  // part-pairs already touch/overlap at REST (real, common for a nominal
+  // zero-clearance fit - a stud modeled at the exact same diameter as its
+  // hole - not a defect the gate can or should react to; see
+  // buildExplodeGateRestExemptions). explodeGatedDistanceByPartKey is each
+  // part's last verified-clear axis distance, carried frame-to-frame so a
+  // live drag/play tick can binary-search forward from a known-good anchor
+  // instead of from scratch. All three are invalidated (see
+  // invalidateExplodeGateState) wherever explodePlan itself is reset or
+  // replaced.
+  let explodeGateSolids: Map<string, ExplodeGateSolid> | null = null;
+  let explodeGateRestExemptions: Map<string, Set<string>> | null = null;
+  // Per-plan cache of each rest-touching pair's REAL penetration depth at
+  // rest (distance 0 for both) - see buildExplodeGateRestDepths and
+  // isLiveRestExemptionActive. Deliberately separate from
+  // explodeGateRestExemptions above (which stays a plain membership Set,
+  // unchanged, since it's shared by callers well beyond the live gate -
+  // see getExplodeGateRestExemptions's other call sites) rather than
+  // folding depth into that structure's shape.
+  let explodeGateRestDepthByPair: Map<string, Map<string, number>> | null = null;
+  // Phase 3 (Stage 6-8, see explode-view-master-plan.md) cached plan state -
+  // built fresh at the end of every computeExplodePlan() call (same
+  // lifecycle as explodeGateSolids above, invalidated in lockstep by
+  // invalidateExplodeGateState), read on demand by certifyExplodeFullPlan()
+  // instead of recomputing Stage 6/7 itself. Also the Phase 4 rendering
+  // hookup's source plan (see explodeCertifiedPlanActive below) when
+  // certification comes back clean.
+  let lastExplodePhase3State: {
+    units: DbgUnit[];
+    solids: Map<string, ExplodeGateSolid>;
+    exemptions: Map<string, Set<string>>;
+    restDepthByPair: Map<string, Map<string, number>>;
+    plan: ExplodeCertifiedPlan;
+  } | null = null;
+  // Phase 4 (corrected, per-unit granularity): explodeCertifiedPlanUnitStatus
+  // holds every unit's own routing decision (see ExplodeCertifiedPlanUnitStatus)
+  // - a unit is only certified-plan-eligible when Stage 6 did NOT mark it
+  // deadEnd (a confirmed SCC member), it has real non-degenerate motion, none
+  // of its member parts has an active manual override, and Stage 8's own full
+  // sweep never found it in a real overlap. explodeCertifiedPlanMemberPartKeys
+  // is the flattened set of part keys belonging to an eligible unit - the
+  // ExplodePlanEntry for each already got the certified axis/distance/stage
+  // window overwritten by direct lookup (see the "Phase 4" block in
+  // computeExplodePlan()), so setExplodeAmount and
+  // computeGatedDistancesForAmount need no certified-plan-specific branch of
+  // their own to render it - only to recognize, per eligible PART, when the
+  // live gate (still active underneath, always, for every part regardless of
+  // eligibility - see explode-view-master-plan.md's Phase 4 revision)
+  // unexpectedly diverges from it, which should essentially never happen and
+  // is worth surfacing loudly, not silently absorbing. explodeCertifiedPlanActive
+  // is kept as a simple "is ANY unit on the certified path" summary for the
+  // existing test getter - see getExplodeCertifiedPlanActive's doc comment.
+  let explodeCertifiedPlanUnitStatus: ExplodeCertifiedPlanUnitStatus[] = [];
+  let explodeCertifiedPlanMemberPartKeys = new Set<string>();
+  let explodeCertifiedPlanActive = false;
+  let explodeGatedDistanceByPartKey = new Map<string, number>();
+  // Each part's RAW (ungated) stage-window target distance as of the last
+  // computeGatedDistancesForAmount call - the rate-limited advance rule
+  // (see that function) needs this to know how far the ungated animation
+  // itself moved this frame (rawNow - rawPrev), not just where the gate
+  // last left the part. Reset in lockstep with explodeGatedDistanceByPartKey
+  // everywhere that resets it (invalidateExplodeGateState, resetExplode).
+  let explodeRawDistanceByPartKey = new Map<string, number>();
+  // DIAGNOSTIC-ONLY, temporary - see setExplodeGateDebugWatch.
+  let explodeGateDebugWatchKeys = new Set<string>();
+  // The global explode amount as of the last computeGatedDistancesForAmount
+  // call - lets that function tell "amount is genuinely holding still" apart
+  // from "amount is advancing but this part's OWN raw target has already
+  // saturated" (see the stranding-fix comment on that function). Reset in
+  // lockstep with the two maps above.
+  let explodeLastGateAmount = 0;
+  // Part keys currently reported (via console.warn) as a genuine wide-search
+  // dead end - see findReachableClearDistance's callers in
+  // computeGatedDistancesForAmount. Tracked so a part stuck for many
+  // consecutive frames logs once per episode instead of once per frame;
+  // cleared whenever the part is next seen clear again, and reset in
+  // lockstep with the maps above.
+  let explodeGateDeadEndLoggedKeys = new Set<string>();
+  // Per-part count of CONSECUTIVE computeGatedDistancesForAmount calls that
+  // reported noProgressThisFrame (see resolveExplodeGateStep) - a single
+  // stuck frame is common and often transient (another part still settling
+  // the same tick can reopen the path next frame), so this is required to
+  // cross EXPLODE_GATE_DEAD_END_CONFIRM_FRAMES before being promoted to
+  // explodeGateDeadEndLoggedKeys, rather than trusting one frame outright.
+  // Reset to 0 for a part the moment it makes real progress OR the mutual-
+  // block pass rescues it, and reset in lockstep with the maps above.
+  let explodeGateNoProgressStreakByPartKey = new Map<string, number>();
+  // The whole-assembly veto's last-fired event (see findWholeAssemblyOverlaps
+  // and its call site in computeGatedDistancesForAmount) - null whenever the
+  // most recent call produced zero real overlaps across every pair, so a
+  // caller can tell "still vetoed" apart from "cleared since last check"
+  // without polling gatedDistance deltas. Reset in lockstep with the maps
+  // above.
+  let explodeLastWholeAssemblyVeto: {
+    amount: number;
+    overlaps: ExplodeGateOverlap[];
+  } | null = null;
   // The world-origin axesHelper's colored (red/green/blue) arms are normally
   // occluded by whatever solid geometry sits at the origin, so they're
   // invisible in the assembled view - but explosion opens gaps between parts
@@ -3759,6 +4178,19 @@ export function createViewer(container: HTMLElement): Viewer {
     directionFlipped?: boolean;
   };
   const explodeOverridesByPartKey = new Map<string, ExplodePartOverride>();
+  /**
+   * Stable identity for whatever assembly is currently loaded (e.g.
+   * `file:${name}:${size}:${lastModified}`, the same convention
+   * cad-viewer.tsx's getFileCacheKey already uses for its own per-file
+   * caches) - set via setActiveAssemblyKey whenever a new file load lands.
+   * Used ONLY to key explodeSccOrderSearchCache below, so a brute-force
+   * SCC permutation search result is never reused across two DIFFERENT
+   * assemblies that happen to produce the same sccKeys/baseStage (e.g. two
+   * files that both have a 6-unit dead-end block). Deliberately never
+   * cleared on toggle-off/resetExplode - the whole point of the cache is
+   * to survive a toggle-off/on cycle on the SAME file.
+   */
+  let activeAssemblyKey: string | null = null;
   /** Every part's key, in current final-stage order (ties broken stably) - refreshed at the end of every computeExplodePlan() call. Lets reorderExplodePart() find a dragged part's new neighbors without recomputing the whole plan just to discover the current order. */
   let lastExplodeOrder: string[] = [];
   /** Each part's effective sort key (manual stageKey override, or its auto stage) from the most recent computeExplodePlan() - the raw values mergeManualStageOverrides dense-ranked into final stage numbers. reorderExplodePart() reads a dragged part's new neighbors' keys from here to compute its own new fractional key. */
@@ -3785,6 +4217,161 @@ export function createViewer(container: HTMLElement): Viewer {
   // candidateCylinderIsHole) before the axis is trusted.
   const FASTENER_VOLUME_RATIO_MAX = 0.15;
   const FASTENER_ASPECT_RATIO_MIN = 0.6;
+  // Assembly-wide dominant shared axis (see computeDominantAssemblyAxis): a
+  // real majority, not just an isolated coaxial pair - a shaft threading
+  // through most of a shaft-based assembly's parts (Stuffing Box) vs. a pin
+  // only threading through two of five parts (Knuckle Joint, which must NOT
+  // trip this).
+  const DOMINANT_AXIS_MIN_PARTS = 3;
+  const DOMINANT_AXIS_MAJORITY_RATIO = 0.6;
+  // Runtime clearance gate (see setExplodeAmount / computeGatedDistancesForAmount
+  // below) - a safety net for the known residual gaps in the ordering/
+  // blocking pipeline (own-extent-skip, genuine cycles) that can otherwise
+  // schedule a part to move through a neighbor that hasn't actually cleared
+  // yet. Kept as a flag, matching HEADED_FASTENER_SPECIAL_CASE_ENABLED,
+  // so it can be switched off for A/B comparison without reverting code.
+  const EXPLODE_GATE_ENABLED = true;
+  const EXPLODE_GATE_BISECT_ITERATIONS = 10;
+  // How many even samples the wide-search fallback takes across a part's
+  // FULL [0, entry.distance] axis range when the narrow per-frame bisection
+  // (see bisectFurthestClearDistance) makes no progress - see
+  // findReachableClearDistance. Only runs for a part that's actually stuck
+  // this frame (rare), so this can afford to be coarser than the per-frame
+  // rate-limited search without becoming a real per-frame cost.
+  const EXPLODE_GATE_WIDE_SEARCH_SAMPLES = 48;
+  // How many best-effort relaxation rounds resolveWholeAssemblyVeto tries
+  // before falling back to an outright revert for whatever's still
+  // conflicting - see that function's doc comment. Each round is cheap
+  // (bisection only over the small set of parts actually named in an
+  // overlap, not every part), so this can afford to be generous; it mostly
+  // exists to bound worst-case per-frame cost, not because convergence
+  // typically needs many rounds.
+  const EXPLODE_GATE_VETO_RELAX_ROUNDS = 6;
+  // How far (mm) either member of a rest-touching pair (see
+  // buildExplodeGateRestExemptions) can travel from its own rest distance (0)
+  // while the exemption still applies - see isRestExemptionActive's doc
+  // comment for why this must be conditional, not permanent. Comfortably
+  // above bisection/float noise (this gate resolves well under manufacturing
+  // tolerance - see EXPLODE_GATE_BISECT_ITERATIONS) and comfortably below the
+  // smallest real per-pair penetration depth ever observed once a part
+  // actually leaves rest (11mm+, see project memory "explode veto freeze fix
+  // and blind spot sizing"), so it can't itself mask a real divergence.
+  const EXPLODE_GATE_REST_EXEMPTION_MAX_DEPARTURE_MM = 0.5;
+  // Epsilon (mm) added on top of a rest-touching pair's own real rest depth
+  // (buildExplodeGateRestDepths) before isLiveRestExemptionActive treats a
+  // live-observed depth as "grown past rest" - covers only bisection/float
+  // noise (see EXPLODE_GATE_BISECT_ITERATIONS), never a real allowance on
+  // top of the pair's own geometry.
+  const EXPLODE_GATE_REST_EXEMPTION_DEPTH_EPS_MM = 0.05;
+  // How many CONSECUTIVE computeGatedDistancesForAmount calls a part must
+  // report noProgressThisFrame (see resolveExplodeGateStep) before it's
+  // promoted to a confirmed dead end (explodeGateDeadEndLoggedKeys) - see
+  // explodeGateNoProgressStreakByPartKey's doc comment for why a single
+  // stuck frame isn't trusted outright (real measured case: a genuine dead
+  // end - the Stuffing Box bush<->bush pair - stayed frozen for 200+
+  // consecutive frames once truly stuck, so this costs at most ~100ms of
+  // extra settle time to rule out a false positive, comfortably cheap next
+  // to the up-to-4000ms EXPLODE_SETTLE_MAX_EXTRA_MS timeout this exists to
+  // cut short).
+  const EXPLODE_GATE_DEAD_END_CONFIRM_FRAMES = 6;
+  // How far (mm) the live gate's result may differ from a certified-clean
+  // plan's raw stage-window target (see explodeCertifiedPlanActive) before
+  // setExplodeAmount treats it as a genuine intervention worth a loud
+  // console.error rather than silent normal operation. Comfortably above
+  // EXPLODE_GATE_BISECT_ITERATIONS' own convergence noise, comfortably below
+  // any real held-back distance (the gate's interventions on uncertified
+  // fixtures run tens of mm or more - see EXPLODE_GATE_REST_EXEMPTION_MAX_DEPARTURE_MM's
+  // comment for the smallest ever observed).
+  const EXPLODE_CERTIFIED_GATE_DIVERGENCE_EPS_MM = 1;
+  // Floor a certified plan's SMALLEST assignment distance must clear before
+  // Phase 4 trusts "0 overlap" as evidence of a genuine, working explode
+  // plan rather than a degenerate "nothing moved" one - see
+  // phase4PlanHasMeaningfulMotion's comment at its call site. Tight enough
+  // not to reject a legitimate short real clearance (a hub part that
+  // barely needs to move), comfortably above float noise, and far below
+  // every real distance this session has measured on a working fixture
+  // (11mm+ - see EXPLODE_GATE_REST_EXEMPTION_MAX_DEPARTURE_MM's comment).
+  const EXPLODE_CERTIFIED_PLAN_MIN_DISTANCE_MM = 0.5;
+  // playExplode's settle phase (see isExplodeGateConvergedOrStuck): once the
+  // real eased tween has pinned `amount` at its target, a part the live gate
+  // hadn't fully caught up to by then would otherwise freeze forever - its
+  // own raw target stops changing (amount is pinned) and computeGated-
+  // DistancesForAmount's "still behind" catch-up branch needs a nonzero
+  // amountDelta to advance at all (see that function's doc comment). Extra
+  // safety cap (ms), on top of the normal 1750ms tween, bounding worst case
+  // if a part is somehow neither converging nor ever getting flagged
+  // deadEnd - a gap this hasn't been proven to have, but a real animation
+  // can't be allowed to hang the UI forever waiting to find out.
+  const EXPLODE_SETTLE_MAX_EXTRA_MS = 4000;
+  // Synthetic per-frame "amount just advanced by this much" magnitude fed to
+  // computeGatedDistancesForAmount during playExplode's settle phase (via a
+  // deliberate backdate of explodeLastGateAmount, never the rendered/
+  // reported explodeAmount itself, which stays pinned at target throughout).
+  // Only the magnitude is used (see that function's amountDelta ->
+  // Math.abs), not its sign. Sized close to double the naive linear
+  // 1750ms/60fps average step (~0.0095) so the settle phase closes real
+  // remaining gaps briskly instead of crawling - correctness doesn't depend
+  // on this value (every candidate is still collision-checked and clamped),
+  // only how many extra frames convergence takes.
+  const EXPLODE_SETTLE_VIRTUAL_STEP = 0.02;
+  // How close (mm) a part's live-gated distance must be to its raw
+  // stage-window target before playExplode's settle phase considers it done
+  // - see isExplodeGateConvergedOrStuck. Comfortably above the per-frame
+  // bisection's float noise, comfortably below the smallest real held-back
+  // distance ever observed (11mm+, see
+  // EXPLODE_GATE_REST_EXEMPTION_MAX_DEPARTURE_MM's comment).
+  const EXPLODE_SETTLE_CONVERGENCE_EPS_MM = 0.5;
+  // Hard cap on any ONE computeGatedDistancesForAmount call's per-part step
+  // magnitude, expressed as an "amount units" budget (like amountDelta, not
+  // raw mm) and converted to mm via that part's own nominalRate - so it
+  // bounds how much GLOBAL amount-equivalent progress a single call may
+  // apply, independent of how large rawDelta/amountDelta actually was for
+  // that call. A real animation frame (playExplode's tick, ~16ms out of a
+  // 1750ms tween) advances `amount` by roughly 1/110 ~= 0.009 - comfortably
+  // under this cap, so it's a no-op for ordinary per-frame calls regardless
+  // of a part's own stage-window span. It exists to stop a SINGLE big jump
+  // (a slider click-to-position, or any other one-shot setExplodeAmount
+  // call with amountDelta close to 1) from resolving straight to its raw
+  // target in one atomic step. That single step only gets checked against
+  // every OTHER part's STALE start-of-call position (Jacobi, see
+  // computeGatedDistancesForAmount's doc comment) - a real mid-travel
+  // crossing between two parts that are BOTH jumping this same call is
+  // invisible to that one-shot check, letting two parts "teleport" past
+  // each other with zero frames where the intermediate, actually-blocking
+  // position was ever tested (confirmed empirically - see project memory
+  // "explode kj regression and slider freeze confirmed"). Capping the step
+  // forces a big jump through multiple calls instead - the settle loop
+  // (runExplodeSettleLoop) supplies the follow-up frames via
+  // EXPLODE_SETTLE_VIRTUAL_STEP's same catch-up path - so the path gets the
+  // same frame-by-frame scrutiny a slow drag or Play's tween already had.
+  const EXPLODE_GATE_MAX_STEP_AMOUNT_DELTA = 0.05;
+  // Wall-clock budget (ms) for the extra gate calls advanceExplodeGateForTick
+  // may spend inside ONE playExplode tick. The step COUNT is already bounded
+  // by the amount range (a jump of at most 1 is at most 1 /
+  // EXPLODE_GATE_MAX_STEP_AMOUNT_DELTA = 20 steps), so this only matters for
+  // a fixture whose per-call gate cost is large enough that those calls
+  // would freeze the UI: there it stops sub-stepping and leaves the rest to
+  // the caller's own capped step and the settle loop, i.e. the behavior from
+  // before sub-stepping existed. Time-based on purpose, not a count: a count
+  // small enough to protect a huge assembly (8 was tried) also truncates a
+  // long stall on a small one - the first tick after a lazy gate-cache
+  // build, a tab returning from the background - and brings the stranding
+  // back (measured: 16 of 94 Sheet Metal Clamp Reverse runs with a 370-500ms
+  // stall during the leaf/pin handover).
+  const EXPLODE_TICK_SUBSTEP_BUDGET_MS = 200;
+  // Same idea as EXPLODE_TICK_SUBSTEP_BUDGET_MS but for
+  // advanceExplodeGateForJump (setExplodeAmount's one-shot jump path)
+  // instead of advanceExplodeGateForTick (playExplode's per-tick path) - a
+  // separate constant, not a shared one, because the two call sites have
+  // different tolerance for a stall (a tick's budget eats into a single
+  // animation frame already in flight; a jump's budget is a one-time cost
+  // paid once per slider click/drag-release, not per frame) even though
+  // today's value happens to match. Same reasoning on step COUNT already
+  // being bounded applies: a jump of at most 1 is at most 1 /
+  // EXPLODE_GATE_MAX_STEP_AMOUNT_DELTA = 20 steps, so this only matters for
+  // a fixture whose per-call gate cost is large enough to threaten the UI
+  // thread for a single click.
+  const EXPLODE_JUMP_SUBSTEP_BUDGET_MS = 200;
 
   function stopExplodeAnimation(): void {
     if (explodeAnimRAF !== null) {
@@ -3800,6 +4387,23 @@ export function createViewer(container: HTMLElement): Viewer {
     axesVisibleBeforeExplode = null;
   }
 
+  /** Drops the cached rest-position BVH solids and resets every part's last-verified-clear distance to 0 (rest). Must run whenever explodePlan is discarded or replaced - a stale cache/distance from a PRIOR plan (different geometry, axes, or stage windows) would silently mis-gate the new one. */
+  function invalidateExplodeGateState(): void {
+    explodeGateSolids = null;
+    explodeGateRestExemptions = null;
+    explodeGateRestDepthByPair = null;
+    explodeGatedDistanceByPartKey = new Map();
+    explodeRawDistanceByPartKey = new Map();
+    explodeLastGateAmount = 0;
+    explodeGateDeadEndLoggedKeys = new Set();
+    explodeGateNoProgressStreakByPartKey = new Map();
+    explodeLastWholeAssemblyVeto = null;
+    lastExplodePhase3State = null;
+    explodeCertifiedPlanUnitStatus = [];
+    explodeCertifiedPlanMemberPartKeys = new Set();
+    explodeCertifiedPlanActive = false;
+  }
+
   /** Full teardown for a model unload/reload - unlike resetExplode(), also discards the cached plan. */
   function resetExplodeForNewModel(): void {
     stopExplodeAnimation();
@@ -3809,6 +4413,20 @@ export function createViewer(container: HTMLElement): Viewer {
     explodeOverridesByPartKey.clear();
     lastExplodeOrder = [];
     lastEffectiveStageKeyByPartKey = new Map();
+    invalidateExplodeGateState();
+  }
+
+  /**
+   * Records which assembly is currently loaded, for explodeSccOrderSearchCache
+   * to key on - see activeAssemblyKey's own doc comment. Deliberately does
+   * NOT clear explodeSccOrderSearchCache itself: the cache's own key
+   * already includes this identity, so a genuinely different assembly
+   * naturally misses without needing an explicit invalidation step, and a
+   * reload of the SAME file (same name/size/lastModified) can still reuse
+   * a still-valid prior result instead of re-paying the search.
+   */
+  function setActiveAssemblyKey(key: string | null): void {
+    activeAssemblyKey = key;
   }
 
   /**
@@ -3894,6 +4512,352 @@ export function createViewer(container: HTMLElement): Viewer {
     const perp = delta.sub(axisA.clone().multiplyScalar(along));
     const tolerance = Math.max(referenceRadius * 1.5, 2);
     return perp.length() <= tolerance;
+  }
+
+  /**
+   * Assembly-wide dominant shared axis - independent of, and computed
+   * BEFORE, any single part's own axis resolution (Pass 2 below). A shaft
+   * running through a stuffing-box-style assembly leaves a coaxial
+   * cylindrical face on nearly every part (body bore, both bushings,
+   * gland, the shaft itself); a single mating pair sharing an axis (e.g.
+   * Knuckle Joint's pin through just the eye and fork) is already handled
+   * per-part by the referenceAxes/axisLinesCoaxial preference in Pass 2 and
+   * must NOT trip this - so this specifically requires a real majority of
+   * the assembly's parts, not merely more than one.
+   *
+   * Greedily clusters every candidate cylindrical face from EVERY part
+   * (not just each part's own top-radius pick) by axis-line coincidence
+   * (axisLinesCoaxial, which already separates "along the line" from
+   * "off the line" - so a body at one end of the shaft and a gland at the
+   * other still cluster correctly despite being far apart along the axis).
+   * A part can contribute more than one candidate to the same cluster (a
+   * stepped bore) but only counts once toward that cluster's part count.
+   * Returns null when no cluster reaches DOMINANT_AXIS_MIN_PARTS AND
+   * DOMINANT_AXIS_MAJORITY_RATIO of the assembly's total part count.
+   */
+  function computeDominantAssemblyAxis(
+    raw: {
+      partKey: string;
+      cylinderCandidates: { axis: THREE.Vector3; radius: number; origin: THREE.Vector3 }[];
+    }[],
+  ): { axis: THREE.Vector3; origin: THREE.Vector3; partKeys: Set<string> } | null {
+    type Cluster = {
+      axis: THREE.Vector3;
+      origin: THREE.Vector3;
+      radius: number;
+      partKeys: Set<string>;
+    };
+    const clusters: Cluster[] = [];
+    for (const r of raw) {
+      for (const candidate of r.cylinderCandidates) {
+        const cluster = clusters.find((c) =>
+          axisLinesCoaxial(
+            c.axis,
+            c.origin,
+            candidate.axis,
+            candidate.origin,
+            Math.max(c.radius, candidate.radius),
+          ),
+        );
+        if (cluster) {
+          cluster.partKeys.add(r.partKey);
+          cluster.radius = Math.max(cluster.radius, candidate.radius);
+        } else {
+          clusters.push({
+            axis: candidate.axis.clone(),
+            origin: candidate.origin.clone(),
+            radius: candidate.radius,
+            partKeys: new Set([r.partKey]),
+          });
+        }
+      }
+    }
+    if (clusters.length === 0 || raw.length === 0) return null;
+    clusters.sort((a, b) => b.partKeys.size - a.partKeys.size);
+    const best = clusters[0]!;
+    const meetsMajority =
+      best.partKeys.size >= DOMINANT_AXIS_MIN_PARTS &&
+      best.partKeys.size / raw.length >= DOMINANT_AXIS_MAJORITY_RATIO;
+    if (!meetsMajority) return null;
+    return { axis: best.axis.clone(), origin: best.origin.clone(), partKeys: best.partKeys };
+  }
+
+  // ===========================================================================
+  // Liaison graph + component grouping - Phase 1 of the offline-planning
+  // rebuild (see explode-view-master-plan.md Stage 1-2). DIAGNOSTIC ONLY:
+  // read-only over data computeExplodePlan already produces (interlocksByPartKey,
+  // the gate's rest-touching mesh-contact set, axisLinesCoaxial) and logged via
+  // console.debug for inspection. Nothing here is consumed by axis/order/
+  // distance resolution or rendering - that wiring is a later phase.
+  // ===========================================================================
+
+  type LiaisonContactType = "occupied-hole" | "face-contact";
+
+  /**
+   * One real contact between two parts in the assembled state, with every
+   * kind of evidence the existing pipeline already has for it. `types`
+   * distinguishes "occupied-hole" (one part's cylindrical bore is filled by
+   * the other - from interlocksByPartKey, i.e. findCylinderHoleOccupants)
+   * from "face-contact" (the two parts' solid meshes actually touch/overlap
+   * at rest, per the SAME real BVH test the runtime gate already trusts for
+   * its rest-touching exemptions - see buildExplodeGateRestExemptions). A
+   * pair can be both. `coincidentAxis` is a separate, weaker corroborating
+   * signal (their cylinder candidates share an axis LINE per
+   * axisLinesCoaxial) layered onto whichever contact edge already exists -
+   * axis coincidence alone, with no real touching, is not treated as
+   * contact.
+   */
+  type LiaisonEdge = {
+    a: string;
+    b: string;
+    types: LiaisonContactType[];
+    coincidentAxis: boolean;
+  };
+
+  function liaisonEdgeKey(a: string, b: string): string {
+    return a < b ? `${a}|${b}` : `${b}|${a}`;
+  }
+
+  /**
+   * Stage 1: builds the whole-assembly contact graph from two REAL,
+   * already-computed signals - no new geometry queries. `interlocksByPartKey`
+   * (host part -> its occupied bores -> occupants) is the seed the master
+   * plan calls for; `restContact` (see buildExplodeGateRestExemptions) fills
+   * the real gap that seed alone leaves: generic flat/face contact between
+   * parts with no cylindrical relationship at all (a plain flange face
+   * resting on another part's face, e.g.), which interlocksByPartKey's
+   * bore-occupancy scan has no way to see. Both sources are unioned into one
+   * edge per pair; axisLinesCoaxial cross-checks every resulting edge for a
+   * shared axis line as extra evidence (useful for Stage 2 grouping) without
+   * ever creating an edge by itself.
+   */
+  function computeLiaisonGraph(
+    raw: {
+      partKey: string;
+      cylinderCandidates: { axis: THREE.Vector3; radius: number; origin: THREE.Vector3 }[];
+    }[],
+    interlocksByPartKey: Map<
+      string,
+      { boreAxis: THREE.Vector3; boreRadius: number; occupiedBy: string[] }[]
+    >,
+    restContact: Map<string, Set<string>>,
+  ): Map<string, LiaisonEdge> {
+    const edges = new Map<string, LiaisonEdge>();
+    const getOrCreateEdge = (a: string, b: string): LiaisonEdge => {
+      const key = liaisonEdgeKey(a, b);
+      let edge = edges.get(key);
+      if (!edge) {
+        edge = { a, b, types: [], coincidentAxis: false };
+        edges.set(key, edge);
+      }
+      return edge;
+    };
+
+    for (const [hostKey, entries] of interlocksByPartKey) {
+      for (const entry of entries) {
+        for (const occupantKey of entry.occupiedBy) {
+          const edge = getOrCreateEdge(hostKey, occupantKey);
+          if (!edge.types.includes("occupied-hole")) edge.types.push("occupied-hole");
+        }
+      }
+    }
+
+    for (const [partKey, neighbors] of restContact) {
+      for (const neighborKey of neighbors) {
+        const edge = getOrCreateEdge(partKey, neighborKey);
+        if (!edge.types.includes("face-contact")) edge.types.push("face-contact");
+      }
+    }
+
+    const byKey = new Map(raw.map((r) => [r.partKey, r]));
+    for (const edge of edges.values()) {
+      const ra = byKey.get(edge.a);
+      const rb = byKey.get(edge.b);
+      if (!ra || !rb) continue;
+      edge.coincidentAxis = ra.cylinderCandidates.some((ca) =>
+        rb.cylinderCandidates.some((cb) =>
+          axisLinesCoaxial(ca.axis, ca.origin, cb.axis, cb.origin, Math.max(ca.radius, cb.radius)),
+        ),
+      );
+    }
+
+    return edges;
+  }
+
+  function liaisonNeighbors(
+    edges: Map<string, LiaisonEdge>,
+    partKey: string,
+  ): { neighborKey: string; edge: LiaisonEdge }[] {
+    const out: { neighborKey: string; edge: LiaisonEdge }[] = [];
+    for (const edge of edges.values()) {
+      if (edge.a === partKey) out.push({ neighborKey: edge.b, edge });
+      else if (edge.b === partKey) out.push({ neighborKey: edge.a, edge });
+    }
+    return out;
+  }
+
+  /**
+   * Strips a trailing instance/counter suffix (" #2", " (2)", "_2", "-2",
+   * " Copy 2", " Instance 2") so repeated fastener instances that share a
+   * common base product name but differ only by an appended counter still
+   * compare equal. Deliberately narrow - only strips a SHORT, clearly
+   * counter-shaped tail so it can't accidentally collapse two genuinely
+   * different part names (e.g. "M8x30" and "M8x40") down to the same base.
+   */
+  function stripInstanceSuffix(name: string): string {
+    return name
+      .trim()
+      .replace(/[\s_-]*\(\s*\d+\s*\)\s*$/i, "")
+      .replace(/[\s_-]*\b(copy|instance|inst)\b[\s_-]*\d*\s*$/i, "")
+      .replace(/[\s_-]*#\d+\s*$/i, "")
+      .trim();
+  }
+
+  function boxVolume(box: THREE.Box3): number {
+    const size = box.getSize(new THREE.Vector3());
+    return size.x * size.y * size.z;
+  }
+
+  type ComponentGroup = {
+    hostKey: string;
+    memberKeys: string[];
+    basePattern: string;
+    contactTypes: LiaisonContactType[];
+    geometryMatches: boolean;
+    evidence: string;
+  };
+
+  /**
+   * Stage 2: parallel-group detection (Section 1.3/1.4 of the master plan -
+   * e.g. a ring of identical bolts around one flange, with no precedence
+   * between members). Deliberately conservative per the task brief: a group
+   * requires BOTH (a) real liaison contact with a common host - shape
+   * similarity alone proves nothing about whether parts are actually the
+   * same fastener - AND (b) a naming signal (identical base name once a
+   * trailing instance counter is stripped - see stripInstanceSuffix). No
+   * separate GOST/ISO-designation or STEP-instance-id field is exposed to
+   * this layer today (top-level part objects only carry the tessellation
+   * payload's `name` string - see mesh-loader.ts's buildPendingCadMeshEntry),
+   * so identical-name-after-stripping is the only naming signal available;
+   * bounding-box volume agreement (within 10%) is logged alongside as
+   * corroborating (not required) geometry evidence.
+   */
+  function computeComponentGroups(
+    raw: {
+      partKey: string;
+      name: string;
+      box0: THREE.Box3;
+    }[],
+    edges: Map<string, LiaisonEdge>,
+  ): ComponentGroup[] {
+    const byKey = new Map(raw.map((r) => [r.partKey, r]));
+    const groups: ComponentGroup[] = [];
+    const claimedKeys = new Set<string>();
+
+    for (const hostKey of byKey.keys()) {
+      const neighbors = liaisonNeighbors(edges, hostKey).filter(
+        (n) => n.neighborKey !== hostKey,
+      );
+      if (neighbors.length < 2) continue;
+
+      const buckets = new Map<
+        string,
+        { neighborKey: string; edge: LiaisonEdge }[]
+      >();
+      for (const n of neighbors) {
+        const r = byKey.get(n.neighborKey);
+        if (!r) continue;
+        const base = stripInstanceSuffix(r.name);
+        if (!base) continue;
+        const list = buckets.get(base) ?? [];
+        list.push(n);
+        buckets.set(base, list);
+      }
+
+      for (const [base, members] of buckets) {
+        const freshMembers = members.filter((m) => !claimedKeys.has(m.neighborKey));
+        if (freshMembers.length < 2) continue;
+
+        const volumes = freshMembers.map((m) => boxVolume(byKey.get(m.neighborKey)!.box0));
+        const sorted = [...volumes].sort((a, b) => a - b);
+        const median = sorted[Math.floor(sorted.length / 2)]!;
+        const geometryMatches =
+          median > 0 && volumes.every((v) => Math.abs(v - median) / median < 0.1);
+
+        const contactTypes = Array.from(
+          new Set(freshMembers.flatMap((m) => m.edge.types)),
+        );
+        const rawNames = freshMembers.map((m) => byKey.get(m.neighborKey)!.name);
+
+        groups.push({
+          hostKey,
+          memberKeys: freshMembers.map((m) => m.neighborKey),
+          basePattern: base,
+          contactTypes,
+          geometryMatches,
+          evidence: `${freshMembers.length}x liaison contact (${contactTypes.join("+")}) with host "${byKey.get(hostKey)!.name}", identical name after instance-suffix stripping ("${base}" from raw names: ${rawNames.join(", ")}), bbox volumes ${geometryMatches ? "agree" : "DIFFER"} within 10%`,
+        });
+        for (const m of freshMembers) claimedKeys.add(m.neighborKey);
+      }
+    }
+
+    return groups;
+  }
+
+  /** Logs the Stage 1/2 diagnostic report - see the section comment above computeLiaisonGraph. Never touched by rendering or the live gate. */
+  function logLiaisonGraphDiagnostics(
+    raw: { partKey: string; name: string }[],
+    edges: Map<string, LiaisonEdge>,
+    groups: ComponentGroup[],
+  ): void {
+    const nameOf = (key: string) => raw.find((r) => r.partKey === key)?.name ?? key;
+    const edgeList = Array.from(edges.values()).map((e) => ({
+      a: nameOf(e.a),
+      b: nameOf(e.b),
+      types: e.types,
+      coincidentAxis: e.coincidentAxis,
+      // Real evidence for Phase 2: "occupied-hole" alone (no "face-contact")
+      // means the analytic bore-containment heuristic (findCylinderHoleOccupants)
+      // found a fit, but the SAME real mesh-vs-mesh BVH test the rest-touching
+      // exemptions already trust found no actual contact at rest - i.e. this
+      // specific pair does NOT genuinely touch, regardless of what the
+      // containment heuristic alone would suggest.
+      genuineTouch: e.types.includes("face-contact"),
+    }));
+    // Edges the containment heuristic alone would call "contact" but the real
+    // geometry test disagrees with - worth a second look before Phase 2/3
+    // treat them as a genuine mating relationship (see the ambiguous
+    // collar/lock-pin edge flagged in explode_liaison_graph_phase1).
+    const ambiguousContainmentOnlyEdges = edgeList.filter(
+      (e) => e.types.includes("occupied-hole") && !e.genuineTouch,
+    );
+
+    const degree = new Map<string, number>();
+    for (const r of raw) degree.set(r.partKey, 0);
+    for (const e of edges.values()) {
+      degree.set(e.a, (degree.get(e.a) ?? 0) + 1);
+      degree.set(e.b, (degree.get(e.b) ?? 0) + 1);
+    }
+    const hubCandidates = Array.from(degree.entries())
+      .filter(([, count]) => count >= 3)
+      .sort((a, b) => b[1] - a[1])
+      .map(([key, count]) => ({ part: nameOf(key), liaisonDegree: count }));
+
+    console.debug("[ExplodeView][DIAG][Phase1 liaison graph]", {
+      partCount: raw.length,
+      edgeCount: edges.size,
+      edges: edgeList,
+      ambiguousContainmentOnlyEdges,
+      hubCandidates,
+      groups: groups.map((g) => ({
+        host: nameOf(g.hostKey),
+        members: g.memberKeys.map(nameOf),
+        basePattern: g.basePattern,
+        contactTypes: g.contactTypes,
+        geometryMatches: g.geometryMatches,
+        evidence: g.evidence,
+      })),
+    });
   }
 
   /**
@@ -4153,6 +5117,32 @@ export function createViewer(container: HTMLElement): Viewer {
   }
 
   /**
+   * Is the assembly actually SHAPED like a shaft along this candidate
+   * dominant axis - i.e. is the axis genuinely the assembly's own longest
+   * overall dimension, not merely a bore/pin line a majority of parts
+   * happen to share? A stuffing-box-style assembly is elongated ALONG its
+   * shaft; a knuckle joint's pin axis is (per real fixture data) the
+   * assembly's SHORT dimension - the rods extend perpendicular to it. Both
+   * can pass computeDominantAssemblyAxis's per-part majority test (most of
+   * a knuckle joint's parts DO have a bore coaxial with the pin), so that
+   * test alone can't tell them apart; this whole-assembly shape check is
+   * the discriminator computeDominantAssemblyAxis's caller gates on before
+   * trusting the majority axis as the "shaft" default.
+   */
+  function assemblyElongatedAlongAxis(
+    assemblyBox0: THREE.Box3,
+    axis: THREE.Vector3,
+  ): boolean {
+    const axisProj = projectBoxOntoAxis(assemblyBox0, axis);
+    const axisExtent = axisProj.max - axisProj.min;
+    const [u, v] = perpendicularBasis(axis);
+    const uExtent = projectBoxOntoAxis(assemblyBox0, u);
+    const vExtent = projectBoxOntoAxis(assemblyBox0, v);
+    const maxPerpExtent = Math.max(uExtent.max - uExtent.min, vExtent.max - vExtent.min);
+    return axisExtent > maxPerpExtent;
+  }
+
+  /**
    * Is this candidate cylindrical face a HOLE (another part's body occupies
    * its interior, e.g. a pin through a bore) rather than the part's own
    * solid shaft? For each other part: (a) its box must genuinely overlap
@@ -4244,21 +5234,28 @@ export function createViewer(container: HTMLElement): Viewer {
    * with a neighboring part's axis (see axisLinesCoaxial) over blindly
    * taking the largest radius, but ONLY trusted outright when the part is
    * fastener-like (isFastenerLikePart); a body part's candidate is trusted
-   * only if it's provably not a bore (candidateCylinderIsHole) - otherwise
-   * the part's own principal axis (its longest AABB dimension - the
-   * direction it actually extends along, e.g. an eye/fork's rod-shaft
-   * length) replaces it -> (b) a hole this part is KNOWN to occupy in
-   * another part (see occupiedHoleAxis - the interlock-scan pass in
-   * computeExplodePlan already identified this part as the occupant of
-   * some other part's bore; that bore's own axis is definitionally this
-   * part's true exit line too, and is a stronger signal than a generic
-   * flat-face/radial guess for a part with no cylindrical candidate of its
-   * own, e.g. a tapered lock pin the analytic extractor never classifies
-   * as "cylinder" kind) -> (c) dominant flat-face normal -> (d) radial
-   * fallback. Returns an axis LINE only (unit vector, arbitrary sign) -
-   * direction is resolved separately by resolveExplodeDirectionSign, which
-   * clearance-tests both signs rather than assuming "outward from centroid"
-   * is correct.
+   * only if it's provably not a bore (candidateCylinderIsHole) - otherwise,
+   * when the assembly has a dominant shared shaft axis (see
+   * computeDominantAssemblyAxis - a real majority of parts sharing one
+   * axis, not just this one mating pair), that shared axis replaces it,
+   * since a symmetric body part with an occupied bore (a bushing, sleeve,
+   * or gland) has no shape of its own reliable enough to guess from; only
+   * when NEITHER applies does the part's own principal axis (its longest
+   * AABB dimension - the direction it actually extends along, e.g. an
+   * eye/fork's rod-shaft length) replace it -> (b) a hole this part is
+   * KNOWN to occupy in another part (see occupiedHoleAxis - the
+   * interlock-scan pass in computeExplodePlan already identified this part
+   * as the occupant of some other part's bore; that bore's own axis is
+   * definitionally this part's true exit line too, and is a stronger
+   * signal than a generic flat-face/radial guess for a part with no
+   * cylindrical candidate of its own, e.g. a tapered lock pin the analytic
+   * extractor never classifies as "cylinder" kind) -> (c) dominant
+   * flat-face normal -> (d) radial fallback. Returns an axis LINE only
+   * (unit vector, arbitrary sign) - direction is resolved separately by
+   * resolveExplodeDirectionSign, which clearance-tests both signs rather
+   * than assuming "outward from centroid" is correct (except for the new
+   * dominant-shaft-axis rule, whose direction Pass 3 resolves from
+   * position along the axis instead - see computeExplodePlan).
    */
   function computeExplodeAxisForPart(
     partObject: THREE.Object3D,
@@ -4269,6 +5266,7 @@ export function createViewer(container: HTMLElement): Viewer {
     cylinderCandidate: { axis: THREE.Vector3; radius: number; origin: THREE.Vector3 } | null,
     otherParts: { box0: THREE.Box3; centroid: THREE.Vector3; partKey: string }[],
     occupiedHoleAxis: THREE.Vector3 | null,
+    dominantAxis: THREE.Vector3 | null,
   ): { axis: THREE.Vector3; rule: ExplodeRule; detail: string } {
     let axis: THREE.Vector3 | null = null;
     let rule: ExplodeRule = "radial-fallback";
@@ -4285,6 +5283,10 @@ export function createViewer(container: HTMLElement): Viewer {
           axis = cylinderCandidate.axis;
           rule = "cylinder";
           detail = `body part, own shaft (not a bore), radius ${cylinderCandidate.radius.toFixed(2)}mm`;
+        } else if (dominantAxis) {
+          axis = dominantAxis.clone();
+          rule = "dominant-shaft-axis";
+          detail = `body part; radius ${cylinderCandidate.radius.toFixed(2)}mm face is a bore another part passes through - using the assembly's dominant shared shaft axis instead of a shape guess`;
         } else {
           const size = partBox0.getSize(new THREE.Vector3());
           axis =
@@ -4406,7 +5408,17 @@ export function createViewer(container: HTMLElement): Viewer {
     });
 
     const span = tMax - tMin;
-    if (samples.length === 0 || span < 1e-6) return null;
+    const partLabel =
+      (partObject.userData as any)?.__partKey ?? partObject.name ?? "(unnamed)";
+    if (samples.length === 0 || span < 1e-6) {
+      console.debug("[ExplodeView][DIAG][detectHeadedFastenerAxisSign]", {
+        part: partLabel,
+        result: "null (no samples or degenerate span)",
+        sampleCount: samples.length,
+        span,
+      });
+      return null;
+    }
 
     const edgeWidth = span * HEADED_FASTENER_END_FRACTION;
     let lowEndRadius = 0;
@@ -4415,11 +5427,43 @@ export function createViewer(container: HTMLElement): Viewer {
       if (s.t <= tMin + edgeWidth && s.r > lowEndRadius) lowEndRadius = s.r;
       if (s.t >= tMax - edgeWidth && s.r > highEndRadius) highEndRadius = s.r;
     }
-    if (lowEndRadius < 1e-6 && highEndRadius < 1e-6) return null;
+    if (lowEndRadius < 1e-6 && highEndRadius < 1e-6) {
+      console.debug("[ExplodeView][DIAG][detectHeadedFastenerAxisSign]", {
+        part: partLabel,
+        result: "null (both ends ~zero radius)",
+        tMin,
+        tMax,
+        lowEndRadius,
+        highEndRadius,
+      });
+      return null;
+    }
 
-    if (lowEndRadius > highEndRadius * HEADED_FASTENER_RADIUS_RATIO) return -1;
-    if (highEndRadius > lowEndRadius * HEADED_FASTENER_RADIUS_RATIO) return 1;
-    return null;
+    let sign: 1 | -1 | null = null;
+    let widerEnd: "low-t" | "high-t" | "neither (within ratio)" = "neither (within ratio)";
+    if (lowEndRadius > highEndRadius * HEADED_FASTENER_RADIUS_RATIO) {
+      sign = -1;
+      widerEnd = "low-t";
+    } else if (highEndRadius > lowEndRadius * HEADED_FASTENER_RADIUS_RATIO) {
+      sign = 1;
+      widerEnd = "high-t";
+    }
+    const lowEndWorldPos = refPoint.clone().addScaledVector(axis, tMin);
+    const highEndWorldPos = refPoint.clone().addScaledVector(axis, tMax);
+    console.debug("[ExplodeView][DIAG][detectHeadedFastenerAxisSign]", {
+      part: partLabel,
+      widerEnd,
+      lowEndRadius,
+      highEndRadius,
+      tMin,
+      tMax,
+      axisIn: { x: axis.x, y: axis.y, z: axis.z },
+      refPoint: { x: refPoint.x, y: refPoint.y, z: refPoint.z },
+      lowEndWorldPos: { x: lowEndWorldPos.x, y: lowEndWorldPos.y, z: lowEndWorldPos.z },
+      highEndWorldPos: { x: highEndWorldPos.x, y: highEndWorldPos.y, z: highEndWorldPos.z },
+      resultSign: sign,
+    });
+    return sign;
   }
 
   /**
@@ -4477,7 +5521,7 @@ export function createViewer(container: HTMLElement): Viewer {
   type ExplodeBlockingInput = {
     partKey: string;
     centroidDist: number;
-    /** Bounding-box blockers for this part's resolved direction (see pickBestSignByBbox), unioned with the hard interlock edges (see the interlock-constraint pass in computeExplodePlan) before Kahn's algorithm runs - both edge sources feed the same dependency graph, this function doesn't care which produced an edge. */
+    /** Real mesh-vs-mesh blockers for this part's resolved direction (see computeMeshBlockersForSignedAxis - the sign itself still comes from the cheaper bbox test, pickBestSignByBbox), unioned with the hard interlock edges (see the interlock-constraint pass in computeExplodePlan) before Kahn's algorithm runs - both edge sources feed the same dependency graph, this function doesn't care which produced an edge. */
     blockedBy: string[];
   };
   type ExplodeBlockingResult = {
@@ -4489,9 +5533,9 @@ export function createViewer(container: HTMLElement): Viewer {
   /**
    * Sequence-aware blocking order: a real exploded view removes parts in the
    * order they can physically come out, not all at once. Each part's
-   * blockedBy set (already resolved by the caller via bounding-box sweeps -
-   * see pickBestSignByBbox - unioned with hard interlock edges) becomes a
-   * dependency edge j -> i (j must be
+   * blockedBy set (already resolved by the caller via real mesh-vs-mesh
+   * sweeps - see computeMeshBlockersForSignedAxis - unioned with hard
+   * interlock edges) becomes a dependency edge j -> i (j must be
    * staged before i) for every j it names. A part with nothing blocking it
    * can move first; a part blocked by another can only move once its
    * blocker's own stage has started. Kahn's algorithm turns this into
@@ -4655,13 +5699,14 @@ export function createViewer(container: HTMLElement): Viewer {
     };
   }
 
-  function computeExplodePlan(): ExplodeDebugEntry[] {
+  async function computeExplodePlan(): Promise<ExplodeDebugEntry[]> {
     stopExplodeAnimation();
 
     const parts = getTopLevelModelChildren();
     if (parts.length === 0) {
       explodePlan = null;
       explodeAmount = 0;
+      invalidateExplodeGateState();
       return [];
     }
 
@@ -4824,6 +5869,31 @@ export function createViewer(container: HTMLElement): Viewer {
         radius: r.cylinderCandidates[0]!.radius,
       }));
 
+    // Assembly-wide dominant shared axis (see computeDominantAssemblyAxis) -
+    // computed once, before any single part's axis is resolved, since a
+    // shaft-based assembly's body parts (bushings, sleeves, a gland) need
+    // this as their default BEFORE Pass 2 falls through to a per-part
+    // shape guess for any one of them. A per-part majority alone isn't
+    // enough evidence, though: a knuckle joint's pin bore is coaxial
+    // across most of ITS parts too, but the pin axis is that assembly's
+    // SHORT dimension, not a real shaft spine - assemblyElongatedAlongAxis
+    // is the whole-assembly-shape check that tells the two apart.
+    const dominantAxisCandidate = computeDominantAssemblyAxis(raw);
+    const dominantAxisElongated =
+      dominantAxisCandidate !== null &&
+      assemblyElongatedAlongAxis(assemblyBox, dominantAxisCandidate.axis);
+    const dominantAssemblyAxis = dominantAxisElongated ? dominantAxisCandidate : null;
+    console.debug("[ExplodeView][DIAG][dominant assembly axis]", {
+      detected: Boolean(dominantAssemblyAxis),
+      candidateFoundButNotElongated: Boolean(dominantAxisCandidate) && !dominantAxisElongated,
+      axis: dominantAxisCandidate
+        ? { x: dominantAxisCandidate.axis.x, y: dominantAxisCandidate.axis.y, z: dominantAxisCandidate.axis.z }
+        : null,
+      partCount: dominantAxisCandidate?.partKeys.size ?? 0,
+      totalParts: raw.length,
+      parts: dominantAxisCandidate ? Array.from(dominantAxisCandidate.partKeys) : [],
+    });
+
     // Pass 2: resolve each part's axis LINE (unsigned) - preferring a
     // cylinder candidate that lines up with another part's axis over its
     // own largest-radius candidate, then classified fastener-vs-body (see
@@ -4858,9 +5928,28 @@ export function createViewer(container: HTMLElement): Viewer {
         cylinderCandidate,
         otherParts,
         occupiedHoleAxisByPartKey.get(r.partKey) ?? null,
+        dominantAssemblyAxis?.axis ?? null,
       );
-      const isFastenerLike = cylinderCandidate
-        ? isFastenerLikePart(r.box0, assemblyBox, cylinderCandidate)
+      // A part with no cylindrical candidate of its own (e.g. a tapered
+      // lock pin - its faces are "cone" kind) can still be fastener-like;
+      // it just has no candidate face to run the volume/aspect-ratio test
+      // against. When it fell through to the occupied-hole-axis rule
+      // (rule = "occupied-hole-axis" - see computeExplodeAxisForPart), the
+      // bore it occupies IS its true axis and radius, so build a synthetic
+      // candidate from that bore instead of skipping the test outright.
+      const fastenerTestCandidate =
+        cylinderCandidate ??
+        (rule === "occupied-hole-axis"
+          ? (() => {
+              const boreAxis = occupiedHoleAxisByPartKey.get(r.partKey);
+              const boreRadius = occupiedHoleRadiusByPartKey.get(r.partKey);
+              return boreAxis && boreRadius !== undefined
+                ? { axis: boreAxis, radius: boreRadius }
+                : null;
+            })()
+          : null);
+      const isFastenerLike = fastenerTestCandidate
+        ? isFastenerLikePart(r.box0, assemblyBox, fastenerTestCandidate)
         : false;
       const centroidDist = r.centroid.distanceTo(assemblyCentroid);
       maxCentroidDist = Math.max(maxCentroidDist, centroidDist);
@@ -4925,19 +6014,111 @@ export function createViewer(container: HTMLElement): Viewer {
     // separately, off real mesh vertices, before the bbox test runs.
     for (const item of pending) {
       if (HEADED_FASTENER_SPECIAL_CASE_ENABLED) {
+        // detectHeadedFastenerAxisSign samples real mesh vertices, not the
+        // analytic face-kind classification - it works identically whether
+        // item.axis came from a "cylinder" candidate or from the
+        // "occupied-hole-axis" fallback (a cone-classified taper pin with
+        // no cylindrical candidate of its own, occupying another part's
+        // bore - see occupiedHoleAxisByPartKey above). Excludes
+        // "principal-axis"/"flat-face"/"radial-fallback" rules, where
+        // item.axis isn't a cylindrical axis at all and this sampling
+        // wouldn't mean anything.
         const headSign =
-          item.isFastenerLike && item.rule === "cylinder"
+          item.isFastenerLike &&
+          (item.rule === "cylinder" || item.rule === "occupied-hole-axis")
             ? detectHeadedFastenerAxisSign(item.object, item.axis, item.centroid)
             : null;
         if (headSign !== null) {
+          const axisBeforeSign = { x: item.axis.x, y: item.axis.y, z: item.axis.z };
           if (headSign < 0) item.axis = item.axis.clone().negate();
+          console.debug("[ExplodeView][DIAG][Pass3 headed-fastener]", {
+            part: item.name ?? item.partKey,
+            headSign,
+            axisBeforeSignApplied: axisBeforeSign,
+            axisAfterSignApplied: { x: item.axis.x, y: item.axis.y, z: item.axis.z },
+          });
           item.detail += "; headed fastener - forced head-first exit";
           continue;
         }
       }
+      // Symmetric shaft-spine parts (a bushing, sleeve, gland, or a plain
+      // uniform shaft itself with no head/shoulder a shape-based test could
+      // read) get their direction from which side of the assembly's own
+      // center they already sit on, projected onto the shared axis (point 3
+      // of the shaft-based-assembly spec: never guess from the part's own
+      // geometry) - the usual bbox sweep's blocker-count/open-room tiebreak
+      // is unreliable for a part sandwiched between neighbors on both sides
+      // of the same shaft. Shared by two arrival paths: rule ===
+      // "dominant-shaft-axis" (a body part whose own candidate face is a
+      // bore something else passes through - resolved in Pass 2 above), and
+      // - fixing a real confirmed bug, see project memory "explode gate
+      // mutual-block, baseline-bound, bush-shaft axis recheck" - a
+      // fastener-like "cylinder"-rule part (own-shaft rule, not a bore) that
+      // ALSO lies along the assembly's dominant shared axis but has no head
+      // asymmetry (detectHeadedFastenerAxisSign returned null) AND ties in
+      // BOTH directions on the bbox sweep's own blocker count (including a
+      // 0-vs-0 non-signal - confirmed on the Stuffing Box shaft: its own
+      // bounding box spans nearly the whole assembly, so
+      // computeBboxBlockersForSignedAxis finds literally nothing "ahead" of
+      // it in either direction once its own extent is skipped, leaving the
+      // arbitrary "open room before the assembly edge" tiebreak as the
+      // ENTIRE basis for its sign - a coin flip, not evidence, and the
+      // confirmed root cause of shaft landing on the SAME signed direction
+      // as the bush it needs to withdraw from, which real-geometry testing
+      // (debugLivePartPairClearanceAtMultiples) showed barely separates at
+      // even 3x their assigned travel).
+      const resolveDirectionFromAssemblyPosition = (): void => {
+        const centerOnAxis = assemblyCentroid.dot(item.axis);
+        const selfOnAxis = item.centroid.dot(item.axis);
+        const signedAxis =
+          selfOnAxis >= centerOnAxis ? item.axis.clone() : item.axis.clone().negate();
+        const others = pending
+          .filter((other) => other.partKey !== item.partKey)
+          .map((other) => ({ partKey: other.partKey, box0: other.box0 }));
+        item.blockedBy = computeBboxBlockersForSignedAxis(item.box0, signedAxis, others);
+        item.axis = signedAxis;
+        item.detail += "; direction from position along shared axis relative to assembly center";
+        console.debug("[ExplodeView][DIAG][Pass3 dominant-shaft-axis]", {
+          part: item.name ?? item.partKey,
+          axis: { x: signedAxis.x, y: signedAxis.y, z: signedAxis.z },
+          selfOnAxis,
+          centerOnAxis,
+          blockedBy: item.blockedBy,
+        });
+      };
+      if (item.rule === "dominant-shaft-axis") {
+        resolveDirectionFromAssemblyPosition();
+        continue;
+      }
+      if (item.isFastenerLike) {
+        console.debug("[ExplodeView][DIAG][Pass3 fastener fallthrough]", {
+          part: item.name ?? item.partKey,
+          reason:
+            item.rule !== "cylinder" && item.rule !== "occupied-hole-axis"
+              ? `rule is "${item.rule}", not "cylinder"/"occupied-hole-axis" - headed-fastener check skipped entirely`
+              : "detectHeadedFastenerAxisSign returned null - falling back to bbox sweep",
+        });
+      }
       const others = pending
         .filter((other) => other.partKey !== item.partKey)
         .map((other) => ({ partKey: other.partKey, box0: other.box0 }));
+      const isOnDominantSharedAxis =
+        item.isFastenerLike &&
+        dominantAssemblyAxis &&
+        Math.abs(item.axis.clone().normalize().dot(dominantAssemblyAxis.axis)) > 0.98;
+      if (isOnDominantSharedAxis) {
+        const plusBlockers = computeBboxBlockersForSignedAxis(item.box0, item.axis.clone(), others);
+        const minusBlockers = computeBboxBlockersForSignedAxis(item.box0, item.axis.clone().negate(), others);
+        if (plusBlockers.length === minusBlockers.length) {
+          console.debug("[ExplodeView][DIAG][Pass3 dominant-axis bbox tie]", {
+            part: item.name ?? item.partKey,
+            plusBlockers,
+            minusBlockers,
+          });
+          resolveDirectionFromAssemblyPosition();
+          continue;
+        }
+      }
       const { axis, blockedBy } = pickBestSignByBbox(
         item.box0,
         item.axis,
@@ -5024,33 +6205,55 @@ export function createViewer(container: HTMLElement): Viewer {
         }
       }
     }
-    // Any part whose axis Pass 5 just flipped has a stale blockedBy list
-    // (computed for its PREVIOUS sign) - recompute it for the sign that's
-    // actually in effect now, so Pass 6's blocking graph (and the debug
-    // entries reported below) reflect the post-correction sign.
-    for (const partKey of flippedByPass5) {
-      const item = byKey.get(partKey)!;
-      const others = pending
-        .filter((other) => other.partKey !== item.partKey)
-        .map((other) => ({ partKey: other.partKey, box0: other.box0 }));
-      item.blockedBy = computeBboxBlockersForSignedAxis(
-        item.box0,
-        item.axis,
-        others,
-      );
+    // DIAG: final world-space axis for every fastener-like part after both
+    // Pass 3 (headed-fastener sign / bbox sweep) and Pass 5 (mutual-
+    // opposition correction, which structurally should never touch a
+    // fastener-like part - see the isFastenerLike guards on both the item
+    // and blocker sides above) have both run.
+    for (const item of pending) {
+      if (!item.isFastenerLike) continue;
+      console.debug("[ExplodeView][DIAG][post-Pass5 final axis]", {
+        part: item.name ?? item.partKey,
+        rule: item.rule,
+        finalAxis: { x: item.axis.x, y: item.axis.y, z: item.axis.z },
+        flippedByPass5: flippedByPass5.has(item.partKey),
+      });
     }
 
-    // Pass 6: final blocking order for staging, using the
-    // opposition-corrected signs' bbox blockers (unioned with the hard
-    // interlock edges from the scan above - both sources feed the same
-    // dependency graph, computeExplodeBlockingOrder doesn't care which
-    // produced an edge) - Kahn's-algorithm/cycle-fallback logic below.
+    // Pass 6: final blocking order for staging. Kahn's algorithm
+    // (computeExplodeBlockingOrder) runs on REAL mesh-vs-mesh blocking edges
+    // (computeMeshBlockersForSignedAxis) using each part's opposition-
+    // corrected final axis, not the bbox test Pass 3/5 use for sign
+    // resolution - see that function's doc comment for why a false
+    // bbox-only edge here can manufacture a cycle that doesn't exist in the
+    // real solids. Interlock edges (the hard-constraint scan above) are
+    // unioned in unchanged - computeExplodeBlockingOrder doesn't care which
+    // source produced an edge.
+    const meshBlockerSolids = new Map(
+      buildOverlapCheckGeometry(
+        pending.map((item) => ({
+          partKey: item.partKey,
+          name: item.name,
+          object: item.object,
+        })),
+      ).map((solid) => [solid.partKey, solid] as const),
+    );
     const blockingResults = computeExplodeBlockingOrder(
       pending.map((item) => {
+        const others = pending
+          .filter((other) => other.partKey !== item.partKey)
+          .map((other) => ({ partKey: other.partKey, box0: other.box0 }));
+        const meshBlocked = computeMeshBlockersForSignedAxis(
+          item.partKey,
+          item.box0,
+          item.axis,
+          others,
+          meshBlockerSolids,
+        );
         const forced = forcedBlockedByKey.get(item.partKey);
         const merged = forced
-          ? Array.from(new Set([...item.blockedBy, ...forced]))
-          : item.blockedBy;
+          ? Array.from(new Set([...meshBlocked, ...forced]))
+          : meshBlocked;
         return {
           partKey: item.partKey,
           centroidDist: item.centroidDist,
@@ -5067,9 +6270,44 @@ export function createViewer(container: HTMLElement): Viewer {
     const autoStageByPartKey = new Map(
       pending.map((item) => [item.partKey, blockingResults.get(item.partKey)?.stage ?? 0]),
     );
+
+    // Live per-part collision fix (see resolveLivePlanStageCollisions' doc
+    // comment above) - Pass 6 above only checks each part's blocking edges
+    // along its OWN fixed axis in isolation; it has no notion of whether
+    // two parts scheduled at overlapping stage WINDOWS (EXPLODE_STAGE_OVERLAP)
+    // actually sweep into each other along their DIFFERENT axes. Runs the
+    // same certified detect-bump-reorder loop the offline Phase 3 planner
+    // uses for its own dead-end SCCs, applied here to the live stage
+    // numbers so the runtime gate/whole-assembly-veto never needs to
+    // trigger for a fixable ordering defect during normal play.
+    const liveCollisionFix = resolveLivePlanStageCollisions(
+      pending.map((item) => ({ partKey: item.partKey, name: item.name, axis: item.axis })),
+      meshBlockerSolids,
+      autoStageByPartKey,
+      baseOffset,
+    );
+    if (liveCollisionFix.fixes.length > 0 || liveCollisionFix.unresolvedResidual) {
+      console.debug("[ExplodeView][DIAG][live collision fix]", {
+        fixes: liveCollisionFix.fixes.map((f) => ({
+          a: pending.find((p) => p.partKey === f.a)?.name ?? f.a,
+          b: pending.find((p) => p.partKey === f.b)?.name ?? f.b,
+          movedPart: pending.find((p) => p.partKey === f.movedPart)?.name ?? f.movedPart,
+          fromStage: f.fromStage,
+          toStage: f.toStage,
+        })),
+        unresolvedResidual: liveCollisionFix.unresolvedResidual
+          ? {
+              a: liveCollisionFix.unresolvedResidual.aName,
+              b: liveCollisionFix.unresolvedResidual.bName,
+              depth: Number(liveCollisionFix.unresolvedResidual.depth.toFixed(3)),
+            }
+          : null,
+      });
+    }
+
     const { finalStageByPartKey, sortedOrder, effectiveKeyByPartKey } =
       mergeManualStageOverrides(
-        autoStageByPartKey,
+        liveCollisionFix.stageByPartKey,
         pending.map((item) => item.partKey),
         explodeOverridesByPartKey,
       );
@@ -5169,19 +6407,254 @@ export function createViewer(container: HTMLElement): Viewer {
 
     explodePlan = plan;
     explodeAmount = 0;
+    invalidateExplodeGateState();
+    // Eagerly build the gate's rest-position BVH cache AND its rest-touching
+    // exemption set here (both one-time costs paid once per plan
+    // computation) rather than lazily on the first setExplodeAmount call -
+    // that call happens on the user's first slider drag frame, and
+    // stalling THAT would be exactly the stutter this gate is supposed to
+    // avoid.
+    const restContactForLiaison = getExplodeGateRestExemptions(getExplodeGateSolids());
     if (axesHelper && axesVisibleBeforeExplode === null) {
       axesVisibleBeforeExplode = axesHelper.visible;
       axesHelper.visible = false;
     }
 
+    // Phase 1 of the offline-planning rebuild (see explode-view-master-plan.md
+    // Stage 1-2): diagnostic-only liaison graph + component grouping, logged
+    // for inspection. Reuses the interlocksByPartKey/restContact data already
+    // computed above - no new geometry queries, nothing fed back into
+    // axis/order/distance resolution or rendering.
+    const liaisonGraph = computeLiaisonGraph(raw, interlocksByPartKey, restContactForLiaison);
+    const componentGroups = computeComponentGroups(raw, liaisonGraph);
+    logLiaisonGraphDiagnostics(raw, liaisonGraph, componentGroups);
+
+    // Phase 2 (Stage 3-5): the real Directional Blocking Graph across all 6
+    // principal directions + SCC-based cycle resolution. DIAGNOSTIC ONLY -
+    // reuses meshBlockerSolids (Pass 6's own per-part solids cache, already
+    // built above) rather than rebuilding geometry, and componentGroups from
+    // Phase 1 (a group moves as one rigid unit here). Nothing below is
+    // consumed by axis/order/distance resolution or rendering.
+    const { units: dbgUnits, solids: dbgSolids } = computeDbgUnits(
+      raw,
+      componentGroups,
+      meshBlockerSolids,
+    );
+    const dbgByDirection = computeDirectionalBlockingGraph(dbgUnits, dbgSolids);
+    logDirectionalBlockingGraphDiagnostics(dbgUnits, dbgByDirection);
+    logWidenedDirectionalBlockingGraphDiagnostics(
+      dbgUnits,
+      dbgSolids,
+      raw,
+      dominantAssemblyAxis?.axis ?? null,
+    );
+
+    // Phase 3 (Stage 6-8): real order assignment across the union of all 6
+    // directions, minimum-sufficient-clearance distance calculation, and the
+    // cached plan data structure Phase 4 will eventually wire into
+    // rendering. DIAGNOSTIC ONLY - built from dbgUnits/dbgByDirection above,
+    // nothing here is consumed by the live axis/order/distance resolution
+    // above or by rendering. Stage 8's full-plan certification is a
+    // separate, heavier, on-demand call (certifyExplodeFullPlan) rather than
+    // run automatically here - see that function's doc comment.
+    const {
+      plan: certifiedPlan,
+      unitGateSolids,
+      exemptions: unitExemptions,
+      restDepthByPair: unitRestDepthByPair,
+      sameStageFixes,
+      unresolvedResidual,
+      unresolvedResiduals,
+      sccOrderSearch,
+      exitReason,
+      iterationsUsed,
+      stuckPairKeysDiag,
+      attemptedBumpsDiag,
+      sameStageRepairDiag,
+    } = await planExplodeStagesAndDistances(dbgUnits, dbgByDirection, dbgSolids, diag);
+    lastExplodePhase3State = {
+      units: dbgUnits,
+      solids: unitGateSolids,
+      exemptions: unitExemptions,
+      restDepthByPair: unitRestDepthByPair,
+      plan: certifiedPlan,
+    };
+    console.debug("[ExplodeView][DIAG][Phase3 order+distance]", {
+      assemblyDiag: diag,
+      totalStages: certifiedPlan.totalStages,
+      assignments: certifiedPlan.assignments.map((a) => ({
+        label: a.label,
+        memberCount: a.memberKeys.length,
+        stage: a.stage,
+        direction: a.direction,
+        distance: a.distance,
+        deadEnd: a.deadEnd,
+        deadEndReason: a.deadEndReason,
+      })),
+      sameStageFixes,
+      unresolvedResidual,
+      unresolvedResiduals,
+      sccOrderSearch,
+      exitReason,
+      iterationsUsed,
+      stuckPairKeysDiag,
+      attemptedBumpsDiag,
+      sameStageRepairDiag,
+    });
+
+    // ===========================================================================
+    // Phase 4, corrected (see explode-view-master-plan.md Â§7 "wire in" and
+    // its Phase 4 revision): PER-UNIT, not per-fixture. Stage 8's full sweep
+    // (certifyExplodeFullPlan) still runs below as the soundness cross-check
+    // it always was, but eligibility for the certified-plan axis/distance/
+    // stage-window is now decided unit by unit: a unit uses the Phase 3
+    // (Stage 6-7) plan's own values ONLY when Stage 6 did NOT mark it
+    // deadEnd (a confirmed non-separable SCC member - see
+    // ExplodeStageAssignment.deadEnd's doc comment; this flag survives even
+    // a successfully-order-solved SCC, see resolveDeadEndSccOrder, so it
+    // stays a reliable "is this unit a confirmed SCC member" signal on its
+    // own), has a real non-degenerate distance, and has no member part under
+    // an active manual override (Phase 3 has no knowledge of the override
+    // UI, so preferring it for an overridden part would silently discard a
+    // user's own correction). A deadEnd unit's members keep exactly what
+    // Pass 1-7 computed above, unchanged, driven entirely by the legacy
+    // live-gate path - no different from its behavior before this session.
+    // This is a real per-unit branch inside the loop below, not a
+    // per-fixture flag gating the whole loop.
+    // ===========================================================================
+    const phase4CertificationReport = certifyExplodeFullPlan(1);
+    // Soundness cross-check, not itself the eligibility decision: every
+    // unitKey that shows up in ANY overlap anywhere across Stage 8's whole
+    // bidirectional sweep. A deadEnd unit landing here is expected (that's
+    // exactly the residual the live gate stays active to catch). A
+    // NON-deadEnd unit landing here would mean Stage 6 wrongly cleared a
+    // unit that Stage 8's real oracle then found still colliding - a
+    // genuine Stage 6/7 gap, not yet observed on any of the 3 fixtures (see
+    // project memory), but worth catching loudly rather than trusting the
+    // deadEnd flag blindly if it ever happens.
+    const certificationDirtyUnitKeys = new Set<string>();
+    for (const sample of phase4CertificationReport?.samples ?? []) {
+      for (const overlap of sample.overlaps) {
+        certificationDirtyUnitKeys.add(overlap.a);
+        certificationDirtyUnitKeys.add(overlap.b);
+      }
+    }
+
+    const certifiedWindows = computeExplodeStageWindows(certifiedPlan.totalStages);
+    const newUnitStatus: ExplodeCertifiedPlanUnitStatus[] = [];
+    const newCertifiedMemberPartKeys = new Set<string>();
+    for (const assignment of certifiedPlan.assignments) {
+      const hasMeaningfulMotion = assignment.distance > EXPLODE_CERTIFIED_PLAN_MIN_DISTANCE_MM;
+      const hasOverride = assignment.memberKeys.some((k) => explodeOverridesByPartKey.has(k));
+      const dirtyInCertification = certificationDirtyUnitKeys.has(assignment.unitKey);
+      if (dirtyInCertification && !assignment.deadEnd) {
+        console.error("[ExplodeView][CERTIFIED-PLAN-UNIT-DIRTY]", {
+          unitKey: assignment.unitKey,
+          label: assignment.label,
+          message:
+            "Stage 6 marked this unit as separable (not deadEnd) but Stage 8's real full-sweep oracle found it in a genuine overlap somewhere in [0,1] - falling back to the legacy live-gate target for this unit only, not trusting the deadEnd flag blindly.",
+        });
+      }
+      if (dirtyInCertification && assignment.sccOrderValidated) {
+        console.error("[ExplodeView][CERTIFIED-PLAN-UNIT-DIRTY]", {
+          unitKey: assignment.unitKey,
+          label: assignment.label,
+          message:
+            "resolveDeadEndSccOrder's permutation search certified this order clean, but Stage 8's independent full-sweep re-check still found a genuine overlap somewhere in [0,1] - staying on the legacy live-gate path for this unit, not trusting sccOrderValidated blindly.",
+        });
+      }
+      // A confirmed dead-end SCC member (deadEnd) normally always falls
+      // back to the legacy live-gate path (ExplodeStageAssignment.deadEnd's
+      // doc comment) - but if resolveDeadEndSccOrder's brute-force search
+      // actually found (and full-rigor re-verified) a genuinely clean
+      // order for it, sccOrderValidated is true and this unit is treated
+      // like any other certified-eligible unit instead, still subject to
+      // the same dirtyInCertification cross-check as everyone else.
+      const eligible =
+        (!assignment.deadEnd || assignment.sccOrderValidated === true) &&
+        hasMeaningfulMotion &&
+        !hasOverride &&
+        !dirtyInCertification;
+      newUnitStatus.push({
+        unitKey: assignment.unitKey,
+        label: assignment.label,
+        memberKeys: assignment.memberKeys,
+        deadEnd: assignment.deadEnd,
+        sccOrderValidated: assignment.sccOrderValidated ?? false,
+        hasMeaningfulMotion,
+        hasOverride,
+        dirtyInCertification,
+        certifiedPlanEligible: eligible,
+      });
+      if (!eligible || !explodePlan) continue;
+      const solid = unitGateSolids.get(assignment.unitKey);
+      if (!solid) continue;
+      const window = certifiedWindows[assignment.stage] ?? { start: 0, end: 1 };
+      for (const memberKey of assignment.memberKeys) {
+        const memberEntry = explodePlan.get(memberKey);
+        if (!memberEntry) continue;
+        memberEntry.axis.copy(solid.axis);
+        memberEntry.distance = assignment.distance;
+        memberEntry.stageStart = window.start;
+        memberEntry.stageEnd = window.end;
+        newCertifiedMemberPartKeys.add(memberKey);
+      }
+    }
+    explodeCertifiedPlanUnitStatus = newUnitStatus;
+    explodeCertifiedPlanMemberPartKeys = newCertifiedMemberPartKeys;
+    explodeCertifiedPlanActive = newCertifiedMemberPartKeys.size > 0;
+    if (explodeCertifiedPlanActive && explodePlan) {
+      // The per-part live gate's rest-position BVH cache and rest-touching
+      // exemptions were already eagerly built earlier in this function (see
+      // restContactForLiaison above), from the now-stale pre-overwrite
+      // axes/distances - rebuild them from the entries that actually drive
+      // rendering now (a mix of certified-plan and legacy values, per the
+      // per-unit loop above), or the live gate (still active underneath as
+      // defense-in-depth for EVERY part, eligible or not - see
+      // explode-view-master-plan.md's Phase 4 revision) would be checking
+      // clearance along the wrong axis entirely for the eligible subset,
+      // defeating the whole point of keeping it active.
+      explodeGateSolids = null;
+      explodeGateRestExemptions = null;
+      explodeGateRestDepthByPair = null;
+      getExplodeGateRestExemptions(getExplodeGateSolids());
+      getExplodeGateRestDepths(getExplodeGateSolids());
+    }
+    console.debug("[ExplodeView][DIAG][Phase4 certified-plan wiring]", {
+      unitStatus: newUnitStatus,
+      eligibleUnitCount: newUnitStatus.filter((u) => u.certifiedPlanEligible).length,
+      totalUnitCount: newUnitStatus.length,
+      certifiedPlanActive: explodeCertifiedPlanActive,
+      totalSamples: phase4CertificationReport?.totalSamples ?? null,
+      samplesWithOverlap: phase4CertificationReport?.samplesWithOverlap ?? null,
+      maxDepth: phase4CertificationReport?.maxDepth ?? null,
+    });
+
     console.debug("[ExplodeView] plan computed", debugEntries);
     return debugEntries;
   }
 
-  function setExplodeAmount(amount: number): void {
+  /**
+   * The pure, synchronous position-setter - moves every part to `amount`
+   * through the live gate (computeGatedDistancesForAmount) and renders,
+   * with no other side effect. This is the primitive every other explode
+   * entry point (playExplode's tick/settle, the public setExplodeAmount
+   * wrapper below, the test/diagnostic helpers) calls to actually move
+   * parts - kept side-effect-free (no animation-frame scheduling of its
+   * own) so those callers can each own exactly the scheduling behavior
+   * they need without fighting over the shared explodeAnimRAF slot.
+   */
+  function applyExplodeAmount(amount: number): void {
     if (!explodePlan) return;
     explodeAmount = THREE.MathUtils.clamp(amount, 0, 1);
-    for (const entry of explodePlan.values()) {
+    // Gated distances (see computeGatedDistancesForAmount below) replace the
+    // raw stage-window distance for every part - this is what actually
+    // reaches the screen on every slider drag tick and every playExplode
+    // rAF frame, not just the diagnostic dry-run.
+    const gated = EXPLODE_GATE_ENABLED
+      ? computeGatedDistancesForAmount(explodeAmount)
+      : null;
+    for (const [partKey, entry] of explodePlan) {
       // Sequenced explosion: remap the global slider/animation amount into
       // this part's own [stageStart, stageEnd] window (see
       // computeExplodeStageWindows) so parts in an earlier stage finish
@@ -5198,9 +6671,30 @@ export function createViewer(container: HTMLElement): Viewer {
           : explodeAmount >= entry.stageStart
             ? 1
             : 0;
-      entry.currentDelta
-        .copy(entry.axis)
-        .multiplyScalar(entry.distance * localAmount);
+      const rawDistance = entry.distance * localAmount;
+      const gatedDistance = gated?.get(partKey);
+      // Defense-in-depth (see explode-view-master-plan.md's Phase 4
+      // revision): the live gate stays authoritative on what actually
+      // renders, certified plan or not - a certified-clean plan should
+      // essentially never make it disagree with the raw stage-window
+      // target, but this must still CATCH the case, not just log it, if it
+      // ever does.
+      const distance = gatedDistance ?? rawDistance;
+      if (
+        explodeCertifiedPlanMemberPartKeys.has(partKey) &&
+        gatedDistance !== undefined &&
+        Math.abs(gatedDistance - rawDistance) >
+          EXPLODE_CERTIFIED_GATE_DIVERGENCE_EPS_MM
+      ) {
+        console.error("[ExplodeView][CERTIFIED-PLAN-DIVERGENCE]", {
+          partKey,
+          name: entry.object.name || partKey,
+          amount: Number(explodeAmount.toFixed(6)),
+          rawDistance: Number(rawDistance.toFixed(4)),
+          gatedDistance: Number(gatedDistance.toFixed(4)),
+        });
+      }
+      entry.currentDelta.copy(entry.axis).multiplyScalar(distance);
       entry.object.position.copy(entry.originalPosition).add(entry.currentDelta);
       // Exact-CAD edge overlays for this part aren't parented under it (see
       // ExplodePlanEntry.edgeObjects) and start at identity position, so the
@@ -5213,6 +6707,5244 @@ export function createViewer(container: HTMLElement): Viewer {
     markVisibleMeshRaycastTargetsDirty();
     requestUpdateSilhouette?.();
     requestRender("set_explode_amount");
+  }
+
+  // ===========================================================================
+  // Independent overlap-check oracle (see project memory "hybrid
+  // contact-cone direction + raycast-based ordering" - PREREQUISITE 2,
+  // replacing a prior "clean count" metric that scored 22/22 "clean" while
+  // 18/22 part-pairs still overlapped). Deliberately shares NO code with the
+  // ordering/blocking pipeline above (computeContactsForParts,
+  // computeExplodeOrderSerial, computeExplodeOrderViaFreedomCones,
+  // computeRaycastBlockersForDirection, computeBboxBlockersForSignedAxis,
+  // isDirectionFreeOfContacts, solveExplodePartDistance) - a checker built
+  // from the same blocker/solver logic the planner uses can only ever
+  // confirm the planner agrees with itself, which is exactly how the prior
+  // "clean" metric went wrong. This does real
+  // triangle-vs-triangle solid intersection (three-mesh-bvh's
+  // MeshBVH.intersectsGeometry) between every part-pair's CURRENT
+  // world-space mesh - wherever setExplodeAmount has actually put them, the
+  // same position the real UI shows - not a bounding-box or contact/
+  // freedom-cone proxy. The only things this shares with the rest of the
+  // file are the THREE.js/three-mesh-bvh libraries and setExplodeAmount
+  // itself (pure position playback, not a blocking/ordering decision).
+  // ===========================================================================
+
+  type OverlapCheckPart = {
+    partKey: string;
+    name: string;
+    geometry: THREE.BufferGeometry;
+    bvh: MeshBVH;
+  };
+
+  function buildOverlapCheckGeometry(
+    parts: { partKey: string; name: string; object: THREE.Object3D }[],
+  ): OverlapCheckPart[] {
+    const out: OverlapCheckPart[] = [];
+    for (const p of parts) {
+      p.object.updateWorldMatrix(true, true);
+      const localGeoms: THREE.BufferGeometry[] = [];
+      p.object.traverse((node: any) => {
+        if (!node?.isMesh) return;
+        if (node.userData?.__isFeatureEdge || node.userData?.__edgeOverlay)
+          return;
+        const src = node.geometry as THREE.BufferGeometry | undefined;
+        const srcPos = src?.attributes?.position;
+        if (!src || !srcPos) return;
+        // Position-only clone, baked to world space - solid intersection
+        // doesn't need normals/uvs/etc, and a part's different meshes
+        // aren't guaranteed to share one attribute set (mergeGeometries
+        // requires matching attributes across all inputs).
+        const positionOnly = new THREE.BufferGeometry();
+        positionOnly.setAttribute("position", srcPos.clone());
+        if (src.index) positionOnly.setIndex(src.index.clone());
+        positionOnly.applyMatrix4(node.matrixWorld);
+        localGeoms.push(positionOnly);
+      });
+      if (localGeoms.length === 0) continue;
+      const merged =
+        localGeoms.length === 1
+          ? localGeoms[0]!
+          : BufferGeometryUtils.mergeGeometries(localGeoms, false);
+      if (!merged) continue;
+      merged.computeBoundingBox();
+      const bvh = new MeshBVH(merged);
+      (merged as BufferGeometryWithBVH).boundsTree = bvh;
+      out.push({ partKey: p.partKey, name: p.name, geometry: merged, bvh });
+    }
+    return out;
+  }
+
+  const overlapCheckIdentity = new THREE.Matrix4();
+
+  /**
+   * Approximate penetration depth for a confirmed-intersecting pair: the
+   * smallest of the three per-axis world AABB overlaps (a standard SAT-style
+   * depth estimate). Both boxes are already known to overlap on every axis
+   * here (a real triangle-vs-triangle solid intersection implies AABB
+   * overlap), so every delta below is guaranteed positive. This is a
+   * bounding-box proxy, not exact solid-vs-solid penetration depth (that
+   * needs GJK/EPA on the actual triangle meshes) - good enough to tell a
+   * near-zero manufacturing-tolerance-scale sliver from a real gross
+   * interference.
+   */
+  function computeAabbOverlapDepth(a: THREE.Box3, b: THREE.Box3): number {
+    const overlapX = Math.min(a.max.x, b.max.x) - Math.max(a.min.x, b.min.x);
+    const overlapY = Math.min(a.max.y, b.max.y) - Math.max(a.min.y, b.min.y);
+    const overlapZ = Math.min(a.max.z, b.max.z) - Math.max(a.min.z, b.min.z);
+    return Math.max(0, Math.min(overlapX, overlapY, overlapZ));
+  }
+
+  /** Every part-pair whose CURRENT world-space meshes (as built by buildOverlapCheckGeometry) actually intersect - real solid overlap - plus an approximate penetration depth for each (see computeAabbOverlapDepth). Both geometries are already in the same world frame, so the transform between them is the identity. */
+  function findMeshOverlapsAmongParts(
+    built: OverlapCheckPart[],
+  ): { a: string; b: string; aName: string; bName: string; depth: number }[] {
+    const overlaps: {
+      a: string;
+      b: string;
+      aName: string;
+      bName: string;
+      depth: number;
+    }[] = [];
+    for (let i = 0; i < built.length; i++) {
+      const A = built[i]!;
+      for (let j = i + 1; j < built.length; j++) {
+        const B = built[j]!;
+        if (A.bvh.intersectsGeometry(B.geometry, overlapCheckIdentity)) {
+          const boxA = A.geometry.boundingBox;
+          const boxB = B.geometry.boundingBox;
+          overlaps.push({
+            a: A.partKey,
+            b: B.partKey,
+            aName: A.name,
+            bName: B.name,
+            depth: boxA && boxB ? computeAabbOverlapDepth(boxA, boxB) : 0,
+          });
+        }
+      }
+    }
+    return overlaps;
+  }
+
+  const MESH_BLOCKER_STEP_MM = 1;
+  const MESH_BLOCKER_MIN_SAMPLES = 8;
+  const MESH_BLOCKER_MAX_SAMPLES = 64;
+  /**
+   * Lower t-bound for the swept-box pre-filter below - deliberately NOT
+   * ownExtent (self's own projected length along axis), unlike
+   * computeBboxBlockersForSignedAxis. ownExtent was tried here and confirmed
+   * (via real logged interval data, not assumption) to silently exclude
+   * genuine blockers whenever the OTHER part's extent along axis sits nested
+   * inside self's own extent - e.g. a shaft running concentrically through a
+   * body it's fitted into, or any fastener group shorter than the body it's
+   * seated in. Concretely, on the Stuffing Box: body's ownExtent along +Y is
+   * 210mm, but shaft's box projects to only [75,135] on +Y (span 60mm,
+   * entirely nested inside body's own span) - the REAL swept-overlap window
+   * is [0,135], which never reaches 210, so the ownExtent floor clipped it
+   * to empty and shaft (plus gland and the bush/stud groups, same pattern)
+   * never reached the real mesh sweep below. A near-zero floor is safe here
+   * specifically because - unlike the bbox-only function - every surviving
+   * candidate still has to pass the real MeshBVH.intersectsGeometry sweep
+   * below; a merely-touching neighbor (shared face, zero volume overlap)
+   * doesn't manufacture a false blocking edge just from clearing this
+   * pre-filter. Kept just above exact zero to stay off the t=0 sample itself
+   * (self at its unmoved rest position), not 0 directly.
+   */
+  const MESH_BLOCKER_MIN_TRAVEL_MM = 0.01;
+
+  /**
+   * Real-geometry analog of computeBboxBlockersForSignedAxis, used ONLY to
+   * feed Pass 6's blocking graph (computeExplodeBlockingOrder). Pass 3's
+   * sign resolution (pickBestSignByBbox) and Pass 5's opposition correction
+   * keep using the cheaper bbox test unchanged - a wrong SIGN there is
+   * self-correcting (both signs get compared), but a false blocking EDGE in
+   * Pass 6 can manufacture a genuine cycle out of two parts whose BOXES
+   * overlap along the sweep while their actual SOLIDS never touch. Confirmed
+   * root cause on the Sheet Metal Clamp Assembly's pin/rod/leaf trio: the
+   * leaf's real exit axis runs along its own length (its cylindrical face is
+   * a bore the rod/pin pass through, not its own shaft - see
+   * computeExplodeAxisForPart), so its bounding box sweeps straight through
+   * the pin/rod's boxes for most of its travel even though the pin/rod are
+   * thin fastener solids nowhere near the leaf's actual material once past
+   * the hole itself.
+   *
+   * The bbox interval (computeSweptBoxOverlapInterval) is kept as a cheap
+   * necessary-but-not-sufficient pre-filter - a real solid can never
+   * intersect outside its own bbox's swept interval - then every surviving
+   * candidate is sampled across that interval and confirmed with a real
+   * MeshBVH.intersectsGeometry call, translating each part's REST-position
+   * mesh (built once by buildOverlapCheckGeometry, never rebuilt per sample -
+   * same translate-don't-rebuild approach arePartsClearAtDistances uses for
+   * the runtime gate). Sample spacing is ~1mm, clamped to
+   * [MESH_BLOCKER_MIN_SAMPLES, MESH_BLOCKER_MAX_SAMPLES] per pair so a huge
+   * interval can't blow up plan-computation time - this runs once per plan,
+   * not per frame, so a few dozen real intersection tests per candidate pair
+   * is affordable. Pre-filter's lower bound is MESH_BLOCKER_MIN_TRAVEL_MM,
+   * not self's own extent - see that constant's comment for why.
+   *
+   * Each `other` may carry a world-space `offset` - where that neighbor
+   * ACTUALLY currently sits, already translated away from its own rest box0
+   * (e.g. its own resolved explode distance along its own axis), not just
+   * "at rest" or "fully absent." `otherSolid.bvh` is still the fixed
+   * rest-position mesh (never rebuilt per candidate - see the module doc
+   * above), so the offset is folded into the interval prefilter via a
+   * translated copy of other.box0, and into the real geometry sample via
+   * collision's translation-invariance: intersect(self@t, other@offset) ==
+   * intersect(self@(t-offset), other@rest). No `other` mesh is ever
+   * retranslated or rebuilt - only self's sample matrix shifts.
+   */
+  function computeMeshBlockersForSignedAxis(
+    selfKey: string,
+    selfBox0: THREE.Box3,
+    axis: THREE.Vector3,
+    others: { partKey: string; box0: THREE.Box3; offset?: THREE.Vector3 }[],
+    solids: Map<string, OverlapCheckPart>,
+  ): string[] {
+    const self = solids.get(selfKey);
+    const blockers: string[] = [];
+    for (const other of others) {
+      const otherOffset = other.offset && other.offset.lengthSq() > 0 ? other.offset : null;
+      const otherBox0 = otherOffset ? other.box0.clone().translate(otherOffset) : other.box0;
+      const interval = computeSweptBoxOverlapInterval(
+        selfBox0,
+        axis,
+        otherBox0,
+        MESH_BLOCKER_MIN_TRAVEL_MM,
+        Infinity,
+      );
+      if (!interval) continue;
+      const otherSolid = solids.get(other.partKey);
+      if (!self || !otherSolid) {
+        // No mesh geometry available for one side (shouldn't happen for a
+        // real part) - fall back to the bbox verdict rather than silently
+        // dropping a potential real blocker.
+        blockers.push(other.partKey);
+        continue;
+      }
+      // Defensive clamp: in practice this interval is always finite (a unit
+      // axis always has at least one nonzero component, which alone bounds
+      // hi - see computeSweptBoxOverlapInterval), but guard against a
+      // degenerate Infinity anyway rather than sampling an unbounded range.
+      const hi = Number.isFinite(interval.hi)
+        ? interval.hi
+        : interval.lo + selfBox0.getSize(new THREE.Vector3()).length() * 10;
+      const span = Math.max(0, hi - interval.lo);
+      const samples = Math.min(
+        MESH_BLOCKER_MAX_SAMPLES,
+        Math.max(MESH_BLOCKER_MIN_SAMPLES, Math.ceil(span / MESH_BLOCKER_STEP_MM)),
+      );
+      let hit = false;
+      for (let i = 0; i <= samples && !hit; i++) {
+        const t = interval.lo + (span * i) / samples;
+        const offset = axis.clone().multiplyScalar(t);
+        if (otherOffset) offset.sub(otherOffset);
+        const matrix = new THREE.Matrix4().makeTranslation(offset.x, offset.y, offset.z);
+        if (otherSolid.bvh.intersectsGeometry(self.geometry, matrix)) hit = true;
+      }
+      if (hit) blockers.push(other.partKey);
+    }
+    return blockers;
+  }
+
+  // ===========================================================================
+  // Directional Blocking Graph + cycle resolution - Phase 2 (Stage 3-5) of the
+  // offline-planning rebuild (see explode-view-master-plan.md). DIAGNOSTIC
+  // ONLY, same as Phase 1: pure, read-only, logged via console.debug, nothing
+  // here is consumed by axis/order/distance resolution or rendering. Builds
+  // on Phase 1's liaison graph/component groups (a parallel group - e.g. a
+  // ring of identical studs - is treated as ONE rigid unit here, its members'
+  // real meshes merged into one solid) and reuses the exact same real
+  // mesh/BVH sweep primitive Pass 6 already trusts
+  // (computeMeshBlockersForSignedAxis) for all six principal directions, not
+  // just each part's own resolved exit axis.
+  // ===========================================================================
+
+  type DbgUnit = {
+    key: string;
+    label: string;
+    box0: THREE.Box3;
+    /** Real partKeys this unit represents - >1 only for a Phase-1 component group moving as one rigid body. */
+    memberKeys: string[];
+  };
+
+  /**
+   * Merges 2+ already-built, already-world-space OverlapCheckPart geometries
+   * (see buildOverlapCheckGeometry) into ONE solid + BVH - the real-geometry
+   * counterpart of treating a Phase-1 component group (a bolt ring, etc.) as
+   * a single rigid body for blocking purposes. A single-member input is
+   * passed through unchanged (no merge/BVH-rebuild cost for the common case).
+   */
+  function mergeOverlapCheckParts(
+    key: string,
+    name: string,
+    members: OverlapCheckPart[],
+  ): OverlapCheckPart | null {
+    if (members.length === 0) return null;
+    if (members.length === 1) {
+      const only = members[0]!;
+      return { partKey: key, name, geometry: only.geometry, bvh: only.bvh };
+    }
+    const merged = BufferGeometryUtils.mergeGeometries(
+      members.map((m) => m.geometry),
+      false,
+    );
+    if (!merged) return null;
+    merged.computeBoundingBox();
+    const bvh = new MeshBVH(merged);
+    (merged as BufferGeometryWithBVH).boundsTree = bvh;
+    return { partKey: key, name, geometry: merged, bvh };
+  }
+
+  /**
+   * Stage 3/4 setup: collapses every Phase-1 component group into one DbgUnit
+   * (merged box0 + merged real solid, keyed synthetically so it can't collide
+   * with a real partKey), leaving every ungrouped part as its own unit
+   * unchanged. `partSolids` should already cover every raw part (the plan's
+   * existing per-part solids cache is reused, not rebuilt) - the returned
+   * solids map layers group entries on top of it so computeMeshBlockersForSignedAxis
+   * can resolve BOTH a group key and a lone part's key from one map.
+   */
+  function computeDbgUnits(
+    raw: { partKey: string; name: string; box0: THREE.Box3 }[],
+    groups: ComponentGroup[],
+    partSolids: Map<string, OverlapCheckPart>,
+  ): { units: DbgUnit[]; solids: Map<string, OverlapCheckPart> } {
+    const groupedKeys = new Set(groups.flatMap((g) => g.memberKeys));
+    const solids = new Map(partSolids);
+    const units: DbgUnit[] = [];
+
+    for (const r of raw) {
+      if (groupedKeys.has(r.partKey)) continue;
+      units.push({ key: r.partKey, label: r.name, box0: r.box0, memberKeys: [r.partKey] });
+    }
+
+    for (const g of groups) {
+      const members = g.memberKeys
+        .map((k) => raw.find((r) => r.partKey === k))
+        .filter((r): r is { partKey: string; name: string; box0: THREE.Box3 } => Boolean(r));
+      if (members.length === 0) continue;
+      const box0 = members.reduce(
+        (acc, m) => acc.union(m.box0),
+        members[0]!.box0.clone(),
+      );
+      const groupKey = `group:${g.basePattern}@${g.hostKey}`;
+      const label = `${members.length}x ${g.basePattern}`;
+      const memberSolids = g.memberKeys
+        .map((k) => partSolids.get(k))
+        .filter((s): s is OverlapCheckPart => Boolean(s));
+      const merged = mergeOverlapCheckParts(groupKey, label, memberSolids);
+      if (!merged) continue;
+      solids.set(groupKey, merged);
+      units.push({ key: groupKey, label, box0, memberKeys: g.memberKeys });
+    }
+
+    return { units, solids };
+  }
+
+  const DBG_DIRECTIONS: { name: string; axis: THREE.Vector3 }[] = [
+    { name: "+X", axis: new THREE.Vector3(1, 0, 0) },
+    { name: "-X", axis: new THREE.Vector3(-1, 0, 0) },
+    { name: "+Y", axis: new THREE.Vector3(0, 1, 0) },
+    { name: "-Y", axis: new THREE.Vector3(0, -1, 0) },
+    { name: "+Z", axis: new THREE.Vector3(0, 0, 1) },
+    { name: "-Z", axis: new THREE.Vector3(0, 0, -1) },
+  ];
+
+  /**
+   * Stage 4: the real Directional Blocking Graph. For each of the 6
+   * principal directions, every unit's real-mesh blocker set against every
+   * OTHER unit currently in the assembly (never a bounding-box proxy - see
+   * computeMeshBlockersForSignedAxis's own doc comment for why that
+   * distinction matters, confirmed on this same codebase's Sheet Metal Clamp
+   * false-cycle bug). A static graph over the WHOLE unit set - staged
+   * removal/ordering is Stage 6 (Phase 3), out of scope here.
+   */
+  function computeDirectionalBlockingGraph(
+    units: DbgUnit[],
+    solids: Map<string, OverlapCheckPart>,
+  ): Map<string, Map<string, string[]>> {
+    const byDirection = new Map<string, Map<string, string[]>>();
+    for (const dir of DBG_DIRECTIONS) {
+      const blockedByUnit = new Map<string, string[]>();
+      for (const unit of units) {
+        const others = units
+          .filter((u) => u.key !== unit.key)
+          .map((u) => ({ partKey: u.key, box0: u.box0 }));
+        const blockers = computeMeshBlockersForSignedAxis(
+          unit.key,
+          unit.box0,
+          dir.axis,
+          others,
+          solids,
+        );
+        blockedByUnit.set(unit.key, blockers);
+      }
+      byDirection.set(dir.name, blockedByUnit);
+    }
+    return byDirection;
+  }
+
+  /**
+   * Stage 5: real strongly-connected-component detection (Tarjan's
+   * algorithm) over a "blocked by" directed graph - a genuine cycle (A
+   * blocked by B, B blocked by A, or any longer loop) is an SCC of size >=2,
+   * not just a mutual pairwise block. Node/edge counts here are always small
+   * (a handful of units per assembly after Phase-1 grouping), so the classic
+   * O(V+E) formulation is used as-is with no need for an iterative rewrite.
+   */
+  function findStronglyConnectedComponents(
+    nodes: string[],
+    adjacency: Map<string, string[]>,
+  ): string[][] {
+    let index = 0;
+    const indices = new Map<string, number>();
+    const lowlink = new Map<string, number>();
+    const onStack = new Set<string>();
+    const stack: string[] = [];
+    const result: string[][] = [];
+
+    function strongConnect(v: string): void {
+      indices.set(v, index);
+      lowlink.set(v, index);
+      index += 1;
+      stack.push(v);
+      onStack.add(v);
+
+      for (const w of adjacency.get(v) ?? []) {
+        if (!indices.has(w)) {
+          strongConnect(w);
+          lowlink.set(v, Math.min(lowlink.get(v)!, lowlink.get(w)!));
+        } else if (onStack.has(w)) {
+          lowlink.set(v, Math.min(lowlink.get(v)!, indices.get(w)!));
+        }
+      }
+
+      if (lowlink.get(v) === indices.get(v)) {
+        const component: string[] = [];
+        let w: string;
+        do {
+          w = stack.pop()!;
+          onStack.delete(w);
+          component.push(w);
+        } while (w !== v);
+        result.push(component);
+      }
+    }
+
+    for (const node of nodes) {
+      if (!indices.has(node)) strongConnect(node);
+    }
+    return result;
+  }
+
+  /**
+   * Reporting-only Kahn's-algorithm topological sort over one direction's
+   * "blocked by" graph: repeatedly removes a unit with zero remaining
+   * blockers. Returns null on any remaining cycle. This is NOT Stage 6 (real
+   * order assignment picks the best direction per unit, integrates staging
+   * windows, etc. - Phase 3 work) - it exists purely so this diagnostic can
+   * answer "does ANY valid linear order exist in this direction" directly.
+   */
+  function tryTopologicalOrder(
+    units: DbgUnit[],
+    blockedBy: Map<string, string[]>,
+  ): string[] | null {
+    const remaining = new Map<string, Set<string>>();
+    for (const u of units) remaining.set(u.key, new Set(blockedBy.get(u.key) ?? []));
+    const order: string[] = [];
+    const keys = units.map((u) => u.key);
+    while (order.length < keys.length) {
+      const free = keys.find(
+        (k) => !order.includes(k) && (remaining.get(k)?.size ?? 0) === 0,
+      );
+      if (!free) return null;
+      order.push(free);
+      for (const set of remaining.values()) set.delete(free);
+    }
+    return order;
+  }
+
+  /** Logs the Stage 3-5 diagnostic report - see the section comment above computeDirectionalBlockingGraph. Never touched by rendering or the live gate. */
+  function logDirectionalBlockingGraphDiagnostics(
+    units: DbgUnit[],
+    byDirection: Map<string, Map<string, string[]>>,
+  ): void {
+    const labelOf = (key: string) => units.find((u) => u.key === key)?.label ?? key;
+    const nonSeparableDirectionCount = new Map<string, number>();
+    for (const u of units) nonSeparableDirectionCount.set(u.key, 0);
+
+    const perDirection = Array.from(byDirection.entries()).map(([dirName, blockedByUnit]) => {
+      const sccs = findStronglyConnectedComponents(
+        units.map((u) => u.key),
+        blockedByUnit,
+      ).filter((c) => c.length >= 2);
+      for (const scc of sccs) {
+        for (const key of scc) {
+          nonSeparableDirectionCount.set(key, (nonSeparableDirectionCount.get(key) ?? 0) + 1);
+        }
+      }
+      const acyclic = sccs.length === 0;
+      const order = acyclic ? tryTopologicalOrder(units, blockedByUnit) : null;
+      return {
+        direction: dirName,
+        edges: units.map((u) => ({
+          unit: u.label,
+          blockedBy: (blockedByUnit.get(u.key) ?? []).map(labelOf),
+        })),
+        sccs: sccs.map((c) => c.map(labelOf)),
+        acyclic,
+        order: order ? order.map(labelOf) : null,
+      };
+    });
+
+    const nonSeparableUnits = units
+      .filter((u) => (nonSeparableDirectionCount.get(u.key) ?? 0) === DBG_DIRECTIONS.length)
+      .map((u) => u.label);
+
+    console.debug("[ExplodeView][DIAG][Phase2 DBG]", {
+      unitCount: units.length,
+      units: units.map((u) => ({ label: u.label, memberCount: u.memberKeys.length })),
+      perDirection,
+      nonSeparableUnits,
+    });
+  }
+
+  /**
+   * Diagnostic-only widened-direction re-test, NOT part of the master-plan
+   * stage pipeline (doesn't touch rendering, the live gate, or Stage 6
+   * order assignment) - built to answer one specific question raised after
+   * the Stage 4 own-extent-skip fix exposed all-6-world-direction SCCs on
+   * every fixture for the first time (see the [[explode_stage4_own_extent_fix]]
+   * memory): is a "genuine" world-axis-only SCC still genuine once each
+   * unit's own already-detected analytic axis is also allowed as a travel
+   * direction, or was the world-axis-only test simply too narrow to find
+   * the real escape route? Collects every candidate cylindrical face axis
+   * already discovered for each unit's member part(s) (reuses raw's
+   * cylinderCandidates - computeCylinderAxisCandidates's OUTPUT, no new
+   * geometry query) plus the assembly's dominant shaft axis if one exists
+   * (computeDominantAssemblyAxis, also already computed), deduplicated
+   * against the 6 world axes and against each other (a bore running
+   * exactly along Z shouldn't double-count as a "new" direction). Both
+   * signs of every extra axis are tested, since a cylindrical face's
+   * analytic axis is sign-arbitrary. Runs the SAME real DBG/SCC primitives
+   * already trusted elsewhere in this file (computeMeshBlockersForSignedAxis,
+   * findStronglyConnectedComponents) - no new collision logic, and
+   * implements NO rigid-unit fallback - purely reports whether the widened
+   * direction set changes the verdict.
+   */
+  function computeUnitOwnAxisDirections(
+    unit: DbgUnit,
+    raw: { partKey: string; cylinderCandidates: { axis: THREE.Vector3 }[] }[],
+    dominantAxis: THREE.Vector3 | null,
+    existing: { name: string; axis: THREE.Vector3 }[],
+  ): { name: string; axis: THREE.Vector3 }[] {
+    const extra: { name: string; axis: THREE.Vector3 }[] = [];
+    const isDuplicate = (n: THREE.Vector3) =>
+      DBG_DIRECTIONS.some((d) => Math.abs(d.axis.dot(n)) > 0.999) ||
+      existing.some((e) => Math.abs(e.axis.dot(n)) > 0.999) ||
+      extra.some((e) => Math.abs(e.axis.dot(n)) > 0.999);
+    const tryAdd = (rawAxis: THREE.Vector3, label: string) => {
+      if (rawAxis.lengthSq() < 1e-12) return;
+      const n = rawAxis.clone().normalize();
+      if (isDuplicate(n)) return;
+      extra.push({ name: `${label}+`, axis: n.clone() });
+      extra.push({ name: `${label}-`, axis: n.clone().negate() });
+    };
+    for (const memberKey of unit.memberKeys) {
+      const r = raw.find((p) => p.partKey === memberKey);
+      for (const c of r?.cylinderCandidates ?? []) tryAdd(c.axis, `own:${unit.label}`);
+    }
+    if (dominantAxis) tryAdd(dominantAxis, "dominant");
+    return extra;
+  }
+
+  function logWidenedDirectionalBlockingGraphDiagnostics(
+    units: DbgUnit[],
+    solids: Map<string, OverlapCheckPart>,
+    raw: { partKey: string; cylinderCandidates: { axis: THREE.Vector3 }[] }[],
+    dominantAxis: THREE.Vector3 | null,
+  ): void {
+    // Union the extra directions across all units, deduped GLOBALLY (not
+    // just per-unit) so the same extra direction is tested for EVERY unit's
+    // graph in one pass - Tarjan SCC needs one consistent full graph per
+    // direction, not a different direction set per node.
+    const extraDirections: { name: string; axis: THREE.Vector3 }[] = [];
+    for (const unit of units) {
+      for (const found of computeUnitOwnAxisDirections(unit, raw, dominantAxis, extraDirections)) {
+        extraDirections.push(found);
+      }
+    }
+    const allDirections = [...DBG_DIRECTIONS, ...extraDirections];
+
+    const labelOf = (key: string) => units.find((u) => u.key === key)?.label ?? key;
+    const nonSeparableDirectionCount = new Map<string, number>();
+    for (const u of units) nonSeparableDirectionCount.set(u.key, 0);
+
+    const perDirection = allDirections.map((dir) => {
+      const blockedByUnit = new Map<string, string[]>();
+      for (const unit of units) {
+        const others = units
+          .filter((u) => u.key !== unit.key)
+          .map((u) => ({ partKey: u.key, box0: u.box0 }));
+        blockedByUnit.set(
+          unit.key,
+          computeMeshBlockersForSignedAxis(unit.key, unit.box0, dir.axis, others, solids),
+        );
+      }
+      const sccs = findStronglyConnectedComponents(
+        units.map((u) => u.key),
+        blockedByUnit,
+      ).filter((c) => c.length >= 2);
+      for (const scc of sccs) {
+        for (const key of scc) {
+          nonSeparableDirectionCount.set(key, (nonSeparableDirectionCount.get(key) ?? 0) + 1);
+        }
+      }
+      return {
+        direction: dir.name,
+        isWorldAxis: (DBG_DIRECTIONS as { name: string; axis: THREE.Vector3 }[]).includes(dir),
+        sccs: sccs.map((c) => c.map(labelOf)),
+      };
+    });
+
+    const stillNonSeparable = units
+      .filter((u) => (nonSeparableDirectionCount.get(u.key) ?? 0) === allDirections.length)
+      .map((u) => u.label);
+
+    const dissolvedByWidening = units
+      .filter((u) => {
+        const worldBlockedCount = perDirection
+          .filter((d) => d.isWorldAxis && d.sccs.some((s) => s.includes(u.label)))
+          .length;
+        const widenedBlockedCount = nonSeparableDirectionCount.get(u.key) ?? 0;
+        return worldBlockedCount === DBG_DIRECTIONS.length && widenedBlockedCount < allDirections.length;
+      })
+      .map((u) => u.label);
+
+    console.debug("[ExplodeView][DIAG][Phase2 DBG widened]", {
+      extraDirectionCount: extraDirections.length,
+      extraDirections: extraDirections.map((d) => ({
+        name: d.name,
+        axis: { x: d.axis.x, y: d.axis.y, z: d.axis.z },
+      })),
+      totalDirectionsTested: allDirections.length,
+      stillNonSeparable,
+      dissolvedByWidening,
+      perDirection: perDirection.map((d) => ({
+        direction: d.direction,
+        isWorldAxis: d.isWorldAxis,
+        sccs: d.sccs,
+      })),
+    });
+  }
+
+  // ===========================================================================
+  // Order/distance/certification - Phase 3 (Stage 6-8) of the offline-planning
+  // rebuild (see explode-view-master-plan.md). DIAGNOSTIC ONLY, same
+  // discipline as Phase 1/2: builds on computeDbgUnits/
+  // computeDirectionalBlockingGraph above, produces a cached plan data
+  // structure (lastExplodePhase3State), logged for inspection. Nothing here
+  // is consumed by the live axis/order/distance resolution earlier in
+  // computeExplodePlan, or by rendering - that wiring is Phase 4.
+  // ===========================================================================
+
+  type ExplodeUnitOrder = {
+    unitKey: string;
+    stage: number;
+    /** DBG_DIRECTIONS name, e.g. "+X". */
+    direction: string;
+    deadEnd: boolean;
+    deadEndReason?: string;
+    /** See ExplodeStageAssignment.sccOrderValidated - only resolveDeadEndSccOrder's winning candidate sets this true. */
+    sccOrderValidated?: boolean;
+  };
+
+  /**
+   * Stage 6: real order assignment across the union of all 6 directions -
+   * repeatedly finds every unit with zero remaining blockers in AT LEAST ONE
+   * direction (checked only against units still remaining; anything already
+   * assigned to an earlier stage no longer counts as "in the way"), assigns
+   * ALL of them to the next stage together, then removes them from every
+   * direction's graph before repeating - a real multi-directional
+   * generalization of Kahn's algorithm, not a single fixed axis for every
+   * unit. Each freed unit's own chosen direction is whichever of ITS viable
+   * directions this round has the fewest total remaining blocking edges
+   * summed across every still-remaining unit - i.e. prefer whichever
+   * direction the REST of the assembly is most resolved in, so the plan
+   * doesn't mix directions arbitrarily when a clean shared one is available.
+   *
+   * Section 4 of the master plan (dead-end path): if a round finds NO unit
+   * free in ANY direction, the remaining set is a genuine non-separable
+   * group under pure translation - collapsed into one final stage, labeled
+   * explicitly (never hidden), moving along whichever direction has the
+   * FEWEST remaining blocking edges among the remaining subgraph
+   * (least-bad, not arbitrary). No fixture built so far has exercised this
+   * path (Phase 2 found zero SCCs on all 3) - it is UNVERIFIED IN PRACTICE.
+   */
+  function computeExplodeOrderAssignment(
+    units: DbgUnit[],
+    byDirection: Map<string, Map<string, string[]>>,
+  ): ExplodeUnitOrder[] {
+    const directionNames = DBG_DIRECTIONS.map((d) => d.name);
+    let remaining = new Set(units.map((u) => u.key));
+    const result: ExplodeUnitOrder[] = [];
+    let stage = 0;
+
+    while (remaining.size > 0) {
+      const remainingBlockedBy = new Map<string, Map<string, string[]>>();
+      for (const dirName of directionNames) {
+        const blockedByUnit = byDirection.get(dirName)!;
+        const filtered = new Map<string, string[]>();
+        for (const key of remaining) {
+          filtered.set(
+            key,
+            (blockedByUnit.get(key) ?? []).filter((b) => remaining.has(b)),
+          );
+        }
+        remainingBlockedBy.set(dirName, filtered);
+      }
+
+      const totalEdgesByDirection = new Map<string, number>();
+      for (const dirName of directionNames) {
+        let total = 0;
+        for (const blockers of remainingBlockedBy.get(dirName)!.values()) {
+          total += blockers.length;
+        }
+        totalEdgesByDirection.set(dirName, total);
+      }
+      const directionsByCleanliness = [...directionNames].sort(
+        (a, b) => totalEdgesByDirection.get(a)! - totalEdgesByDirection.get(b)!,
+      );
+
+      const freeThisRound: { key: string; viableDirections: string[] }[] = [];
+      for (const key of remaining) {
+        const viable = directionNames.filter(
+          (dirName) => (remainingBlockedBy.get(dirName)!.get(key) ?? []).length === 0,
+        );
+        if (viable.length > 0) freeThisRound.push({ key, viableDirections: viable });
+      }
+
+      if (freeThisRound.length === 0) {
+        const leastBadDirection = directionsByCleanliness[0]!;
+        for (const key of remaining) {
+          result.push({
+            unitKey: key,
+            stage,
+            direction: leastBadDirection,
+            deadEnd: true,
+            deadEndReason:
+              "no direction fully clears this sub-assembly by translation alone (genuine SCC in all 6 directions) - requires rotation or a different disassembly primitive, not just a worse translation axis",
+          });
+        }
+        remaining = new Set();
+        break;
+      }
+
+      for (const { key, viableDirections } of freeThisRound) {
+        const chosen =
+          directionsByCleanliness.find((d) => viableDirections.includes(d)) ??
+          viableDirections[0]!;
+        result.push({ unitKey: key, stage, direction: chosen, deadEnd: false });
+      }
+      for (const { key } of freeThisRound) remaining.delete(key);
+      stage += 1;
+    }
+
+    return result;
+  }
+
+  /**
+   * Builds the Stage-6/7 ExplodeGateSolid map for DBG units - reuses each
+   * unit's already-merged rest-position geometry/BVH (dbgSolids, from
+   * computeDbgUnits) unchanged, tagging it with the unit's Stage-6 CHOSEN
+   * direction as its travel axis, so the existing
+   * arePartsClearAtDistances/isExplodeDistanceClear primitives (built for
+   * per-part ExplodeGateSolid maps) work on UNITS with no new geometry code.
+   */
+  function buildUnitGateSolids(
+    units: DbgUnit[],
+    solids: Map<string, OverlapCheckPart>,
+    orderByKey: Map<string, ExplodeUnitOrder>,
+  ): Map<string, ExplodeGateSolid> {
+    const out = new Map<string, ExplodeGateSolid>();
+    for (const unit of units) {
+      const solid = solids.get(unit.key);
+      if (!solid) continue;
+      const dirName = orderByKey.get(unit.key)?.direction ?? "+X";
+      const axis =
+        DBG_DIRECTIONS.find((d) => d.name === dirName)?.axis.clone() ??
+        new THREE.Vector3(1, 0, 0);
+      out.set(unit.key, {
+        partKey: unit.key,
+        name: unit.label,
+        axis,
+        geometry: solid.geometry,
+        bvh: solid.bvh,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Stage 7's counterpart to bisectFurthestClearDistance: binary-searches
+   * [blockedDistance, knownClearDistance] for the point NEAREST ZERO that
+   * stays clear - the mirror of the runtime gate's "how far can I get
+   * toward my target" search. Stage 7 asks "how LITTLE do I actually need
+   * to move" (the master plan's Â§1.5 compactness principle), so the loop's
+   * lo/hi update is inverted from bisectFurthestClearDistance's, but it's
+   * the same primitive family (same isClear callback shape, same iteration
+   * budget).
+   */
+  function bisectNearestClearDistance(
+    blockedDistance: number,
+    knownClearDistance: number,
+    isClear: (distance: number) => boolean,
+    iterations = EXPLODE_GATE_BISECT_ITERATIONS,
+  ): number {
+    let lo = blockedDistance;
+    let hi = knownClearDistance;
+    for (let i = 0; i < iterations; i++) {
+      const mid = lo + (hi - lo) / 2;
+      if (isClear(mid)) hi = mid;
+      else lo = mid;
+    }
+    return hi;
+  }
+
+  /**
+   * Stage 7's "clear" test - bounding-envelope separation, NOT solid
+   * mesh-vs-mesh intersection. Measured empirically, not assumed: wiring
+   * Stage 7 to the real mesh oracle (isExplodeDistanceClear, the same test
+   * Stage 4-6/the runtime gate use) produced a MINIMUM distance of exactly
+   * 0 for every single unit on all 3 fixtures - because at rest, almost no
+   * part pair's solids literally interpenetrate (the ones that DO are
+   * already rest-exemption-skipped), so "not solid-intersecting" is
+   * trivially true at distance 0 for nearly every pair regardless of how
+   * visually nested they are. That answers a different question than Stage
+   * 7 needs: Stage 4-6 (and the runtime gate) care whether material
+   * illegally passes through material DURING motion; Stage 7 cares whether
+   * a part has moved far enough to be genuinely, visibly separated from
+   * whatever's still nearby AT REST - i.e. bounding-envelope clearance, the
+   * same notion arePartsClearAtDistances already uses as its cheap
+   * pre-check before ever reaching for the real mesh test. Exemptions still
+   * apply (a mating pair's overlapping bounding envelope is that pair's own
+   * baseline, not something to "clear").
+   *
+   * Scoped to exactly ONE other unit, not the whole assembly. An earlier
+   * version tested self against every neighbor inside one shared isClear(d)
+   * predicate, which bisectNearestClearDistance's binary search silently
+   * assumes is MONOTONIC in d (once clear, stays clear for every larger
+   * d). That assumption broke down the moment more than one neighbor could
+   * each demand a different separation distance - measured directly on the
+   * Stuffing Box's body<->shaft pair (project memory "explode reliance
+   * aware stage bump and diagnoses") as a real, repeating, discrete flip in
+   * which neighbor governed the combined test's outcome between rounds,
+   * something a damped Gauss-Seidel loop could only ever paper over, never
+   * fix, because the combined predicate itself wasn't guaranteed
+   * monotonic. computeExplodeStageDistances now bisects each pair
+   * independently (this function) and combines the per-pair results via
+   * Math.max - every individual pair IS genuinely monotonic (self moving
+   * further away from one fixed other box, once clear, stays clear), so
+   * each bisection is sound on its own; nothing downstream depends on a
+   * possibly-non-monotonic shared predicate anymore.
+   */
+  function isExplodeDistancePairClear(
+    solids: Map<string, ExplodeGateSolid>,
+    partKey: string,
+    distance: number,
+    otherKey: string,
+    otherDistance: number,
+    exemptions: Map<string, Set<string>> | null,
+  ): boolean {
+    const self = solids.get(partKey);
+    const other = solids.get(otherKey);
+    const selfBox0 = self?.geometry.boundingBox;
+    const otherBox0 = other?.geometry.boundingBox;
+    if (!self || !other || !selfBox0 || !otherBox0) return true;
+    if (isRestExemptionActive(exemptions, partKey, distance, otherKey, otherDistance)) return true;
+    const selfBox = selfBox0.clone().translate(self.axis.clone().multiplyScalar(distance));
+    const otherBox = otherBox0.clone().translate(other.axis.clone().multiplyScalar(otherDistance));
+    return !selfBox.intersectsBox(otherBox);
+  }
+
+  /**
+   * Stage 7: minimum sufficient travel distance per unit, along its Stage-6
+   * assigned direction, processed in ascending stage order. "Every part
+   * still present at that stage" (per the task brief) = every OTHER unit
+   * whose own stage is >= the unit currently being solved: anything from a
+   * STRICTLY earlier stage has already moved to its own resolved distance
+   * and is no longer at rest; anything in the SAME or a later stage hasn't
+   * moved yet and is tested at rest (0) on this first pass. This is the
+   * real-clearance replacement for Pass 7's old stage-index
+   * distance-scaling multiplier - "clear" here is bounding-envelope
+   * separation (isExplodeDistancePairClear above), not solid mesh
+   * intersection; see that function's doc comment for why.
+   *
+   * A same-stage pair moves SIMULTANEOUSLY along a shared window, ramping
+   * from (0,0) to (finalA,finalB) together - so the first pass's "rest"
+   * assumption for a same-stage neighbor is only a first guess; it never
+   * checks whether the two units' actual PATHS (not just their final
+   * points) cross while both are moving. Confirmed empirically on the
+   * Stuffing Box fixture (project memory "explode stage8 recertification
+   * and exemption root cause": body/gland/shaft/4x stud/4x nut all land in
+   * the same Stage 6 stage) via debugUnitPairClearanceAtMultiples.
+   *
+   * Two repair strategies were tried and rejected before the one below,
+   * both because a scale-only or endpoint-only check can be fooled:
+   * scaling BOTH members of a pair by one common multiplier can only ever
+   * EXTEND the same straight-line path further outward - if the path
+   * already crosses somewhere between rest and the ORIGINAL (unscaled)
+   * endpoint, every larger multiplier still contains that exact crossing
+   * (proven, not just observed: the swept path for multiplier m is the
+   * same ray's [0,m] prefix, and a bad point at some s<1 stays inside that
+   * prefix for every m>1) - measured directly: scaling the Stuffing Box's
+   * body<->gland pair by up to 2x never cleared it, because their conflict
+   * spans the pair's ENTIRE shared window, not just the tail end. A ratchet
+   * that only re-validates the two units' FINAL points (not their whole
+   * path) can likewise report "clear" while a real windowed certification
+   * (certifyExplodeCertifiedPlan) still finds a dirty stretch in between -
+   * measured directly on the Stuffing Box's gland<->4x stud pair, which
+   * passed a final-point-only check but showed a real 57mm-deep dirty
+   * window from the real certifier.
+   *
+   * The fix: after the first (rest-based, ascending-stage) bootstrap pass
+   * above, run a real synchronous (Jacobi) CONVERGENCE loop - not a
+   * sequential (Gauss-Seidel) one - over every unit, repeating full rounds
+   * until a complete round changes every unit's distance by less than
+   * EXPLODE_SAME_STAGE_CONVERGENCE_EPSILON_MM or
+   * EXPLODE_SAME_STAGE_CONVERGENCE_MAX_ROUNDS is hit.
+   *
+   * Each round freezes a snapshot of every unit's distance as it stood at
+   * the END of the PREVIOUS round, solves every unit's fresh candidate
+   * against ONLY that frozen snapshot, and only then applies every unit's
+   * update - never a value another unit already wrote earlier in the SAME
+   * round. A prior version updated resolvedDistance in place while looping
+   * over units (Gauss-Seidel), which let the units' fixed ARRAY ORDER leak
+   * into the result - proven wrong by measurement (project memory "explode
+   * stale-neighbor diagnosis bush stud cotter pin"): a same-stage unit
+   * processed EARLY in that order could lock in a snapshot of a peer
+   * processed LATER that hadn't been computed yet (implicitly 0/rest),
+   * while a unit processed later saw that same peer's freshly-written
+   * value - a real measured case on the Stuffing Box had this make one
+   * unit's distance ~16% too LARGE while a different unit came out ~1.5%
+   * too SMALL. Freezing the whole round's inputs up front removes that
+   * order-dependence entirely.
+   *
+   * Each round's update is a HARD RATCHET - resolvedDistance can only ever
+   * GROW (Math.max(prev, fresh)), never shrink, with no damping. A plain
+   * ratchet was tried once before on the OLD Gauss-Seidel bootstrap pass
+   * and rejected: with order-dependent stale reads feeding it, a unit
+   * whose first estimate came out too LARGE could never correct back down
+   * (see the same project memory above) - that failure is specific to
+   * Gauss-Seidel's stale, order-dependent inputs, not to ratcheting
+   * itself. Under a Jacobi round, every unit's distance is a genuine
+   * componentwise-max sequence across rounds: bounded above (by the
+   * ceiling-doubling search's own cap) and monotonically non-decreasing by
+   * construction, so it is mathematically GUARANTEED to converge to SOME
+   * fixed point, regardless of how erratically any single round's `fresh`
+   * value jumps around - a property the damped-but-still-sequential loop
+   * tried next (project memory "explode stage7 convergence loop and
+   * cotter pin fix") never had: full readoption (omega=1) on this same
+   * fixture's body/gland/shaft/bush/stud/nut sextet hit a genuine, exact
+   * PERIOD-3 LIMIT CYCLE, and damping it (omega=0.3) only shrank the
+   * oscillation's amplitude without eliminating it for the body<->shaft
+   * pair specifically. Whether the ratcheted fixed point this loop
+   * converges to is the tightest self-consistent value, or a defensible
+   * but slightly conservative one (a neighbor that later moves far enough
+   * away to need LESS clearance than an earlier round already granted
+   * stays at that earlier, larger value - the ratchet's one real
+   * trade-off), is an empirical question checked per-fixture at the call
+   * site, not assumed here.
+   *
+   * Every individual clearance number is still produced by the SAME
+   * per-pair bisection primitive (bisectNearestClearDistance,
+   * isExplodeDistancePairClear) used everywhere else in this file - only
+   * HOW those per-pair results get combined (Math.max across neighbors,
+   * see solveUnitDistance below) and ITERATED (Jacobi rounds + hard
+   * ratchet, not Gauss-Seidel + damping) has changed.
+   *
+   * The whole-path trajectory check (isSameStageTrajectoryClear) still
+   * runs once at the end for diagnostic reporting, but no longer gates the
+   * loop itself - value self-consistency and trajectory cleanliness are
+   * different questions, and a pair whose conflict spans its entire
+   * shared window like body<->gland - proven above to be unfixable by
+   * adjusting distance alone - can converge perfectly in VALUE while
+   * still showing up dirty; only genuine stage separation
+   * (planExplodeStagesAndDistances's own sameStageFixes loop, which runs
+   * immediately after this function returns and uses the real windowed
+   * oracle across the WHOLE plan) can resolve that class of conflict, and
+   * this function does not attempt to duplicate it.
+   */
+  /**
+   * For every unit key, the set of OTHER units whose own assigned exit
+   * sweep is REALLY blocked (at rest) by that unit - straight from Phase
+   * 2's directional blocking graph (byDirection), independent of which
+   * unit's own distance is being solved. computeExplodeStageDistances uses
+   * this two ways for a shape computeMeshBlockersForSignedAxis's own-axis
+   * sweep alone can't catch: a unit that finds ZERO blockers along its OWN
+   * axis (a peg sliding freely out of a matching round hole) can still be
+   * sitting exactly where a DIFFERENT unit's own exit sweep needs to pass -
+   * see solveUnitDistance's doc comments for the real case (Sheet Metal
+   * Clamp's cotter pin genuinely blocks rivet's own +X sweep, even though
+   * cotter's own +Z sweep is genuinely blocker-free): (1) the entry test's
+   * short-circuit only fires for a unit that blocks no one, and (2) a unit
+   * that DOES block some other unit's sweep must have THAT other unit
+   * tested at REST (not its resolved/final distance) when solving its OWN
+   * distance, regardless of relative stage - the other unit's own final
+   * distance was computed ASSUMING this one would already be out of the
+   * way, so treating it as "already final" here would be circular.
+   * Computed once per orderByKey snapshot - direction assignments don't
+   * change across computeExplodeStageDistances's own convergence loop or
+   * planExplodeStagesAndDistances's sameStageFixes stage-bump loop, only
+   * stages do (see those call sites) - not recomputed per unit.
+   */
+  function computeUnitsRelyingOn(
+    units: DbgUnit[],
+    byDirection: Map<string, Map<string, string[]>>,
+    orderByKey: Map<string, ExplodeUnitOrder>,
+  ): Map<string, Set<string>> {
+    const relyingOn = new Map<string, Set<string>>();
+    for (const unit of units) {
+      const direction = orderByKey.get(unit.key)?.direction;
+      if (!direction) continue;
+      const blockers = byDirection.get(direction)?.get(unit.key) ?? [];
+      for (const blockerKey of blockers) {
+        if (!relyingOn.has(blockerKey)) relyingOn.set(blockerKey, new Set());
+        relyingOn.get(blockerKey)!.add(unit.key);
+      }
+    }
+    return relyingOn;
+  }
+
+  function computeExplodeStageDistances(
+    units: DbgUnit[],
+    unitGateSolids: Map<string, ExplodeGateSolid>,
+    exemptions: Map<string, Set<string>>,
+    orderByKey: Map<string, ExplodeUnitOrder>,
+    assemblyDiag: number,
+    unitsRelyingOn: Map<string, Set<string>>,
+  ): Map<string, number> {
+    const stageOf = (key: string) => orderByKey.get(key)?.stage ?? 0;
+
+    // TEMP diagnostic (see project memory "sanity check bush stud
+    // distances" round) - the exact neighborDistances snapshot + search
+    // ceiling/doublings solveUnitDistance used on whichever call ends up
+    // WINNING (its result becomes resolvedDistance for that unit - see the
+    // two call sites below), keyed by unit. Lets a caller answer "what was
+    // this unit's final distance actually computed against" without
+    // guessing/reconstructing it externally.
+    let traceNeighborDistances: Map<string, number> = new Map();
+    let traceCeiling = 0;
+    let traceDoublings = 0;
+
+    const solveUnitDistance = (
+      unit: DbgUnit,
+      resolvedDistance: Map<string, number>,
+      sameStageAtRest: boolean,
+    ): number => {
+      const stage = stageOf(unit.key);
+      const neighborDistances = new Map<string, number>();
+      for (const other of units) {
+        if (other.key === unit.key) continue;
+        const otherStage = stageOf(other.key);
+        const useResolved = otherStage < stage || (otherStage === stage && !sameStageAtRest);
+        neighborDistances.set(other.key, useResolved ? (resolvedDistance.get(other.key) ?? 0) : 0);
+      }
+      traceNeighborDistances = neighborDistances;
+      traceCeiling = 0;
+      traceDoublings = 0;
+
+      // Entry test: does this unit need to move AT ALL? Stage 4's real
+      // swept mesh/BVH test (computeMeshBlockersForSignedAxis), not a
+      // static isClear(0) snapshot - see this function's doc comment and
+      // project memory "explode phase4 wiring and degenerate certification
+      // bug" for why a rest-position-only bbox test answers the wrong
+      // question here (it asks "does my rest bbox already overlap," Stage 7
+      // needs "would I ever hit something while sweeping out") and was
+      // returning a vacuous "clear" for nearly every unit on Knuckle Joint
+      // and Sheet Metal Clamp.
+      //
+      // Every OTHER unit is tested, each at its ACTUAL current position
+      // (neighborDistances just built above, along ITS OWN axis) via the
+      // swept test's `offset` param - not a boolean "has it moved at all"
+      // filter. A prior version treated ANY nonzero neighborDistances entry
+      // as "fully out of the way" and dropped it from the test entirely,
+      // regardless of whether that distance actually cleared self's sweep
+      // path - see project memory "explode stage7 swept entry test and
+      // stuffing box ripple" for the real per-fixture residual-zero gap
+      // this produced (Knuckle Joint 5v1/1v2, Sheet Metal Clamp's cotter
+      // pin, Stuffing Box's 2x bush/4x stud all landing at a vacuous 0
+      // despite genuine unresolved depth conflicts against a neighbor that
+      // had moved some, but not enough). A neighbor at distance 0 passes
+      // offset: undefined (identical to testing it at rest); one already
+      // resolved to some nonzero distance is tested at THAT translated
+      // position, so it only stops counting as a blocker once the real
+      // geometry is actually clear of self's sweep, not just "moved."
+      // Reuses Stage 4's primitive completely unchanged (same function, new
+      // optional param, default behavior preserved for every other caller)
+      // - no second collision test - and as a side effect stays immune to
+      // the rest-exemption short-circuit isClear(0) had (a unit exempt from
+      // EVERY neighbor, like Knuckle Joint's main pin, doesn't vacuously
+      // report "clear" just because every rest-touching pair gets skipped
+      // by isRestExemptionActive): computeMeshBlockersForSignedAxis doesn't
+      // consult exemptions at all, it tests real geometry.
+      const selfSolid = unitGateSolids.get(unit.key);
+      if (!selfSolid) return 0; // no geometry to sweep - shouldn't happen for a real fixture.
+      const othersAtCurrentPosition = units
+        .filter((other) => other.key !== unit.key)
+        .map((other) => {
+          const dist = neighborDistances.get(other.key) ?? 0;
+          const otherAxis = dist !== 0 ? unitGateSolids.get(other.key)?.axis : undefined;
+          return {
+            partKey: other.key,
+            box0: other.box0,
+            offset: otherAxis ? otherAxis.clone().multiplyScalar(dist) : undefined,
+          };
+        });
+      const sweptBlockers = computeMeshBlockersForSignedAxis(
+        unit.key,
+        unit.box0,
+        selfSolid.axis,
+        othersAtCurrentPosition,
+        unitGateSolids,
+      );
+      // A real mesh sweep finding zero blockers normally means this unit is
+      // free to leave with no travel at all - genuinely correct for an
+      // isolated unit. But "nothing blocks MY OWN exit" and "nobody needs
+      // me to move" are different questions for a part shaped like a pin
+      // through a matching round hole: sliding it along its own bore never
+      // touches the hole's walls (zero blockers, correctly), yet a
+      // DIFFERENT unit's own exit sweep can still be blocked BY this one
+      // sitting at rest - measured directly on Sheet Metal Clamp's cotter
+      // pin (project memory "explode stale-neighbor diagnosis bush stud
+      // cotter pin"): rivet's own +X sweep genuinely intersects the
+      // stationary cotter pin's mesh partway through rivet's own
+      // translation (Phase 2's own directional blocking graph already
+      // lists cotter as one of rivet's real blockers in +X) - not at rest
+      // and not at either one's FINAL position, only mid-sweep, which is
+      // exactly what Stage 8's real windowed certification checks and a
+      // rest-only or endpoint-only test would miss. If cotter never moves
+      // (short-circuits to 0 forever because ITS OWN exit is unobstructed),
+      // it stays parked exactly where rivet's sweep needs to pass, for the
+      // pair's entire shared window. `unitsRelyingOn` is exactly this
+      // signal, precomputed once from the SAME Phase 2 blocking graph
+      // (byDirection) planExplodeStagesAndDistances already has, before any
+      // stage bump - see computeUnitsRelyingOn's doc comment. A unit that
+      // blocks no one else's exit AND has no real blocker of its own is a
+      // genuinely isolated part with nothing to clear - the short-circuit
+      // stays exactly as before for that case.
+      const relyingOnMe = unitsRelyingOn.get(unit.key);
+      if (sweptBlockers.length === 0) {
+        if (!relyingOnMe || relyingOnMe.size === 0) return 0;
+        // Fallback path only - deliberately NOT applied to every unit's
+        // neighborDistances above (an earlier version of this fix did
+        // exactly that and broke the Stuffing Box's own same-stage
+        // convergence loop: bush/stud/body/shaft/nut all have REAL
+        // sweptBlockers of their own, so they never reach this branch, but
+        // forcing every mutually-blocking same-stage pair to rest
+        // unconditionally defeated the whole point of the convergence loop
+        // above, which needs to see EACH OTHER's live, currently-converging
+        // value, not a permanent rest snapshot). Only a unit with zero
+        // blockers of its own falls through to here, so only THAT unit's
+        // neighborDistances gets adjusted, and only for the specific
+        // neighbors relying on it.
+        for (const otherKey of relyingOnMe) neighborDistances.set(otherKey, 0);
+        traceNeighborDistances = neighborDistances;
+      }
+
+      // Per-pair max, not one shared multi-neighbor bisection - see
+      // isExplodeDistancePairClear's doc comment for why: combining every
+      // neighbor into one isClear(d) predicate isn't guaranteed monotonic
+      // once more than one neighbor demands a different separation, and a
+      // non-monotonic predicate can make bisectNearestClearDistance
+      // converge to the wrong point - measured as a real discrete "which
+      // neighbor governs" flip that drove a period-3 limit cycle on the
+      // Stuffing Box. Bisecting each pair on its own (genuinely monotonic)
+      // and combining via Math.max reaches the same "clear of everyone"
+      // answer without that risk.
+      let maxRequired = 0;
+      let maxCeiling = 0;
+      let maxDoublings = 0;
+      for (const other of units) {
+        if (other.key === unit.key) continue;
+        const otherDistance = neighborDistances.get(other.key) ?? 0;
+        const pairIsClear = (d: number) =>
+          isExplodeDistancePairClear(unitGateSolids, unit.key, d, other.key, otherDistance, exemptions);
+        let ceiling = Math.max(assemblyDiag, 1e-6);
+        let ceilingClear = pairIsClear(ceiling);
+        let doublings = 0;
+        while (!ceilingClear && doublings < 6) {
+          ceiling *= 2;
+          ceilingClear = pairIsClear(ceiling);
+          doublings += 1;
+        }
+        // Genuine dead end even for this one pair's own minimum-clearance
+        // search - shouldn't happen for a real fixture (Stage 6 only frees
+        // a unit once the ordering says it should be able to clear), but
+        // report the generous ceiling itself rather than silently
+        // pretending it's clear.
+        const pairDistance = ceilingClear ? bisectNearestClearDistance(0, ceiling, pairIsClear) : ceiling;
+        if (pairDistance > maxRequired) maxRequired = pairDistance;
+        if (ceiling > maxCeiling) maxCeiling = ceiling;
+        if (doublings > maxDoublings) maxDoublings = doublings;
+      }
+      traceCeiling = maxCeiling;
+      traceDoublings = maxDoublings;
+      return maxRequired;
+    };
+
+    // TEMP diagnostic (see project memory "sanity check bush stud
+    // distances" round) - snapshots traceNeighborDistances/traceCeiling/
+    // traceDoublings into a per-unit map, but only when this call's result
+    // actually becomes that unit's resolvedDistance (mirrors the exact
+    // "first pass always wins, repair round only wins via Math.max" logic
+    // below so the trace always reflects the TRUE reason for the value a
+    // caller would read back from resolvedDistance/the final plan).
+    const solveTraceByUnit = new Map<
+      string,
+      { distance: number; ceiling: number; doublings: number; neighborDistances: Map<string, number> }
+    >();
+
+    let resolvedDistance = new Map<string, number>();
+    for (const u of units) resolvedDistance.set(u.key, 0);
+    const byStage = [...units].sort((a, b) => stageOf(a.key) - stageOf(b.key));
+    for (const unit of byStage) {
+      const distance = solveUnitDistance(unit, resolvedDistance, true);
+      resolvedDistance.set(unit.key, distance);
+      solveTraceByUnit.set(unit.key, {
+        distance,
+        ceiling: traceCeiling,
+        doublings: traceDoublings,
+        neighborDistances: traceNeighborDistances,
+      });
+    }
+
+    // Convergence loop: repeated JACOBI (synchronous) rounds over every
+    // unit (order doesn't matter - see doc comment above). Each round
+    // freezes a snapshot of resolvedDistance as it stood at the END of the
+    // PREVIOUS round, solves every unit's fresh candidate against ONLY
+    // that frozen snapshot (never a value written earlier in THIS same
+    // round), then applies every unit's update SIMULTANEOUSLY via a hard
+    // ratchet - resolvedDistance can only grow (Math.max(prev, fresh)),
+    // never shrink, with no damping. See doc comment above for why this is
+    // mathematically guaranteed to reach a fixed point: a bounded,
+    // monotonically non-decreasing sequence always converges, regardless
+    // of how erratically `fresh` itself jumps between rounds.
+    let roundsUsed = 0;
+    let converged = false;
+    const roundHistory: { round: number; maxDelta: number; distances: Record<string, number> }[] = [];
+    for (let round = 0; round < EXPLODE_SAME_STAGE_CONVERGENCE_MAX_ROUNDS; round++) {
+      roundsUsed = round + 1;
+      // Freeze this round's inputs before solving ANY unit - every unit's
+      // `fresh` this round reads the exact same snapshot, independent of
+      // iteration order.
+      const frozen = new Map(resolvedDistance);
+      const freshByUnit = new Map<string, number>();
+      const traceByUnit = new Map<
+        string,
+        { ceiling: number; doublings: number; neighborDistances: Map<string, number> }
+      >();
+      for (const unit of units) {
+        freshByUnit.set(unit.key, solveUnitDistance(unit, frozen, false));
+        traceByUnit.set(unit.key, {
+          ceiling: traceCeiling,
+          doublings: traceDoublings,
+          neighborDistances: traceNeighborDistances,
+        });
+      }
+      let maxDelta = 0;
+      for (const unit of units) {
+        const fresh = freshByUnit.get(unit.key)!;
+        const prev = resolvedDistance.get(unit.key) ?? 0;
+        const next = Math.max(prev, fresh);
+        const delta = Math.abs(next - prev);
+        if (delta > maxDelta) maxDelta = delta;
+        if (next !== prev) {
+          const t = traceByUnit.get(unit.key)!;
+          solveTraceByUnit.set(unit.key, {
+            distance: next,
+            ceiling: t.ceiling,
+            doublings: t.doublings,
+            neighborDistances: t.neighborDistances,
+          });
+        }
+        resolvedDistance.set(unit.key, next);
+      }
+      // Cheap enough at this round/unit count to keep permanently - lets a
+      // caller see the ACTUAL round-by-round trace (per the task brief's
+      // own ask for "round-by-round trace showing stability") instead of
+      // only the final converged/hitCap summary below.
+      const distances: Record<string, number> = {};
+      for (const unit of units) distances[unit.key] = resolvedDistance.get(unit.key) ?? 0;
+      roundHistory.push({ round: round + 1, maxDelta, distances });
+      if (maxDelta < EXPLODE_SAME_STAGE_CONVERGENCE_EPSILON_MM) {
+        converged = true;
+        break;
+      }
+    }
+    // TEMP diagnostic (see project memory "reconcile bush/shaft" round,
+    // superseded by the Stage 7 convergence-loop rewrite) - last call's
+    // round usage, overwritten every invocation; the caller
+    // (planExplodeStagesAndDistances) reads it right after its own final
+    // computeExplodeStageDistances call, so it reflects the state that
+    // produced the FINAL returned plan. finalDirtyPairs is the real
+    // whole-path trajectory check, run once here purely for reporting -
+    // see doc comment above for why value convergence and trajectory
+    // cleanliness are different questions and a converged pass can still
+    // report a nonempty finalDirtyPairs.
+    const dirty = findDirtySameStagePairs(units, stageOf, resolvedDistance, unitGateSolids, exemptions);
+    lastSameStageRepairDiag = {
+      roundsUsed,
+      converged,
+      hitCap: !converged,
+      finalDirtyPairs: dirty.map(([a, b]) => [a.key, b.key].sort().join("::")),
+      roundHistory,
+    };
+    lastSolveTraceByUnit = solveTraceByUnit;
+
+    return resolvedDistance;
+  }
+
+  // Round cap for computeExplodeStageDistances's Gauss-Seidel convergence
+  // loop - same style as the SCC search's own permutation cap
+  // (EXPLODE_SCC_MAX_PERMUTATION_UNITS): a generous ceiling the loop is
+  // expected to exit long before via its own epsilon check below, not a
+  // budget it's meant to spend. Each round is O(units^2) per-pair
+  // bisections plus one O(same-stage pairs) real-path re-check for the
+  // final diagnostic, so even the max is cheap for the small same-stage
+  // crowds this applies to; a plan that still hasn't stabilized by round
+  // 20 is a genuine non-convergent case (a caller can read a returned
+  // `roundHistory` to see exactly which unit(s) kept moving and by how
+  // much), not something a bigger cap alone would fix.
+  const EXPLODE_SAME_STAGE_CONVERGENCE_MAX_ROUNDS = 20;
+
+  // Below this per-unit distance change (mm) across a complete Jacobi
+  // round, the convergence loop considers itself stable. MUST stay
+  // comfortably above bisectNearestClearDistance's own achievable
+  // resolution (ceiling/2^EXPLODE_GATE_BISECT_ITERATIONS) or the loop can
+  // never register as converged at all - measured directly on the
+  // Stuffing Box (project memory "explode stale-neighbor diagnosis bush
+  // stud cotter pin" recorded a real ceiling of 1527mm for bush/stud's own
+  // search): 1527/1024 is ~1.49mm of pure bisection quantization noise per
+  // re-solve, so an 0.01mm epsilon (this constant's first, too-tight
+  // value) hit the round cap on every real run without ever converging,
+  // even once the true underlying value had stabilized. 2mm clears that
+  // noise floor with margin while staying far under the magnitude of the
+  // staleness bug this loop replaced (tens to hundreds of mm) and well
+  // under any practical rendering-visible threshold.
+  const EXPLODE_SAME_STAGE_CONVERGENCE_EPSILON_MM = 2;
+
+  // TEMP diagnostic (see project memory "reconcile bush/shaft" round) -
+  // last computeExplodeStageDistances call's convergence-loop usage.
+  // roundHistory is the real round-by-round trace (every unit's distance
+  // and the round's maxDelta) the Jacobi+ratchet loop produced, in order -
+  // lets a caller inspect stability (or a genuine non-convergent case)
+  // directly instead of reconstructing it from ad hoc instrumentation.
+  let lastSameStageRepairDiag: {
+    roundsUsed: number;
+    converged: boolean;
+    hitCap: boolean;
+    finalDirtyPairs: string[];
+    roundHistory: { round: number; maxDelta: number; distances: Record<string, number> }[];
+  } | null = null;
+
+  // TEMP diagnostic (see project memory "sanity check bush stud
+  // distances" round) - per-unit snapshot of exactly which call (first
+  // pass or a winning repair round) produced the CURRENT resolvedDistance
+  // for that unit, and what neighborDistances/ceiling/doublings that call
+  // used - see solveTraceByUnit inside computeExplodeStageDistances.
+  let lastSolveTraceByUnit: Map<
+    string,
+    { distance: number; ceiling: number; doublings: number; neighborDistances: Map<string, number> }
+  > | null = null;
+
+  // Sample count for isSameStageTrajectoryClear's fixed grid before
+  // refinement - fine enough to catch the ~2%-wide windows this session's
+  // other certifications have found in practice (see
+  // computeStageWindowBreakpoints's doc comment) without the cost of a
+  // full Stage-8-grade sweep for what's meant to be a fast per-round check.
+  const EXPLODE_SAME_STAGE_TRAJECTORY_SAMPLES = 50;
+
+  /**
+   * True only if unit A and unit B - moving simultaneously and
+   * proportionally from rest to their given final distances, exactly like
+   * two same-stage units do under Stage 8's shared-window interpolation -
+   * never overlap (real mesh oracle, respecting rest exemptions) at any
+   * point along that shared path. Sampled on a fixed grid, then refined
+   * around any point where the clear/not-clear reading changes, the same
+   * two-phase approach certifyExplodeCertifiedPlan uses for the same
+   * reason (a narrow bad window can hide between fixed-grid samples).
+   */
+  function isSameStageTrajectoryClear(
+    aKey: string,
+    aDistance: number,
+    bKey: string,
+    bDistance: number,
+    unitGateSolids: Map<string, ExplodeGateSolid>,
+    exemptions: Map<string, Set<string>>,
+  ): boolean {
+    const clearAt = (t: number): boolean => {
+      const aDist = aDistance * t;
+      const bDist = bDistance * t;
+      if (isRestExemptionActive(exemptions, aKey, aDist, bKey, bDist)) return true;
+      return arePartsClearAtDistances(unitGateSolids, aKey, aDist, bKey, bDist);
+    };
+
+    const step = 1 / EXPLODE_SAME_STAGE_TRAJECTORY_SAMPLES;
+    const readings: boolean[] = [];
+    for (let i = 0; i <= EXPLODE_SAME_STAGE_TRAJECTORY_SAMPLES; i++) {
+      readings.push(clearAt(i * step));
+    }
+    if (readings.some((clear) => !clear)) return false;
+
+    let allClear = true;
+    const refine = (lo: number, hi: number, loClear: boolean, hiClear: boolean, depth: number): void => {
+      if (depth <= 0 || hi - lo < 1e-4) return;
+      const mid = (lo + hi) / 2;
+      const midClear = clearAt(mid);
+      if (!midClear) allClear = false;
+      if (midClear !== loClear) refine(lo, mid, loClear, midClear, depth - 1);
+      if (midClear !== hiClear) refine(mid, hi, midClear, hiClear, depth - 1);
+    };
+    for (let i = 0; i < EXPLODE_SAME_STAGE_TRAJECTORY_SAMPLES; i++) {
+      refine(i * step, (i + 1) * step, readings[i]!, readings[i + 1]!, 5);
+    }
+    return allClear;
+  }
+
+  /** Every same-stage pair whose whole shared path (see isSameStageTrajectoryClear) is NOT clear at the given distances. */
+  function findDirtySameStagePairs(
+    units: DbgUnit[],
+    stageOf: (key: string) => number,
+    resolvedDistance: Map<string, number>,
+    unitGateSolids: Map<string, ExplodeGateSolid>,
+    exemptions: Map<string, Set<string>>,
+  ): [DbgUnit, DbgUnit][] {
+    const dirty: [DbgUnit, DbgUnit][] = [];
+    for (let i = 0; i < units.length; i++) {
+      for (let j = i + 1; j < units.length; j++) {
+        const a = units[i]!;
+        const b = units[j]!;
+        if (stageOf(a.key) !== stageOf(b.key)) continue;
+        const aDist = resolvedDistance.get(a.key) ?? 0;
+        const bDist = resolvedDistance.get(b.key) ?? 0;
+        if (!isSameStageTrajectoryClear(a.key, aDist, b.key, bDist, unitGateSolids, exemptions)) {
+          dirty.push([a, b]);
+        }
+      }
+    }
+    return dirty;
+  }
+
+  /** Combines Stage 6's order assignment and Stage 7's distances into the one cached plan data structure the task asks for - Phase 4 will read this, not recompute it. */
+  function buildExplodeCertifiedPlan(
+    units: DbgUnit[],
+    order: ExplodeUnitOrder[],
+    distances: Map<string, number>,
+  ): ExplodeCertifiedPlan {
+    const orderByKey = new Map(order.map((o) => [o.unitKey, o]));
+    const assignments: ExplodeStageAssignment[] = units.map((u) => {
+      const o = orderByKey.get(u.key)!;
+      return {
+        unitKey: u.key,
+        label: u.label,
+        memberKeys: u.memberKeys,
+        stage: o.stage,
+        direction: o.direction,
+        distance: distances.get(u.key) ?? 0,
+        deadEnd: o.deadEnd,
+        sccOrderValidated: o.sccOrderValidated ?? false,
+        deadEndReason: o.deadEndReason,
+      };
+    });
+    const totalStages = 1 + Math.max(0, ...assignments.map((a) => a.stage));
+    return { assignments, totalStages };
+  }
+
+  /**
+   * Real defect found empirically while validating Stage 6/7 on the
+   * Stuffing Box fixture (body + shaft, both stage 0): Stage 4's DBG only
+   * tests ONE unit's swept motion against every OTHER unit's STATIC rest
+   * position - it never tests two same-stage units moving SIMULTANEOUSLY
+   * against EACH OTHER along their own (different) axes - true whether or
+   * not the two units land in literally the same stage NUMBER, since
+   * EXPLODE_STAGE_OVERLAP means adjacent stages' [start,end] windows
+   * already overlap in time by design (later parts ease in while earlier
+   * ones are still finishing). Two movers that each individually clear the
+   * other's rest position can still sweep INTO each other transiently
+   * while their windows overlap (confirmed on Stuffing Box: body/+Y and
+   * shaft/+Z are clear at rest and clear at their final targets, but
+   * genuinely solid-intersect, up to ~60mm deep, through a chunk of their
+   * windowed co-motion - and moving shaft to the NEXT stage alone did not
+   * fix it, because its window still overlapped body's). Runs the SAME
+   * real windowed oracle Stage 8 itself uses (certifyExplodeCertifiedPlan)
+   * at `stepPercent` resolution and returns the deepest overlap from the
+   * FIRST bad sample found, or null if the whole sweep is genuinely clean.
+   */
+  /**
+   * Every colliding PAIR across the whole certified sweep (not just the
+   * first bad sample), reduced to each pair's single deepest overlap and
+   * sorted worst-first. Returning every pair - not stopping at the first -
+   * is what lets planExplodeStagesAndDistances's caller skip a pair it has
+   * already proven stuck and still act on a genuinely different collision,
+   * instead of the whole pass stalling on the first repeat it sees.
+   */
+  function findWorstPlanCollisions(
+    plan: ExplodeCertifiedPlan,
+    unitGateSolids: Map<string, ExplodeGateSolid>,
+    exemptions: Map<string, Set<string>>,
+    restDepthByPair: Map<string, Map<string, number>>,
+    stepPercent: number,
+  ): ExplodeCertificationOverlap[] {
+    const report = certifyExplodeCertifiedPlan(plan, unitGateSolids, exemptions, restDepthByPair, stepPercent);
+    const worstByPair = new Map<string, ExplodeCertificationOverlap>();
+    for (const sample of report.samples) {
+      for (const overlap of sample.overlaps) {
+        const key = [overlap.a, overlap.b].sort().join("::");
+        const existing = worstByPair.get(key);
+        if (!existing || overlap.depth > existing.depth) worstByPair.set(key, overlap);
+      }
+    }
+    return [...worstByPair.values()].sort((a, b) => b.depth - a.depth);
+  }
+
+  /**
+   * Every stage-window start/end (deduped, excluding the 0/1 endpoints
+   * every sweep already samples) - the exact amounts where some unit/part's
+   * own motion begins or finishes, hence where a stage-bump or order change
+   * can open or close a genuinely narrow collision window. A fixed-percent
+   * grid samples these amounts only by coincidence: a real ~2%-wide,
+   * ~55mm-deep Stuffing Box bush<->bush window sat entirely between two
+   * adjacent 1% grid samples that both happened to read clean, so the old
+   * fixed-grid-only certification reported one 2.976mm blip and missed the
+   * rest of it (see project memory "explode bush window and live order
+   * fix"). refineAroundBreakpoint below is the fix - always call it for
+   * every breakpoint after the main fixed-grid pass, never as a substitute
+   * for it.
+   */
+  function computeStageWindowBreakpoints(
+    windows: { start: number; end: number }[],
+  ): number[] {
+    const set = new Set<number>();
+    for (const w of windows) {
+      if (w.start > 1e-9 && w.start < 1 - 1e-9) set.add(w.start);
+      if (w.end > 1e-9 && w.end < 1 - 1e-9) set.add(w.end);
+    }
+    return Array.from(set).sort((a, b) => a - b);
+  }
+
+  // Recursion depth for refineAroundBreakpoint - 7 halvings of a 1%-wide
+  // neighborhood resolves to better than 0.01%, comfortably finer than the
+  // ~2% Stuffing Box window this was built to never miss again. The first
+  // 3 levels always subdivide both halves regardless of what they find (a
+  // guaranteed resolution floor right at the breakpoint, where a window is
+  // most likely to open/close); deeper levels only keep recursing a half
+  // whose own endpoints disagree - the actual signature of a hidden
+  // transition, not a guess.
+  const BREAKPOINT_BISECT_MAX_DEPTH = 7;
+  const BREAKPOINT_BISECT_MIN_UNCONDITIONAL_DEPTH = 3;
+
+  /**
+   * Adaptively bisects the coarse-grid cell(s) immediately surrounding ONE
+   * stage-window breakpoint, calling `hasOverlapAt` (which the caller wires
+   * up to do its own sample/overlap bookkeeping, exactly like a normal grid
+   * sample) for every additional amount tested. Never decides pass/fail
+   * itself - see the call sites (certifyExplodeCertifiedPlan,
+   * isSccOrderCandidateClean, certifyLivePartStagePlan) for how the result
+   * gets used.
+   *
+   * `maxDepth` defaults to the full BREAKPOINT_BISECT_MAX_DEPTH (every
+   * pair, every breakpoint, at full ~254-sample rigor) - appropriate for an
+   * on-demand diagnostic (Stage 8's certifyExplodeFullPlan) or a ONE-TIME
+   * final verification. An exhaustive SEARCH that calls this per-candidate
+   * (resolveDeadEndSccOrder's permutation loop, resolveLivePlanStageCollisions'
+   * iterative bump loop and its resolveLiveCollisionPairOrder fallback) must
+   * pass a much smaller depth instead - full depth there multiplies an
+   * already-large candidate count by up to ~36x per breakpoint (measured: a
+   * single full-depth certifyLivePartStagePlan call over 13 parts took long
+   * enough that a naive per-candidate use of it turned one Explode View
+   * toggle into a multi-minute hang) - and re-verify only the FINAL adopted
+   * candidate at full depth once the search concludes (see
+   * resolveLivePlanStageCollisions's doc comment).
+   */
+  function refineAroundBreakpoint(
+    breakpoint: number,
+    coarseStep: number,
+    hasOverlapAt: (amount: number) => boolean,
+    maxDepth: number = BREAKPOINT_BISECT_MAX_DEPTH,
+  ): void {
+    const minUnconditionalDepth = Math.min(BREAKPOINT_BISECT_MIN_UNCONDITIONAL_DEPTH, maxDepth);
+    const recurse = (
+      lo: number,
+      hi: number,
+      loOverlap: boolean,
+      hiOverlap: boolean,
+      depth: number,
+    ): void => {
+      if (depth <= 0 || hi - lo < 1e-6) return;
+      const mid = (lo + hi) / 2;
+      const midOverlap = hasOverlapAt(mid);
+      const unconditional = depth > maxDepth - minUnconditionalDepth;
+      if (unconditional || midOverlap !== loOverlap) {
+        recurse(lo, mid, loOverlap, midOverlap, depth - 1);
+      }
+      if (unconditional || midOverlap !== hiOverlap) {
+        recurse(mid, hi, midOverlap, hiOverlap, depth - 1);
+      }
+    };
+    const lo = Math.max(0, breakpoint - coarseStep);
+    const hi = Math.min(1, breakpoint + coarseStep);
+    recurse(lo, hi, hasOverlapAt(lo), hasOverlapAt(hi), maxDepth);
+  }
+
+  // How large a genuine dead-end SCC (computeExplodeOrderAssignment's
+  // "no unit free in any direction" branch) can be before
+  // resolveDeadEndSccOrder's brute-force permutation search is skipped in
+  // favor of the naive same-stage/least-bad-direction fallback. 7! = 5040
+  // candidate orders, each a cheap bbox-only Stage 7 solve plus an
+  // early-exiting real-mesh certification - safe for an offline planning
+  // pass on the SCC sizes seen so far (<=6), with headroom to spare.
+  const EXPLODE_SCC_MAX_PERMUTATION_UNITS = 7;
+
+  type ExplodeSccOrderResult = {
+    orderByKey: Map<string, ExplodeUnitOrder>;
+    permutationsTried: number;
+    selectedPermutation: string[];
+  } | null;
+
+  /**
+   * Caches resolveDeadEndSccOrder's brute-force permutation search result -
+   * the search is a pure function of (which assembly is loaded, the SCC's
+   * member keys, its base stage), so once solved for a given assembly it
+   * never needs re-solving for that same assembly again, even across many
+   * Explode View toggle-off/on cycles. Keyed via buildSccOrderCacheKey (see
+   * activeAssemblyKey's doc comment for why a file identity, not geometry,
+   * is the key). Stores the in-flight Promise itself (not just the settled
+   * result) so two calls racing on a genuine cache miss - e.g. a double
+   * toggle-click before the first search finishes - share one search
+   * instead of each independently paying the full cost.
+   */
+  const explodeSccOrderSearchCache = new Map<string, Promise<ExplodeSccOrderResult>>();
+
+  function buildSccOrderCacheKey(sccKeys: string[], baseStage: number): string {
+    return `${activeAssemblyKey ?? "no-active-assembly-key"}::${[...sccKeys].sort().join(",")}::${baseStage}`;
+  }
+
+  /**
+   * Yields control back to the browser's event loop - lets a long, purely
+   * synchronous CPU loop (resolveDeadEndSccOrder's permutation search) be
+   * chunked into many short bursts instead of one multi-second blocking
+   * call, so the tab keeps repainting/responding to input throughout, and
+   * the browser's own "Page Unresponsive" dialog can never trigger, even
+   * on the first-ever (cache-miss) run for a freshly loaded file.
+   *
+   * Deliberately does NOT use the standard scheduler.yield() API despite it
+   * being the theoretically "correct" choice - measured directly (a 4s
+   * busy-loop of 80ms synchronous chunks separated by yields, with a
+   * setInterval(20ms) heartbeat running throughout) on the Chromium build
+   * this was verified against: scheduler.yield() produced ZERO heartbeat
+   * ticks (it resolves without ever actually handing control back to the
+   * timer/task queue in that environment), while the identical test using
+   * setTimeout(resolve, 0) produced the expected ~50 ticks. Real-toggle
+   * testing on Stuffing Box's 720-permutation search confirmed this exactly:
+   * with scheduler.yield(), the whole ~72s search ran as ONE continuous
+   * block (a heartbeat timer ticked only 19 times total, nearly all before
+   * the search even started); switching to setTimeout(0) fixed it. If a
+   * future browser's scheduler.yield() is verified to behave correctly,
+   * this can be revisited - but don't reintroduce it without re-running
+   * that same measurement, since "the spec-correct API" here empirically
+   * was not the actually-correct choice.
+   */
+  async function yieldToMainThread(): Promise<void> {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+
+  /** All permutations of a small array - resolveDeadEndSccOrder's brute-force search, capped by EXPLODE_SCC_MAX_PERMUTATION_UNITS so this never runs on more than a handful of items. */
+  function generatePermutations<T>(items: T[]): T[][] {
+    if (items.length <= 1) return [items.slice()];
+    const result: T[][] = [];
+    for (let i = 0; i < items.length; i++) {
+      const rest = items.slice(0, i).concat(items.slice(i + 1));
+      for (const perm of generatePermutations(rest)) {
+        result.push([items[i]!, ...perm]);
+      }
+    }
+    return result;
+  }
+
+  /** Kendall-tau-style distance from `natural` order - resolveDeadEndSccOrder uses this to prefer the least-disruptive candidate when more than one permutation certifies clean. */
+  function countOrderInversions(candidate: string[], natural: string[]): number {
+    const rank = new Map(natural.map((key, i) => [key, i]));
+    let inversions = 0;
+    for (let i = 0; i < candidate.length; i++) {
+      for (let j = i + 1; j < candidate.length; j++) {
+        if ((rank.get(candidate[i]!) ?? 0) > (rank.get(candidate[j]!) ?? 0)) inversions += 1;
+      }
+    }
+    return inversions;
+  }
+
+  /**
+   * Fast real-oracle check for ONE candidate order: true only if every
+   * sample across the full bidirectional [0,1] sweep has zero overlapping
+   * pairs where BOTH members are in `sccKeySet` - every other pair is
+   * already the ordinary (unmodified) pipeline's responsibility, so this
+   * deliberately does not re-check them. Exits the instant a single
+   * violating pair is found, unlike the full Stage 8 report
+   * (certifyExplodeCertifiedPlan) - resolveDeadEndSccOrder calls this once
+   * per candidate permutation (up to EXPLODE_SCC_MAX_PERMUTATION_UNITS!
+   * times), and most candidates are dirty almost immediately.
+   *
+   * Exemption test uses isLiveRestExemptionActive (depth-based, bounded by
+   * each pair's OWN real rest penetration depth), not the flat-threshold
+   * isRestExemptionActive that certifyExplodeCertifiedPlan still uses - the
+   * flat threshold caps every rest-touching pair at exactly
+   * EXPLODE_GATE_REST_EXEMPTION_MAX_DEPARTURE_MM of travel regardless of how
+   * deep it actually sits at rest, which is stale/over-strict against a
+   * genuine dead-end SCC's own real geometry (see isLiveRestExemptionActive's
+   * doc comment for the measured "0.5mm wall" this caused on the live gate
+   * before it was fixed there). This brute-force search re-tests every
+   * candidate order from scratch against real current positions, so it
+   * should hold every candidate to the SAME standard the live gate already
+   * uses, not a stricter one that can reject an order the live gate would
+   * actually pass.
+   */
+  function isSccOrderCandidateClean(
+    plan: ExplodeCertifiedPlan,
+    unitGateSolids: Map<string, ExplodeGateSolid>,
+    exemptions: Map<string, Set<string>>,
+    restDepthByPair: Map<string, Map<string, number>>,
+    sccKeySet: Set<string>,
+    stepPercent: number,
+    refineDepth: number = BREAKPOINT_BISECT_MAX_DEPTH,
+  ): boolean {
+    const windows = computeExplodeStageWindows(plan.totalStages);
+    const distanceAt = (assignment: ExplodeStageAssignment, amount: number): number => {
+      const window = windows[assignment.stage] ?? { start: 0, end: 1 };
+      const span = window.end - window.start;
+      const local =
+        span > 1e-9
+          ? THREE.MathUtils.clamp((amount - window.start) / span, 0, 1)
+          : amount >= window.start
+            ? 1
+            : 0;
+      return assignment.distance * local;
+    };
+
+    const sccAssignments = plan.assignments.filter((a) => sccKeySet.has(a.unitKey));
+    let violated = false;
+    const hasOverlapAt = (amount: number): boolean => {
+      const distanceByKey = new Map<string, number>();
+      for (const assignment of sccAssignments) {
+        distanceByKey.set(assignment.unitKey, distanceAt(assignment, amount));
+      }
+      let any = false;
+      for (let i = 0; i < sccAssignments.length; i++) {
+        const aKey = sccAssignments[i]!.unitKey;
+        for (let j = i + 1; j < sccAssignments.length; j++) {
+          const bKey = sccAssignments[j]!.unitKey;
+          const aDist = distanceByKey.get(aKey) ?? 0;
+          const bDist = distanceByKey.get(bKey) ?? 0;
+          if (isLiveRestExemptionActive(unitGateSolids, exemptions, restDepthByPair, aKey, aDist, bKey, bDist)) continue;
+          if (!arePartsClearAtDistances(unitGateSolids, aKey, aDist, bKey, bDist)) any = true;
+        }
+      }
+      if (any) violated = true;
+      return any;
+    };
+
+    const step = Math.max(0.0001, stepPercent / 100);
+    const amounts: number[] = [];
+    for (let a = 0; a <= 1 + 1e-9; a += step) amounts.push(Math.min(1, a));
+    if (amounts[amounts.length - 1] !== 1) amounts.push(1);
+    for (let a = 1 - step; a >= -1e-9; a -= step) amounts.push(Math.max(0, a));
+    if (amounts[amounts.length - 1] !== 0) amounts.push(0);
+
+    for (const amount of amounts) {
+      if (hasOverlapAt(amount)) return false;
+    }
+
+    // Fixed-grid pass alone can straddle a genuinely narrow window without
+    // ever landing inside it (see refineAroundBreakpoint's doc comment) -
+    // bisect every stage-window breakpoint too before declaring this
+    // candidate clean.
+    for (const breakpoint of computeStageWindowBreakpoints(windows)) {
+      refineAroundBreakpoint(breakpoint, step, hasOverlapAt, refineDepth);
+      if (violated) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Stage 6 extension: for a confirmed genuine dead-end SCC (every member
+   * blocked by another member of the SAME set in all 6 directions - the
+   * ordinary Kahn's-algorithm pass in computeExplodeOrderAssignment could
+   * free none of them), the naive fallback puts every member at the SAME
+   * stage with one shared least-bad-overall direction. That's not always
+   * safe: on the Stuffing Box, this naive choice let body's own chosen
+   * path genuinely sweep through the (still-at-rest) nut group's position
+   * - a real certified collision (62/201 samples, depth 11) that no
+   * amount of stage-BUMPING can fix, because nut's on-screen position
+   * during the colliding window is pinned to 0 by its stage WINDOW
+   * regardless of its resolved distance (Stage 7 only controls a unit's
+   * eventual distance, never when its window starts) - confirmed
+   * empirically (both the collision's persistence AND a real regression
+   * from a distance-only fix attempt) before writing this function.
+   *
+   * There is no formally-correct topological order for a genuine cycle,
+   * but a PARTICULAR order/direction/distance assignment can still turn
+   * out to be geometrically fine in practice - this SCC's other 14 of 15
+   * pairs already were, even under the naive assignment. So this
+   * brute-forces every permutation of the SCC's own members (capped at
+   * EXPLODE_SCC_MAX_PERMUTATION_UNITS; a real SCC larger than that keeps
+   * the naive fallback and says so, rather than hanging or silently
+   * guessing), gives each member its own stage in that permutation's
+   * order plus whichever direction has the fewest remaining SCC-internal
+   * blockers at that point (the same edge-count heuristic the ordinary
+   * Kahn pass already uses to break ties, generalized to "fewest" since a
+   * true SCC member never reaches zero), computes real Stage 7 distances
+   * for the whole plan, and certifies the result with the exact real
+   * mesh-vs-mesh oracle Stage 8 itself uses (isSccOrderCandidateClean) -
+   * restricted to pairs where BOTH members are in this SCC, since every
+   * other pair is already the ordinary pipeline's responsibility (and
+   * still gets the normal same-stage-collision bump pass afterward
+   * regardless of what this function returns - see
+   * planExplodeStagesAndDistances). Never consults any part name or
+   * fixture-specific knowledge - only real blocking-edge counts and the
+   * real mesh oracle, so the same search applies to any future assembly's
+   * genuine SCC. Returns null (keep the naive fallback) if no permutation
+   * certifies fully clean - that is a real, honest result (the rigid-unit
+   * SCC-collapse case the master plan's Section 4 describes, still
+   * deferred), not a bug in this search.
+   */
+  /**
+   * Cache wrapper around computeDeadEndSccOrderUncached - see
+   * explodeSccOrderSearchCache's own doc comment. Every real code path
+   * (the SCC-too-large early-out, the actual brute-force search) lives in
+   * the uncached function; this only decides hit vs. miss and makes sure a
+   * failed search doesn't poison the cache forever.
+   */
+  async function resolveDeadEndSccOrder(
+    sccKeys: string[],
+    baseStage: number,
+    units: DbgUnit[],
+    byDirection: Map<string, Map<string, string[]>>,
+    baseOrderByKey: Map<string, ExplodeUnitOrder>,
+    dbgSolids: Map<string, OverlapCheckPart>,
+    assemblyDiag: number,
+  ): Promise<ExplodeSccOrderResult> {
+    const cacheKey = buildSccOrderCacheKey(sccKeys, baseStage);
+    const cached = explodeSccOrderSearchCache.get(cacheKey);
+    if (cached) {
+      console.debug("[ExplodeView][DIAG][Stage6 SCC order search] cache hit", {
+        cacheKey,
+        sccKeys,
+        baseStage,
+      });
+      return cached;
+    }
+
+    const resultPromise = computeDeadEndSccOrderUncached(
+      sccKeys,
+      baseStage,
+      units,
+      byDirection,
+      baseOrderByKey,
+      dbgSolids,
+      assemblyDiag,
+    );
+    explodeSccOrderSearchCache.set(cacheKey, resultPromise);
+    // A search that throws must not leave a permanently-rejected promise
+    // cached - a later call (e.g. after fixing whatever caused the throw)
+    // should get a fresh attempt, not the same stale rejection forever.
+    resultPromise.catch(() => {
+      if (explodeSccOrderSearchCache.get(cacheKey) === resultPromise) {
+        explodeSccOrderSearchCache.delete(cacheKey);
+      }
+    });
+    return resultPromise;
+  }
+
+  async function computeDeadEndSccOrderUncached(
+    sccKeys: string[],
+    baseStage: number,
+    units: DbgUnit[],
+    byDirection: Map<string, Map<string, string[]>>,
+    baseOrderByKey: Map<string, ExplodeUnitOrder>,
+    dbgSolids: Map<string, OverlapCheckPart>,
+    assemblyDiag: number,
+  ): Promise<ExplodeSccOrderResult> {
+    if (sccKeys.length > EXPLODE_SCC_MAX_PERMUTATION_UNITS) {
+      console.debug(
+        "[ExplodeView][DIAG][Stage6 SCC order search] skipped - SCC too large for brute force",
+        { sccKeys, cap: EXPLODE_SCC_MAX_PERMUTATION_UNITS },
+      );
+      return null;
+    }
+
+    const sccKeySet = new Set(sccKeys);
+    const naturalOrder = units.map((u) => u.key).filter((k) => sccKeySet.has(k));
+    const directionNames = DBG_DIRECTIONS.map((d) => d.name);
+
+    // Exemptions and their rest depths depend only on rest-position geometry
+    // (both distances are 0 by definition), never on axis/order - safe to
+    // build once, from any valid solids map, and reuse across every
+    // candidate instead of rebuilding (and re-logging) it per permutation.
+    const baselineGateSolids = buildUnitGateSolids(units, dbgSolids, baseOrderByKey);
+    const exemptions = buildExplodeGateRestExemptions(baselineGateSolids);
+    const restDepthByPair = buildExplodeGateRestDepths(baselineGateSolids);
+
+    // Cheap-search depth for the per-permutation screen below (up to 5040
+    // candidates for the EXPLODE_SCC_MAX_PERMUTATION_UNITS=7 cap) - MUST be
+    // 0 (fixed-grid only, no recursive refinement) here. Measured directly
+    // (isolated by forcing SCC_SEARCH_MAX_FULL_VERIFICATIONS to 0 too): the
+    // bare 720-permutation x ~200-grid-point x 15-pair screen alone already
+    // costs ~50-60 SECONDS on Stuffing Box's 6-unit SCC, with NO refinement
+    // involved at all - a real, severe, PRE-EXISTING performance issue in
+    // this exhaustive search (555 of 720 permutations pass the coarse grid,
+    // so this is not "most candidates reject on sample 1" as this
+    // function's original doc comment assumed) that predates this session's
+    // bush<->bush fix and is out of scope to redesign here - flagged
+    // prominently in project memory instead of silently accepted. Adding
+    // ANY non-zero refinement depth here multiplies an already-expensive
+    // base cost further (measured: depth 3 pushed it to ~61s, i.e. ~10-20%
+    // more on top of the pre-existing baseline) - not worth it when the
+    // handful of candidates actually worth trusting get the real check
+    // below instead. Every candidate that passes this cheap grid-only
+    // screen is re-verified at FULL BREAKPOINT_BISECT_MAX_DEPTH rigor below
+    // (capped by SCC_SEARCH_MAX_FULL_VERIFICATIONS) before anything is
+    // actually adopted, so the task's "a narrow window can't hide from the
+    // search itself" requirement still holds for whatever this function
+    // returns - paying full rigor only on the least-disruptive handful of
+    // grid-passing candidates, never on all 5040.
+    const SCC_SEARCH_REFINE_DEPTH = 0;
+    // How many grid-passing candidates (least-disruptive/fewest-inversions
+    // first) get the expensive full-depth re-verification before giving up
+    // and reporting "no permutation certified clean" - kept small (not, say,
+    // 30) specifically because the pre-existing base cost above is already
+    // severe on its own; this only needs to cover the few candidates most
+    // likely to actually get adopted (fewest inversions), not an exhaustive
+    // fraction of the (here, 555-large) grid-passing set.
+    const SCC_SEARCH_MAX_FULL_VERIFICATIONS = 5;
+
+    const passed: {
+      orderByKey: Map<string, ExplodeUnitOrder>;
+      permutation: string[];
+      inversions: number;
+      plan: ExplodeCertifiedPlan;
+      unitGateSolids: Map<string, ExplodeGateSolid>;
+    }[] = [];
+    let permutationsTried = 0;
+
+    // Chunking budget for the loop below - this is the ~50-60 SECOND cost
+    // documented above, and it's pure synchronous CPU work with no natural
+    // await point of its own, so left alone it would block the main thread
+    // for the ENTIRE search in one call, long enough to trigger the
+    // browser's own "Page Unresponsive" dialog on a fresh file's first
+    // toggle (see explode-real-toggle-freeze project memory). Yielding
+    // every ~16ms (one frame budget) keeps the tab painting/responsive
+    // throughout without materially slowing the search itself - the yield
+    // calls add microtask/timer overhead, but at a ~16ms chunk size that
+    // overhead is a small fraction of the total, not a per-permutation tax.
+    const SCC_SEARCH_CHUNK_BUDGET_MS = 16;
+    let chunkStartedAt = performance.now();
+
+    for (const perm of generatePermutations(sccKeys)) {
+      permutationsTried += 1;
+      const candidateOrder = new Map(baseOrderByKey);
+      const remaining = new Set(perm);
+      perm.forEach((key, i) => {
+        remaining.delete(key);
+        const edgeCount = (dirName: string) =>
+          (byDirection.get(dirName)?.get(key) ?? []).filter((b) => remaining.has(b)).length;
+        const chosen = [...directionNames].sort((a, b) => edgeCount(a) - edgeCount(b))[0]!;
+        candidateOrder.set(key, {
+          unitKey: key,
+          stage: baseStage + i,
+          direction: chosen,
+          deadEnd: true,
+          deadEndReason:
+            "genuine SCC in all 6 directions - no formally-correct topological order exists, but this order/direction was found via a validated real-oracle permutation search, not the single least-bad-direction fallback",
+          sccOrderValidated: true,
+        });
+      });
+
+      const unitGateSolids = buildUnitGateSolids(units, dbgSolids, candidateOrder);
+      const distances = computeExplodeStageDistances(
+        units,
+        unitGateSolids,
+        exemptions,
+        candidateOrder,
+        assemblyDiag,
+        computeUnitsRelyingOn(units, byDirection, candidateOrder),
+      );
+      const plan = buildExplodeCertifiedPlan(units, Array.from(candidateOrder.values()), distances);
+
+      if (
+        isSccOrderCandidateClean(
+          plan,
+          unitGateSolids,
+          exemptions,
+          restDepthByPair,
+          sccKeySet,
+          1,
+          SCC_SEARCH_REFINE_DEPTH,
+        )
+      ) {
+        const inversions = countOrderInversions(perm, naturalOrder);
+        passed.push({ orderByKey: candidateOrder, permutation: perm, inversions, plan, unitGateSolids });
+      }
+
+      if (performance.now() - chunkStartedAt >= SCC_SEARCH_CHUNK_BUDGET_MS) {
+        await yieldToMainThread();
+        chunkStartedAt = performance.now();
+      }
+    }
+
+    // Full-rigor re-verification, least-disruptive candidate first - the
+    // cheap screen above can still let a false positive through (that's
+    // exactly the risk a shallow refineDepth accepts in exchange for
+    // speed), so nothing is adopted until it survives the real check too.
+    passed.sort((a, b) => a.inversions - b.inversions);
+    const verifyCandidates = passed.slice(0, SCC_SEARCH_MAX_FULL_VERIFICATIONS);
+    let best: (typeof passed)[number] | null = null;
+    for (const candidate of verifyCandidates) {
+      if (
+        isSccOrderCandidateClean(
+          candidate.plan,
+          candidate.unitGateSolids,
+          exemptions,
+          restDepthByPair,
+          sccKeySet,
+          1,
+          BREAKPOINT_BISECT_MAX_DEPTH,
+        )
+      ) {
+        best = candidate;
+        break;
+      }
+    }
+
+    if (!best) {
+      console.debug(
+        "[ExplodeView][DIAG][Stage6 SCC order search] no permutation certified clean",
+        {
+          sccKeys,
+          permutationsTried,
+          cheapPassCount: passed.length,
+          fullyVerifiedCount: verifyCandidates.length,
+        },
+      );
+      return null;
+    }
+
+    console.debug("[ExplodeView][DIAG][Stage6 SCC order search] resolved", {
+      sccKeys,
+      permutationsTried,
+      cheapPassCount: passed.length,
+      selectedPermutation: best.permutation,
+      inversions: best.inversions,
+    });
+
+    return {
+      orderByKey: best.orderByKey,
+      permutationsTried,
+      selectedPermutation: best.permutation,
+    };
+  }
+
+  /**
+   * Orchestrates Stage 6 (order) + Stage 7 (distance) into one cached plan,
+   * then iteratively resolves any real windowed-timeline collision
+   * (findWorstPlanCollisions above, the SAME oracle Stage 8 itself uses -
+   * not an approximate proxy, see that function's doc comment for why a
+   * same-stage-only proxy isn't sufficient) by bumping one member of the
+   * worst colliding pair to the next stage - always SAFE with respect to
+   * Stage 6's own blocking-order guarantee (a unit moving even later still
+   * has every true blocker already out of its way) - and recomputing Stage
+   * 7 distances, until the sweep is genuinely clean or `maxIterations` is
+   * reached.
+   *
+   * Bumping a stage only ever changes WHEN a unit starts moving, never the
+   * straight-line PATH it moves along - so it can only fix a collision that
+   * is genuinely a co-motion/timing issue (two movers' windows overlapping
+   * in time). A collision that recurs for the SAME pair right after a bump
+   * is, by construction, evidence it is NOT a timing issue for THAT pair -
+   * it's one unit's own chosen direction genuinely grazing the other's
+   * REST position somewhere along its path, independent of when either
+   * unit's window starts (found empirically on Stuffing Box's body<->4x
+   * nut - see resolveDeadEndSccOrder, which now runs BEFORE this loop
+   * specifically to give a genuine dead-end SCC's own members a real
+   * chance at a validated order/direction, rather than leaving that case
+   * to this loop's stage-bumping alone, which cannot fix a path-shaped
+   * collision).
+   *
+   * A pair proving stuck this way is NOT grounds to give up on the whole
+   * pass - a different pair (including one only exposed once an earlier
+   * bump reshuffled distances) can still be a genuine timing issue this
+   * loop CAN fix. So a stuck pair is recorded and skipped (never retried
+   * with the same bump - retrying would just reproduce the same outcome)
+   * while the loop keeps acting on whatever the next-worst NON-stuck pair
+   * is, until nothing unstuck remains or `maxIterations` is reached. The
+   * final `unresolvedResidual`/`unresolvedResiduals` reflect the TRUE
+   * final state of the returned plan (recomputed fresh, not just the
+   * pairs marked stuck along the way) - per the master plan's own
+   * definition of done, Stage 8's certification below will still show
+   * these residuals exactly, unrounded.
+   */
+  async function planExplodeStagesAndDistances(
+    units: DbgUnit[],
+    byDirection: Map<string, Map<string, string[]>>,
+    dbgSolids: Map<string, OverlapCheckPart>,
+    assemblyDiag: number,
+    maxIterations = 50,
+  ): Promise<{
+    plan: ExplodeCertifiedPlan;
+    unitGateSolids: Map<string, ExplodeGateSolid>;
+    exemptions: Map<string, Set<string>>;
+    restDepthByPair: Map<string, Map<string, number>>;
+    sameStageFixes: { a: string; b: string; movedUnit: string; fromStage: number; toStage: number }[];
+    unresolvedResidual: ExplodeCertificationOverlap | null;
+    unresolvedResiduals: ExplodeCertificationOverlap[];
+    sccOrderSearch: {
+      sccKeys: string[];
+      permutationsTried: number;
+      selectedPermutation: string[] | null;
+      resolved: boolean;
+    }[];
+    /** TEMP diagnostic (see project memory "reconcile bush/shaft" round) - why the bump loop stopped: ran out of maxIterations, exhausted every non-stuck pair, or genuinely reached zero collisions. */
+    exitReason?: "max-iterations" | "all-remaining-stuck" | "clean";
+    iterationsUsed?: number;
+    stuckPairKeysDiag?: string[];
+    attemptedBumpsDiag?: string[];
+    sameStageRepairDiag?:
+      | {
+          roundsUsed: number;
+          converged: boolean;
+          hitCap: boolean;
+          finalDirtyPairs: string[];
+          roundHistory: { round: number; maxDelta: number; distances: Record<string, number> }[];
+        }
+      | null;
+  }> {
+    const orderAssignment = computeExplodeOrderAssignment(units, byDirection);
+    const orderByKey = new Map(orderAssignment.map((o) => [o.unitKey, o]));
+
+    // Give a genuine dead-end SCC a real search for a validated per-member
+    // order/direction (resolveDeadEndSccOrder) before falling back to the
+    // naive same-stage/least-bad-direction assignment computeExplodeOrderAssignment
+    // already put in orderByKey. A dead-end block is always the LAST stage
+    // Stage 6 produces (computeExplodeOrderAssignment stops the moment it
+    // hits one), so every dead-end unit shares one stage number and this
+    // only ever needs to run once per plan.
+    const sccOrderSearch: {
+      sccKeys: string[];
+      permutationsTried: number;
+      selectedPermutation: string[] | null;
+      resolved: boolean;
+    }[] = [];
+    const deadEndUnits = orderAssignment.filter((o) => o.deadEnd);
+    if (deadEndUnits.length > 1) {
+      const sccKeys = deadEndUnits.map((o) => o.unitKey);
+      const baseStage = deadEndUnits[0]!.stage;
+      const resolved = await resolveDeadEndSccOrder(
+        sccKeys,
+        baseStage,
+        units,
+        byDirection,
+        orderByKey,
+        dbgSolids,
+        assemblyDiag,
+      );
+      if (resolved) {
+        for (const [key, order] of resolved.orderByKey) orderByKey.set(key, order);
+      }
+      sccOrderSearch.push({
+        sccKeys,
+        permutationsTried: resolved?.permutationsTried ?? 0,
+        selectedPermutation: resolved?.selectedPermutation ?? null,
+        resolved: resolved !== null,
+      });
+    }
+
+    const unitGateSolids = buildUnitGateSolids(units, dbgSolids, orderByKey);
+    const exemptions = buildExplodeGateRestExemptions(unitGateSolids);
+    const restDepthByPair = buildExplodeGateRestDepths(unitGateSolids);
+    // Direction assignments are now final - the sameStageFixes bump loop
+    // below only ever rewrites STAGE (see its own orderByKey.set call),
+    // never DIRECTION - so this can be computed once and reused for every
+    // computeExplodeStageDistances call this function makes.
+    const unitsRelyingOn = computeUnitsRelyingOn(units, byDirection, orderByKey);
+    let distances = computeExplodeStageDistances(
+      units,
+      unitGateSolids,
+      exemptions,
+      orderByKey,
+      assemblyDiag,
+      unitsRelyingOn,
+    );
+    let plan = buildExplodeCertifiedPlan(units, Array.from(orderByKey.values()), distances);
+
+    const sameStageFixes: {
+      a: string;
+      b: string;
+      movedUnit: string;
+      fromStage: number;
+      toStage: number;
+    }[] = [];
+    // Per-pair: which unit this loop has already bumped to try to clear
+    // it. If that exact (pair, movedUnit) combination comes back around,
+    // bumping it again would just reproduce the same outcome - see the
+    // doc comment above for why that's evidence of a path-shaped (not
+    // timing) conflict for THIS pair specifically, not a reason to stop
+    // resolving every OTHER pair too.
+    const attemptedBumps = new Set<string>();
+    const stuckPairKeys = new Set<string>();
+    let collisions = findWorstPlanCollisions(plan, unitGateSolids, exemptions, restDepthByPair, 1);
+    let iterationsUsed = 0;
+    let brokeAllStuck = false;
+    for (let iteration = 0; iteration < maxIterations && collisions.length > 0; iteration++) {
+      iterationsUsed = iteration + 1;
+      const collision = collisions.find(
+        (c) => !stuckPairKeys.has([c.a, c.b].sort().join("::")),
+      );
+      if (!collision) {
+        brokeAllStuck = true;
+        break; // everything left is already-proven-stuck
+      }
+      const collisionKey = [collision.a, collision.b].sort().join("::");
+      // Which of the two collision members to bump to a LATER stage. The
+      // old "always bump whichever key sorts higher" heuristic doesn't know
+      // that a unit OTHER units rely on clearing first (unitsRelyingOn -
+      // see that function's doc comment) must stay AT OR BEFORE those
+      // dependents, never after: bumping the relied-upon unit later only
+      // delays when its dependents can clear, the opposite of what a
+      // same-stage fix should do. Confirmed root cause of the Sheet Metal
+      // Clamp cotter pin's backwards stage 0->1->2 bump: rivet's own sweep
+      // relies on cotter clearing first (a real mesh blocker relationship,
+      // not a naming coincidence), so cotter must never be the member
+      // pushed later. If one collision member directly relies on the
+      // other, always bump the DEPENDENT - safe, since it's already
+      // supposed to sit at/after its blocker - and never the relied-upon
+      // member. With no direct reliance between this specific pair, fall
+      // back to whichever member has fewer total dependents assembly-wide
+      // (minimizes collateral disruption elsewhere), then the original
+      // alphabetical tie-break.
+      const aBlocksB = unitsRelyingOn.get(collision.a)?.has(collision.b) ?? false;
+      const bBlocksA = unitsRelyingOn.get(collision.b)?.has(collision.a) ?? false;
+      let movedUnit: string;
+      if (aBlocksB && !bBlocksA) {
+        movedUnit = collision.b;
+      } else if (bBlocksA && !aBlocksB) {
+        movedUnit = collision.a;
+      } else {
+        const aDependents = unitsRelyingOn.get(collision.a)?.size ?? 0;
+        const bDependents = unitsRelyingOn.get(collision.b)?.size ?? 0;
+        movedUnit =
+          aDependents !== bDependents
+            ? aDependents < bDependents
+              ? collision.a
+              : collision.b
+            : collision.a < collision.b
+              ? collision.b
+              : collision.a;
+      }
+      const attemptKey = `${collisionKey}::${movedUnit}`;
+      if (attemptedBumps.has(attemptKey)) {
+        // This pair recurred after its bump attempt - mark it stuck (so
+        // future passes over `collisions` skip it) and keep going. The
+        // plan itself hasn't changed, so `collisions` is still accurate;
+        // no need to recompute before trying the next-worst pair.
+        stuckPairKeys.add(collisionKey);
+        continue;
+      }
+      attemptedBumps.add(attemptKey);
+      const current = orderByKey.get(movedUnit)!;
+      const fromStage = current.stage;
+      orderByKey.set(movedUnit, { ...current, stage: fromStage + 1 });
+      sameStageFixes.push({
+        a: collision.a,
+        b: collision.b,
+        movedUnit,
+        fromStage,
+        toStage: fromStage + 1,
+      });
+      distances = computeExplodeStageDistances(
+        units,
+        unitGateSolids,
+        exemptions,
+        orderByKey,
+        assemblyDiag,
+        unitsRelyingOn,
+      );
+      plan = buildExplodeCertifiedPlan(units, Array.from(orderByKey.values()), distances);
+      collisions = findWorstPlanCollisions(plan, unitGateSolids, exemptions, restDepthByPair, 1);
+    }
+
+    // Report the TRUE final state of the returned plan, not just the
+    // pairs this loop happened to mark stuck along the way (e.g. one
+    // maxIterations could cut off before ever visiting) - `collisions` is
+    // already exactly that: recomputed after every plan change, untouched
+    // otherwise, so it's always in sync with `plan` at this point.
+    const unresolvedResiduals = collisions;
+    const unresolvedResidual = unresolvedResiduals[0] ?? null;
+    const exitReason: "max-iterations" | "all-remaining-stuck" | "clean" =
+      collisions.length === 0 ? "clean" : brokeAllStuck ? "all-remaining-stuck" : "max-iterations";
+
+    return {
+      plan,
+      unitGateSolids,
+      exemptions,
+      restDepthByPair,
+      sameStageFixes,
+      unresolvedResidual,
+      unresolvedResiduals,
+      sccOrderSearch,
+      exitReason,
+      iterationsUsed,
+      stuckPairKeysDiag: Array.from(stuckPairKeys),
+      attemptedBumpsDiag: Array.from(attemptedBumps),
+      sameStageRepairDiag: lastSameStageRepairDiag,
+    };
+  }
+
+  // ===========================================================================
+  // Live per-part order collision fix - the SAME "detect a real windowed
+  // collision, bump one member's stage, and if that pair recurs run a small
+  // certified permutation search" approach planExplodeStagesAndDistances/
+  // resolveDeadEndSccOrder above already use for the OFFLINE per-UNIT plan,
+  // applied here to computeExplodeBlockingOrder's LIVE per-PART stage
+  // assignment - the thing setExplodeAmount/Play/the slider actually render
+  // TODAY, well before Phase 4 wires the offline plan into rendering (see
+  // explode-view-master-plan.md).
+  //
+  // Necessary because the two pipelines are not the same graph: Phase 1-2's
+  // component grouping collapses e.g. the Stuffing Box's two bush parts
+  // into one rigid "2x bush" DBG unit (assumed co-motion) for the offline
+  // planner, so the offline dead-end-SCC search above never modeled a
+  // bush<->bush PAIR at all - it structurally can't, since two members of
+  // one merged unit never get an inter-unit edge. But
+  // computeExplodeBlockingOrder gives each bush its own independent
+  // axis/stage live (confirmed empirically: opposite signed Z axes, stages
+  // 9 and 10), and real bisection-refined certification found a genuine
+  // ~2.06%-wide (amount 70.04%-72.10%), up to ~55mm-deep mutual collision
+  // window between them that a fixed 1% grid almost entirely hides (it
+  // shows exactly one 2.976mm sample at 72% and nothing else) - see project
+  // memory "explode bush window and live order fix" for the full
+  // characterization, including 22 OTHER live part-pairs across this same
+  // fixture found to have the same class of gap.
+  //
+  // The runtime gate's own whole-assembly veto does catch this live -
+  // checkExplodeOverlapsAtCurrentPosition (the real displayed geometry)
+  // never showed a visible bush<->bush overlap in any real setExplodeAmount
+  // sweep tested - but doing so exposed a separate, more severe pre-existing
+  // bug: once the veto freezes here, it never recovered for the remainder
+  // of a real reproduced sweep (whole-assembly-veto stayed active from
+  // amount 70.2% all the way through 100%). That freeze-recovery bug lives
+  // in the gate itself (computeGatedDistancesForAmount/resolveExplodeGateStep)
+  // and is explicitly OUT OF SCOPE here - see that same memory for
+  // why fixing the ROOT order so the gate never needs to trigger for this
+  // pair is the right fix, not a patch to the veto's recovery logic. The
+  // live per-frame gate/veto stays fully active regardless, as the
+  // master-plan-mandated defense-in-depth backstop.
+  // ===========================================================================
+
+  type LivePlanCollisionItem = {
+    partKey: string;
+    name: string;
+    axis: THREE.Vector3;
+  };
+
+  /** ExplodeGateSolid map for live per-part collision certification, reusing Pass 6's already-built rest-position solids (meshBlockerSolids) - no new geometry, same pattern as buildUnitGateSolids for DBG units. */
+  function buildLivePartGateSolids(
+    items: LivePlanCollisionItem[],
+    meshBlockerSolids: Map<string, OverlapCheckPart>,
+  ): Map<string, ExplodeGateSolid> {
+    const out = new Map<string, ExplodeGateSolid>();
+    for (const item of items) {
+      const solid = meshBlockerSolids.get(item.partKey);
+      if (!solid) continue;
+      out.set(item.partKey, {
+        partKey: item.partKey,
+        name: item.name,
+        axis: item.axis,
+        geometry: solid.geometry,
+        bvh: solid.bvh,
+      });
+    }
+    return out;
+  }
+
+  /** Pass 7's live stage->distance multiplier (see the Pass 7 comment near computeExplodePlan's Pass 6/7 boundary) - factored out so the collision-fix certification below and the real Pass 7 assignment loop can never drift into testing two different distance formulas. */
+  function computeLiveStageDistance(
+    baseOffset: number,
+    stage: number,
+    totalStages: number,
+  ): number {
+    const multiplier =
+      totalStages > 1
+        ? THREE.MathUtils.lerp(
+            EXPLODE_STAGE_DISTANCE_MIN_MULTIPLIER,
+            EXPLODE_STAGE_DISTANCE_MAX_MULTIPLIER,
+            stage / (totalStages - 1),
+          )
+        : (EXPLODE_STAGE_DISTANCE_MIN_MULTIPLIER + EXPLODE_STAGE_DISTANCE_MAX_MULTIPLIER) / 2;
+    return baseOffset * multiplier;
+  }
+
+  /**
+   * Collapses raw (possibly gap-containing, possibly non-consecutive)
+   * stage numbers into the SAME dense 0..N-1 form
+   * mergeManualStageOverrides produces for actual rendering - equal raw
+   * values merge into one final stage, gaps close, relative order is
+   * preserved. Every live-pipeline certification/search function below
+   * MUST run its stage numbers through this before computing windows;
+   * skipping it is exactly the bug found empirically on Sheet Metal Clamp
+   * (see certifyLivePartStagePlan's doc comment).
+   */
+  function denseRankStages(rawStageByPartKey: Map<string, number>): Map<string, number> {
+    const entries = Array.from(rawStageByPartKey.entries()).sort((a, b) => a[1] - b[1]);
+    const result = new Map<string, number>();
+    let currentStage = -1;
+    let lastValue: number | null = null;
+    for (const [key, value] of entries) {
+      if (lastValue === null || Math.abs(value - lastValue) > 1e-9) {
+        currentStage += 1;
+        lastValue = value;
+      }
+      result.set(key, currentStage);
+    }
+    return result;
+  }
+
+  /**
+   * Real windowed certification for the LIVE per-part stage plan - same
+   * shape as certifyExplodeCertifiedPlan (Stage 8) but over individual
+   * parts using their own stageByPartKey/axis, with the same
+   * breakpoint-bisection refinement (refineAroundBreakpoint) so a narrow
+   * window can't hide between two agreeing fixed-grid samples here either -
+   * this is the exact class of bug that hid the bush<->bush window from a
+   * naive fixed-grid check. Returns every genuinely colliding pair found,
+   * worst depth first; an empty result means certified clean.
+   *
+   * `refineDepth` and `stopEarly` trade rigor for speed - REQUIRED, not
+   * optional, because this function sits in two very different contexts:
+   * an exhaustive SEARCH (resolveLivePlanStageCollisions' bump loop,
+   * resolveLiveCollisionPairOrder's candidate screening) calls this many
+   * times per computeExplodePlan(), so it must pass a small `refineDepth`
+   * (cheap) and `stopEarly: true` (return the FIRST colliding pair found,
+   * not an exhaustive worst-first list - measured necessary: a single
+   * full-depth, non-early-exiting call over 13 parts is expensive enough
+   * that calling it naively from inside a 14-candidate search turned one
+   * Explode View toggle into a multi-minute hang). The ONE-TIME final
+   * verification of whatever the search converges on must instead pass the
+   * full BREAKPOINT_BISECT_MAX_DEPTH and `stopEarly: false`, so the
+   * committed result is genuinely bisection-certified, not just
+   * cheap-search-clean.
+   */
+  function certifyLivePartStagePlan(
+    items: LivePlanCollisionItem[],
+    solids: Map<string, ExplodeGateSolid>,
+    exemptions: Map<string, Set<string>>,
+    rawStageByPartKey: Map<string, number>,
+    _totalStagesHint: number,
+    baseOffset: number,
+    stepPercent: number,
+    refineDepth: number,
+    stopEarly: boolean,
+  ): { a: string; b: string; aName: string; bName: string; depth: number }[] {
+    // MUST dense-rank before computing windows - mergeManualStageOverrides
+    // (the code that actually builds the RENDERED stageWindows) always
+    // dense-ranks first, collapsing gaps and merging equal keys into one
+    // stage. Certifying against raw, possibly non-dense stage numbers
+    // computes a DIFFERENT set of windows than what will actually render -
+    // a real bug found empirically on Sheet Metal Clamp: bumping one part
+    // from stage 0 to 1 when another part already sat at stage 1 merged
+    // them into the SAME final rendered stage/window (dense-ranking
+    // collapses equal keys), so the certified "clean" result didn't match
+    // the real runtime gate, which still (correctly) vetoed the pair. This
+    // dense-ranks on every call so the two can never diverge again,
+    // regardless of what raw stage numbers a caller passes in.
+    const stageByPartKey = denseRankStages(rawStageByPartKey);
+    const totalStages = 1 + Math.max(0, ...Array.from(stageByPartKey.values()));
+    const windows = computeExplodeStageWindows(totalStages);
+    const distanceAt = (partKey: string, amount: number): number => {
+      const stage = stageByPartKey.get(partKey) ?? 0;
+      const window = windows[stage] ?? { start: 0, end: 1 };
+      const span = window.end - window.start;
+      const local =
+        span > 1e-9
+          ? THREE.MathUtils.clamp((amount - window.start) / span, 0, 1)
+          : amount >= window.start
+            ? 1
+            : 0;
+      return computeLiveStageDistance(baseOffset, stage, totalStages) * local;
+    };
+
+    const found = new Map<
+      string,
+      { a: string; b: string; aName: string; bName: string; depth: number }
+    >();
+    let stopped = false;
+    const hasOverlapAt = (amount: number): boolean => {
+      if (stopped) return true;
+      let any = false;
+      for (let i = 0; i < items.length; i++) {
+        const aItem = items[i]!;
+        for (let j = i + 1; j < items.length; j++) {
+          const bItem = items[j]!;
+          const aDist = distanceAt(aItem.partKey, amount);
+          const bDist = distanceAt(bItem.partKey, amount);
+          if (isRestExemptionActive(exemptions, aItem.partKey, aDist, bItem.partKey, bDist)) {
+            continue;
+          }
+          if (arePartsClearAtDistances(solids, aItem.partKey, aDist, bItem.partKey, bDist)) {
+            continue;
+          }
+          any = true;
+          const a = solids.get(aItem.partKey)!;
+          const b = solids.get(bItem.partKey)!;
+          const aBox0 = a.geometry.boundingBox;
+          const bBox0 = b.geometry.boundingBox;
+          const depth =
+            aBox0 && bBox0
+              ? computeAabbOverlapDepth(
+                  aBox0.clone().translate(a.axis.clone().multiplyScalar(aDist)),
+                  bBox0.clone().translate(b.axis.clone().multiplyScalar(bDist)),
+                )
+              : 0;
+          const key = [aItem.partKey, bItem.partKey].sort().join("::");
+          const existing = found.get(key);
+          if (!existing || depth > existing.depth) {
+            found.set(key, {
+              a: aItem.partKey,
+              b: bItem.partKey,
+              aName: a.name,
+              bName: b.name,
+              depth,
+            });
+          }
+          if (stopEarly) {
+            stopped = true;
+            return true;
+          }
+        }
+      }
+      return any;
+    };
+
+    const step = Math.max(0.0001, stepPercent / 100);
+    for (let a = 0; a <= 1 + 1e-9 && !stopped; a += step) hasOverlapAt(Math.min(1, a));
+    for (let a = 1 - step; a >= -1e-9 && !stopped; a -= step) hasOverlapAt(Math.max(0, a));
+    for (const breakpoint of computeStageWindowBreakpoints(windows)) {
+      if (stopped) break;
+      refineAroundBreakpoint(breakpoint, step, hasOverlapAt, refineDepth);
+    }
+
+    return Array.from(found.values()).sort((x, y) => y.depth - x.depth);
+  }
+
+  // Matches resolveDeadEndSccOrder's own cap - a recurring live pair should
+  // only ever need its own 2-3 members reordered, never anywhere near this
+  // size; reusing the same constant keeps the two search budgets consistent
+  // rather than picking a second arbitrary number.
+  const LIVE_COLLISION_MAX_STAGE_GAP = EXPLODE_SCC_MAX_PERMUTATION_UNITS;
+  // Cheap-search parameters for certifyLivePartStagePlan (see its doc
+  // comment) - used everywhere EXCEPT the one final verification pass.
+  const LIVE_COLLISION_SEARCH_STEP_PERCENT = 2;
+  const LIVE_COLLISION_SEARCH_REFINE_DEPTH = 3;
+
+  /**
+   * For a pair of live parts whose collision RECURRED after a plain stage
+   * bump (see resolveLivePlanStageCollisions below) - i.e. moving one of
+   * them one stage later didn't help, so this isn't a co-motion timing
+   * issue a bigger bump alone would fix either - tries both relative
+   * orders of the pair at increasing stage separation (axes stay fixed;
+   * separation/order is the only lever this pipeline has, unlike the
+   * offline search which also picks a direction per candidate), certifying
+   * each candidate with the exact same bisection-refined oracle. Adopts the
+   * first (smallest, least-disruptive) candidate that leaves the WHOLE
+   * plan clean, not just this pair - a reorder that fixes this pair by
+   * creating a new collision elsewhere isn't a real fix. Returns null (keep
+   * the naive bumped assignment, report the residual honestly) if nothing
+   * up to the cap certifies clean.
+   */
+  function resolveLiveCollisionPairOrder(
+    pairKeys: readonly [string, string],
+    items: LivePlanCollisionItem[],
+    solids: Map<string, ExplodeGateSolid>,
+    exemptions: Map<string, Set<string>>,
+    stageByPartKey: Map<string, number>,
+    baseOffset: number,
+  ): Map<string, number> | null {
+    const [aKey, bKey] = pairKeys;
+    const baseStage = Math.min(stageByPartKey.get(aKey) ?? 0, stageByPartKey.get(bKey) ?? 0);
+
+    for (let gap = 1; gap <= LIVE_COLLISION_MAX_STAGE_GAP; gap++) {
+      for (const [firstKey, secondKey] of [
+        [aKey, bKey],
+        [bKey, aKey],
+      ] as [string, string][]) {
+        const candidate = new Map(stageByPartKey);
+        candidate.set(firstKey, baseStage);
+        candidate.set(secondKey, baseStage + gap);
+        const totalStages = 1 + Math.max(0, ...Array.from(candidate.values()));
+        const overlaps = certifyLivePartStagePlan(
+          items,
+          solids,
+          exemptions,
+          candidate,
+          totalStages,
+          baseOffset,
+          LIVE_COLLISION_SEARCH_STEP_PERCENT,
+          LIVE_COLLISION_SEARCH_REFINE_DEPTH,
+          true,
+        );
+        if (overlaps.length === 0) {
+          console.debug("[ExplodeView][DIAG][live collision order search] resolved", {
+            pair: [aKey, bKey],
+            firstKey,
+            secondKey,
+            gap,
+          });
+          return candidate;
+        }
+      }
+    }
+    console.debug("[ExplodeView][DIAG][live collision order search] no candidate certified clean", {
+      pair: [aKey, bKey],
+    });
+    return null;
+  }
+
+  /**
+   * Live-pipeline counterpart to planExplodeStagesAndDistances's stage-bump
+   * loop: iteratively finds the worst real windowed collision in the
+   * CURRENT live per-part stage assignment (certifyLivePartStagePlan above)
+   * and bumps one member to the next stage - always safe with respect to
+   * computeExplodeBlockingOrder's own topological guarantee the same way
+   * the offline loop's bump is, since a part moving even later still has
+   * every blocker already out of its way. A pair that recurs right after
+   * its own bump is, by the same reasoning planExplodeStagesAndDistances
+   * documents, evidence the collision is path-shaped (one part's own
+   * chosen axis genuinely grazes the other's rest position) rather than a
+   * co-motion timing issue a further bump could ever fix - at that point
+   * this hands off to resolveLiveCollisionPairOrder's small certified
+   * search instead of bumping uselessly. If nothing certifies clean, the
+   * naive bumped assignment is kept and the residual reported honestly
+   * (never hidden) - the live runtime gate/whole-assembly-veto remains the
+   * defense-in-depth backstop for that residual regardless (see the master
+   * plan).
+   */
+  function resolveLivePlanStageCollisions(
+    items: LivePlanCollisionItem[],
+    meshBlockerSolids: Map<string, OverlapCheckPart>,
+    initialStageByPartKey: Map<string, number>,
+    baseOffset: number,
+    maxIterations = 20,
+  ): {
+    stageByPartKey: Map<string, number>;
+    fixes: { a: string; b: string; movedPart: string; fromStage: number; toStage: number }[];
+    unresolvedResidual: { a: string; b: string; aName: string; bName: string; depth: number } | null;
+  } {
+    const solids = buildLivePartGateSolids(items, meshBlockerSolids);
+    const exemptions = buildExplodeGateRestExemptions(solids);
+    const stageByPartKey = new Map(initialStageByPartKey);
+    const totalStagesOf = (m: Map<string, number>): number =>
+      1 + Math.max(0, ...Array.from(m.values()));
+
+    const fixes: {
+      a: string;
+      b: string;
+      movedPart: string;
+      fromStage: number;
+      toStage: number;
+    }[] = [];
+    let unresolvedResidual: {
+      a: string;
+      b: string;
+      aName: string;
+      bName: string;
+      depth: number;
+    } | null = null;
+    let lastCollisionKey: string | null = null;
+
+    for (let iteration = 0; iteration < maxIterations; iteration++) {
+      const totalStages = totalStagesOf(stageByPartKey);
+      const overlaps = certifyLivePartStagePlan(
+        items,
+        solids,
+        exemptions,
+        stageByPartKey,
+        totalStages,
+        baseOffset,
+        LIVE_COLLISION_SEARCH_STEP_PERCENT,
+        LIVE_COLLISION_SEARCH_REFINE_DEPTH,
+        true,
+      );
+      if (overlaps.length === 0) break;
+      console.debug("[ExplodeView][DIAG][live collision fix] iteration", {
+        iteration,
+        totalStages,
+        overlapCount: overlaps.length,
+        worst: { a: overlaps[0]!.aName, b: overlaps[0]!.bName, depth: Number(overlaps[0]!.depth.toFixed(3)) },
+      });
+      const worst = overlaps[0]!;
+      const collisionKey = [worst.a, worst.b].sort().join("::");
+
+      if (collisionKey === lastCollisionKey) {
+        const resolved = resolveLiveCollisionPairOrder(
+          [worst.a, worst.b],
+          items,
+          solids,
+          exemptions,
+          stageByPartKey,
+          baseOffset,
+        );
+        if (resolved) {
+          for (const [key, value] of resolved) stageByPartKey.set(key, value);
+          lastCollisionKey = null; // give the reordered state a fresh chance
+          continue;
+        }
+        unresolvedResidual = worst;
+        break;
+      }
+
+      lastCollisionKey = collisionKey;
+      const movedPart = worst.a < worst.b ? worst.b : worst.a;
+      const fromStage = stageByPartKey.get(movedPart) ?? 0;
+      const toStage = fromStage + 1;
+      stageByPartKey.set(movedPart, toStage);
+      fixes.push({ a: worst.a, b: worst.b, movedPart, fromStage, toStage });
+    }
+
+    // The loop above only ever used the CHEAP search parameters (see
+    // certifyLivePartStagePlan's doc comment) - re-certify whatever it
+    // converged on ONCE, at full bisection rigor, before trusting it. This
+    // is the same "search cheap, certify the final answer for real" split
+    // resolveDeadEndSccOrder's own permutation search already relies on,
+    // just made explicit here since this loop's early-exit search mode
+    // makes it more load-bearing: a residual the cheap search missed must
+    // still be reported honestly, never silently accepted as clean.
+    if (!unresolvedResidual) {
+      const finalOverlaps = certifyLivePartStagePlan(
+        items,
+        solids,
+        exemptions,
+        stageByPartKey,
+        totalStagesOf(stageByPartKey),
+        baseOffset,
+        1,
+        BREAKPOINT_BISECT_MAX_DEPTH,
+        false,
+      );
+      if (finalOverlaps.length > 0) {
+        console.debug("[ExplodeView][DIAG][live collision fix] final rigorous check found a residual the cheap search missed", {
+          overlapCount: finalOverlaps.length,
+          worst: {
+            a: finalOverlaps[0]!.aName,
+            b: finalOverlaps[0]!.bName,
+            depth: Number(finalOverlaps[0]!.depth.toFixed(3)),
+          },
+        });
+        unresolvedResidual = finalOverlaps[0]!;
+      }
+    }
+
+    return { stageByPartKey, fixes, unresolvedResidual };
+  }
+
+  /**
+   * Stage 8: full-plan certification. Samples the CACHED plan (Stage 6/7's
+   * output - entirely independent of the live per-frame gate/rendering) at
+   * `stepPercent`-wide increments across the whole [0,1] timeline, forward
+   * then back down to 0, and checks EVERY pair at EVERY sample with the
+   * same real mesh-vs-mesh oracle the rest of this file already trusts
+   * (arePartsClearAtDistances - findWholeAssemblyOverlaps's all-pairs
+   * shape, not just each unit's immediate DBG neighbors). Reuses
+   * computeExplodeStageWindows unchanged for stage-index -> [start,end]
+   * window - it doesn't care where the stage numbers came from. Returns
+   * RAW per-sample data, never a pass/fail summary - see the master plan's
+   * Â§9 definition of done and this task's "report exactly" instruction.
+   *
+   * Exemption standard: isLiveRestExemptionActive (each rest-touching pair
+   * bounded by its OWN real rest penetration depth), matching the live
+   * gate and resolveDeadEndSccOrder's isSccOrderCandidateClean - not the
+   * flat-threshold isRestExemptionActive this function used previously.
+   * That flat threshold could flag a pair "dirty" here purely because this
+   * cross-check held it to a stricter standard than whatever oracle
+   * actually produced the plan it's certifying, which would silently veto
+   * a genuinely-valid resolveDeadEndSccOrder result at the Phase 4 wiring
+   * step (see certifiedPlanEligible's dirtyInCertification term). Always
+   * at least as permissive as the flat threshold for any rest-touching
+   * pair (it can only extend how far a pair may travel before being
+   * flagged, never shrink it), so this cannot newly flag a pair the old
+   * standard called clean.
+   */
+  function certifyExplodeCertifiedPlan(
+    plan: ExplodeCertifiedPlan,
+    unitGateSolids: Map<string, ExplodeGateSolid>,
+    exemptions: Map<string, Set<string>>,
+    restDepthByPair: Map<string, Map<string, number>>,
+    stepPercent = 1,
+  ): ExplodeCertificationReport {
+    const windows = computeExplodeStageWindows(plan.totalStages);
+    const distanceAt = (assignment: ExplodeStageAssignment, amount: number): number => {
+      const window = windows[assignment.stage] ?? { start: 0, end: 1 };
+      const span = window.end - window.start;
+      const local =
+        span > 1e-9
+          ? THREE.MathUtils.clamp((amount - window.start) / span, 0, 1)
+          : amount >= window.start
+            ? 1
+            : 0;
+      return assignment.distance * local;
+    };
+
+    const step = Math.max(0.0001, stepPercent / 100);
+    const amounts: { amount: number; phase: "forward" | "reverse" }[] = [];
+    for (let a = 0; a <= 1 + 1e-9; a += step) {
+      amounts.push({ amount: Math.min(1, a), phase: "forward" });
+    }
+    if (amounts[amounts.length - 1]!.amount !== 1) {
+      amounts.push({ amount: 1, phase: "forward" });
+    }
+    for (let a = 1 - step; a >= -1e-9; a -= step) {
+      amounts.push({ amount: Math.max(0, a), phase: "reverse" });
+    }
+    if (amounts[amounts.length - 1]!.amount !== 0) {
+      amounts.push({ amount: 0, phase: "reverse" });
+    }
+
+    const keys = plan.assignments.map((a) => a.unitKey);
+    const samples: ExplodeCertificationSample[] = [];
+    let samplesWithOverlap = 0;
+    let maxDepth = 0;
+
+    const overlapsAtAmount = (amount: number): ExplodeCertificationOverlap[] => {
+      const distanceByKey = new Map<string, number>();
+      for (const assignment of plan.assignments) {
+        distanceByKey.set(assignment.unitKey, distanceAt(assignment, amount));
+      }
+      const overlaps: ExplodeCertificationOverlap[] = [];
+      for (let i = 0; i < keys.length; i++) {
+        const aKey = keys[i]!;
+        for (let j = i + 1; j < keys.length; j++) {
+          const bKey = keys[j]!;
+          const aDist = distanceByKey.get(aKey) ?? 0;
+          const bDist = distanceByKey.get(bKey) ?? 0;
+          if (isLiveRestExemptionActive(unitGateSolids, exemptions, restDepthByPair, aKey, aDist, bKey, bDist)) continue;
+          if (arePartsClearAtDistances(unitGateSolids, aKey, aDist, bKey, bDist)) continue;
+          const a = unitGateSolids.get(aKey)!;
+          const b = unitGateSolids.get(bKey)!;
+          const aBox0 = a.geometry.boundingBox;
+          const bBox0 = b.geometry.boundingBox;
+          const depth =
+            aBox0 && bBox0
+              ? computeAabbOverlapDepth(
+                  aBox0.clone().translate(a.axis.clone().multiplyScalar(aDist)),
+                  bBox0.clone().translate(b.axis.clone().multiplyScalar(bDist)),
+                )
+              : 0;
+          overlaps.push({ a: aKey, b: bKey, aName: a.name, bName: b.name, depth });
+        }
+      }
+      return overlaps;
+    };
+
+    const recordSample = (
+      amount: number,
+      phase: "forward" | "reverse",
+      overlaps: ExplodeCertificationOverlap[],
+    ): void => {
+      if (overlaps.length > 0) {
+        samplesWithOverlap += 1;
+        for (const o of overlaps) maxDepth = Math.max(maxDepth, o.depth);
+      }
+      samples.push({ amount, phase, overlaps });
+    };
+
+    for (const { amount, phase } of amounts) recordSample(amount, phase, overlapsAtAmount(amount));
+
+    // Fixed-grid pass alone can straddle a genuinely narrow window without
+    // ever landing inside it (a real ~2%-wide, ~55mm-deep Stuffing Box
+    // bush<->bush window did exactly this to the old 1%-only version of
+    // this function - see refineAroundBreakpoint's doc comment). Bisect
+    // every stage-window breakpoint too, folding any additional dirty
+    // sample straight into the same totals so "0/N" here always means zero
+    // collision across the continuously-refined path, not just at N fixed
+    // points.
+    for (const breakpoint of computeStageWindowBreakpoints(windows)) {
+      refineAroundBreakpoint(breakpoint, step, (amount) => {
+        const overlaps = overlapsAtAmount(amount);
+        if (overlaps.length > 0) recordSample(amount, "forward", overlaps);
+        return overlaps.length > 0;
+      });
+    }
+
+    return {
+      fixtureUnitCount: keys.length,
+      totalSamples: samples.length,
+      samplesWithOverlap,
+      maxDepth,
+      samples,
+    };
+  }
+
+  /**
+   * Exposed, on-demand Stage 8 entry point - reads the plan Phase 3 already
+   * cached during the last computeExplodePlan() call (lastExplodePhase3State)
+   * rather than recomputing Stage 6/7, since a fine-grained bidirectional
+   * sweep is a heavier verification pass (matching the existing
+   * debugFullRangeClearSearch/diagnoseExplodeGate precedent of separate
+   * on-demand diagnostics rather than automatic per-toggle cost).
+   */
+  function certifyExplodeFullPlan(stepPercent = 1): ExplodeCertificationReport | null {
+    if (!lastExplodePhase3State) return null;
+    const { plan, solids, exemptions, restDepthByPair } = lastExplodePhase3State;
+    const report = certifyExplodeCertifiedPlan(plan, solids, exemptions, restDepthByPair, stepPercent);
+    console.debug("[ExplodeView][DIAG][Phase3 Stage8 certification]", {
+      totalSamples: report.totalSamples,
+      samplesWithOverlap: report.samplesWithOverlap,
+      maxDepth: report.maxDepth,
+      samples: report.samples.map((s) => ({
+        amount: Number(s.amount.toFixed(4)),
+        phase: s.phase,
+        overlapCount: s.overlaps.length,
+        overlaps: s.overlaps.map((o) => ({
+          a: o.aName,
+          b: o.bName,
+          depth: Number(o.depth.toFixed(6)),
+        })),
+      })),
+    });
+    return report;
+  }
+
+  /** Exposed getter for the cached Stage 6/7 plan - see lastExplodePhase3State. */
+  function getLastExplodeCertifiedPlan(): ExplodeCertifiedPlan | null {
+    return lastExplodePhase3State?.plan ?? null;
+  }
+
+  /** Test/verification only - true if AT LEAST ONE unit's axis/distance/stage-window in the current explodePlan came from the certified Phase 3 plan (see getExplodeCertifiedPlanUnitStatus for the real per-unit breakdown). Reflects the last computeExplodePlan() call. */
+  function getExplodeCertifiedPlanActive(): boolean {
+    return explodeCertifiedPlanActive;
+  }
+
+  /** Test/verification only - the real per-unit certified-plan-vs-live-gate routing decision for every unit in the current explodePlan (see ExplodeCertifiedPlanUnitStatus). Reflects the last computeExplodePlan() call. */
+  function getExplodeCertifiedPlanUnitStatus(): ExplodeCertifiedPlanUnitStatus[] {
+    return explodeCertifiedPlanUnitStatus;
+  }
+
+  /**
+   * Every partKey belonging to ANY unit Stage 6 marked a confirmed dead-end
+   * SCC member (ExplodeCertifiedPlanUnitStatus.deadEnd - proven
+   * non-separable in all 6 principal directions by the offline planner, e.g.
+   * Knuckle Joint's 5 units, Sheet Metal Clamp's rivet+leaf, Stuffing Box's
+   * 6 units) in the CURRENT plan. REPORTING ONLY - the live gate and the
+   * whole-assembly veto give these units no special treatment (a former
+   * pairwise exemption for them was removed: it disabled collision checking
+   * for the entire transition, not just the rest state, and only the end
+   * state had been verified). Currently used solely to label a settle-loop
+   * timeout as a known architectural limit vs. an unexplained stall.
+   * Recomputed fresh from explodeCertifiedPlanUnitStatus on every call -
+   * cheap (a handful of units) and always in sync with whatever
+   * computeExplodePlan last certified, never cached separately.
+   */
+  function getExplodeDeadEndMemberKeys(): Set<string> {
+    const out = new Set<string>();
+    for (const u of explodeCertifiedPlanUnitStatus) {
+      if (!u.deadEnd) continue;
+      for (const k of u.memberKeys) out.add(k);
+    }
+    return out;
+  }
+
+  /** See the Viewer interface doc comment for debugUnitPairClearanceAtMultiples - this is its implementation. */
+  function debugUnitPairClearanceAtMultiples(
+    aUnitKey: string,
+    bUnitKey: string,
+    multiples: number[],
+  ): {
+    multiple: number;
+    aDistance: number;
+    bDistance: number;
+    exempt: boolean;
+    clear: boolean;
+    depth: number;
+  }[] | null {
+    if (!lastExplodePhase3State) return null;
+    const { plan, solids, exemptions } = lastExplodePhase3State;
+    const aAssignment = plan.assignments.find((a) => a.unitKey === aUnitKey);
+    const bAssignment = plan.assignments.find((a) => a.unitKey === bUnitKey);
+    const aSolid = solids.get(aUnitKey);
+    const bSolid = solids.get(bUnitKey);
+    if (!aAssignment || !bAssignment || !aSolid || !bSolid) return null;
+    const aBox0 = aSolid.geometry.boundingBox;
+    const bBox0 = bSolid.geometry.boundingBox;
+    return multiples.map((multiple) => {
+      const aDistance = aAssignment.distance * multiple;
+      const bDistance = bAssignment.distance * multiple;
+      const exempt = isRestExemptionActive(exemptions, aUnitKey, aDistance, bUnitKey, bDistance);
+      const clear =
+        exempt || arePartsClearAtDistances(solids, aUnitKey, aDistance, bUnitKey, bDistance);
+      const depth =
+        !clear && aBox0 && bBox0
+          ? computeAabbOverlapDepth(
+              aBox0.clone().translate(aSolid.axis.clone().multiplyScalar(aDistance)),
+              bBox0.clone().translate(bSolid.axis.clone().multiplyScalar(bDistance)),
+            )
+          : 0;
+      return { multiple, aDistance, bDistance, exempt, clear, depth };
+    });
+  }
+
+  /** See the Viewer interface doc comment for debugLivePartPairClearanceAtMultiples - this is its implementation. */
+  function debugLivePartPairClearanceAtMultiples(
+    aPartKey: string,
+    bPartKey: string,
+    multiples: number[],
+  ): {
+    multiple: number;
+    aDistance: number;
+    bDistance: number;
+    exempt: boolean;
+    clear: boolean;
+    /** The real mesh-vs-mesh oracle's own verdict, ignoring exemption entirely - unlike `clear` (what the live gate would actually treat as passable), this never short-circuits, so a pair masked by exemption is still visible here as genuinely overlapping or not. */
+    realClear: boolean;
+    /** Real AABB penetration depth at this multiple, ALWAYS computed (never skipped just because `clear`/`exempt` is true) - 0 only when the boxes genuinely don't intersect on some axis, never a placeholder for "didn't check". */
+    depth: number;
+    /** This pair's own rest-position (multiple=0) depth, for context against isLiveRestExemptionActive's baseline-bounded rule. */
+    restDepth: number;
+  }[] | null {
+    if (!explodePlan) return null;
+    const aEntry = explodePlan.get(aPartKey);
+    const bEntry = explodePlan.get(bPartKey);
+    if (!aEntry || !bEntry) return null;
+    const solids = getExplodeGateSolids();
+    const exemptions = getExplodeGateRestExemptions(solids);
+    const restDepthByPair = getExplodeGateRestDepths(solids);
+    const aSolid = solids.get(aPartKey);
+    const bSolid = solids.get(bPartKey);
+    if (!aSolid || !bSolid) return null;
+    const aBox0 = aSolid.geometry.boundingBox;
+    const bBox0 = bSolid.geometry.boundingBox;
+    const restDepth = restDepthByPair.get(aPartKey)?.get(bPartKey) ?? 0;
+    return multiples.map((multiple) => {
+      const aDistance = aEntry.distance * multiple;
+      const bDistance = bEntry.distance * multiple;
+      const exempt = isLiveRestExemptionActive(
+        solids,
+        exemptions,
+        restDepthByPair,
+        aPartKey,
+        aDistance,
+        bPartKey,
+        bDistance,
+      );
+      const realClear = arePartsClearAtDistances(solids, aPartKey, aDistance, bPartKey, bDistance);
+      const clear = exempt || realClear;
+      const depth =
+        aBox0 && bBox0
+          ? computeAabbOverlapDepth(
+              aBox0.clone().translate(aSolid.axis.clone().multiplyScalar(aDistance)),
+              bBox0.clone().translate(bSolid.axis.clone().multiplyScalar(bDistance)),
+            )
+          : 0;
+      return { multiple, aDistance, bDistance, exempt, clear, realClear, depth, restDepth };
+    });
+  }
+
+  /** See the Viewer interface doc comment for debugGoverningBlockerForUnit - this is its implementation. */
+  function debugGoverningBlockerForUnit(unitKey: string): {
+    unitKey: string;
+    finalDistance: number;
+    selfStage: number;
+    perOther: {
+      otherKey: string;
+      otherLabel: string;
+      otherStage: number;
+      otherFinalDistance: number;
+      exempt: boolean;
+      minDistanceIfOtherAtRest: number;
+      minDistanceIfOtherAtFinal: number;
+    }[];
+  } | null {
+    if (!lastExplodePhase3State) return null;
+    const { plan, solids, exemptions } = lastExplodePhase3State;
+    const selfAssignment = plan.assignments.find((a) => a.unitKey === unitKey);
+    const selfSolid = solids.get(unitKey);
+    const selfBox0 = selfSolid?.geometry.boundingBox;
+    if (!selfAssignment || !selfSolid || !selfBox0) return null;
+
+    const soloClear = (
+      dSelf: number,
+      otherKey: string,
+      otherSolid: ExplodeGateSolid,
+      otherBox0: THREE.Box3,
+      dOther: number,
+    ): boolean => {
+      if (isRestExemptionActive(exemptions, unitKey, dSelf, otherKey, dOther)) return true;
+      const selfBox = selfBox0.clone().translate(selfSolid.axis.clone().multiplyScalar(dSelf));
+      const otherBox = otherBox0.clone().translate(otherSolid.axis.clone().multiplyScalar(dOther));
+      return !selfBox.intersectsBox(otherBox);
+    };
+
+    const soloMinDistance = (isClear: (d: number) => boolean): number => {
+      let ceiling = Math.max(selfAssignment.distance, 10);
+      let cleared = isClear(ceiling);
+      let doublings = 0;
+      while (!cleared && doublings < 20) {
+        ceiling *= 2;
+        cleared = isClear(ceiling);
+        doublings += 1;
+      }
+      return cleared ? bisectNearestClearDistance(0, ceiling, isClear) : ceiling;
+    };
+
+    const perOther = plan.assignments
+      .filter((a) => a.unitKey !== unitKey)
+      .map((otherAssignment) => {
+        const otherSolid = solids.get(otherAssignment.unitKey);
+        const otherBox0 = otherSolid?.geometry.boundingBox;
+        if (!otherSolid || !otherBox0) return null;
+        const minDistanceIfOtherAtRest = soloMinDistance((d) =>
+          soloClear(d, otherAssignment.unitKey, otherSolid, otherBox0, 0),
+        );
+        const minDistanceIfOtherAtFinal = soloMinDistance((d) =>
+          soloClear(d, otherAssignment.unitKey, otherSolid, otherBox0, otherAssignment.distance),
+        );
+        return {
+          otherKey: otherAssignment.unitKey,
+          otherLabel: otherAssignment.label,
+          otherStage: otherAssignment.stage,
+          otherFinalDistance: otherAssignment.distance,
+          exempt: isRestExemptionActive(
+            exemptions,
+            unitKey,
+            selfAssignment.distance,
+            otherAssignment.unitKey,
+            otherAssignment.distance,
+          ),
+          minDistanceIfOtherAtRest,
+          minDistanceIfOtherAtFinal,
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null);
+
+    return {
+      unitKey,
+      finalDistance: selfAssignment.distance,
+      selfStage: selfAssignment.stage,
+      perOther,
+    };
+  }
+
+  /** See the Viewer interface doc comment for debugExplodeStageDistanceSolveTrace - this is its implementation. */
+  function debugExplodeStageDistanceSolveTrace(unitKey: string): {
+    distance: number;
+    ceiling: number;
+    doublings: number;
+    neighborDistances: { otherKey: string; otherLabel: string; distance: number }[];
+  } | null {
+    if (!lastSolveTraceByUnit || !lastExplodePhase3State) return null;
+    const trace = lastSolveTraceByUnit.get(unitKey);
+    if (!trace) return null;
+    const labelByKey = new Map(
+      lastExplodePhase3State.plan.assignments.map((a) => [a.unitKey, a.label]),
+    );
+    return {
+      distance: trace.distance,
+      ceiling: trace.ceiling,
+      doublings: trace.doublings,
+      neighborDistances: Array.from(trace.neighborDistances.entries()).map(([otherKey, distance]) => ({
+        otherKey,
+        otherLabel: labelByKey.get(otherKey) ?? otherKey,
+        distance,
+      })),
+    };
+  }
+
+  /** See the Viewer interface doc comment for debugUnitGeometryInfo - this is its implementation. */
+  function debugUnitGeometryInfo(unitKey: string): {
+    unitKey: string;
+    axis: { x: number; y: number; z: number };
+    box0: { min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } };
+  } | null {
+    if (!lastExplodePhase3State) return null;
+    const solid = lastExplodePhase3State.solids.get(unitKey);
+    const box0 = solid?.geometry.boundingBox;
+    if (!solid || !box0) return null;
+    return {
+      unitKey,
+      axis: { x: solid.axis.x, y: solid.axis.y, z: solid.axis.z },
+      box0: {
+        min: { x: box0.min.x, y: box0.min.y, z: box0.min.z },
+        max: { x: box0.max.x, y: box0.max.y, z: box0.max.z },
+      },
+    };
+  }
+
+  /** Moves every part to its real position at `amount` via the actual setExplodeAmount playback path (tests exactly what the UI would show), runs the independent mesh-overlap check above, then restores whatever amount was active before the call. */
+  function checkExplodeOverlapsAtAmount(
+    amount: number,
+  ): { a: string; b: string; aName: string; bName: string; depth: number }[] {
+    if (!explodePlan) return [];
+    const prevAmount = explodeAmount;
+    applyExplodeAmount(amount);
+    const parts = Array.from(explodePlan.entries()).map(
+      ([partKey, entry]) => ({
+        partKey,
+        name:
+          typeof entry.object.name === "string" && entry.object.name.length > 0
+            ? entry.object.name
+            : partKey,
+        object: entry.object,
+      }),
+    );
+    const built = buildOverlapCheckGeometry(parts);
+    const overlaps = findMeshOverlapsAmongParts(built);
+    applyExplodeAmount(prevAmount);
+    return overlaps;
+  }
+
+  /**
+   * Test/verification only - same independent oracle as
+   * checkExplodeOverlapsAtAmount (shares no code with the ordering/gating
+   * pipeline), but reads whatever position is CURRENTLY on screen instead of
+   * moving there and restoring afterward. checkExplodeOverlapsAtAmount's
+   * restore-to-prevAmount makes it unsuitable for verifying a MONOTONIC
+   * sweep (e.g. a fine-grained 0->1 slider-tick simulation): calling it
+   * repeatedly at increasing amounts would snap back to the prior amount
+   * after every single check, so each call would re-drive the live gate
+   * from that same restored point rather than from a true frame-to-frame
+   * progression, silently changing the per-frame step sizes the real gate
+   * sees. A caller that wants to verify a real sweep should instead drive
+   * setExplodeAmount(amount) itself at each step - exactly like the real
+   * slider/playExplode does - then call this to check that exact resulting
+   * frame with no side effect on it.
+   */
+  function checkExplodeOverlapsAtCurrentPosition(): {
+    a: string;
+    b: string;
+    aName: string;
+    bName: string;
+    depth: number;
+  }[] {
+    if (!explodePlan) return [];
+    const parts = Array.from(explodePlan.entries()).map(
+      ([partKey, entry]) => ({
+        partKey,
+        name:
+          typeof entry.object.name === "string" && entry.object.name.length > 0
+            ? entry.object.name
+            : partKey,
+        object: entry.object,
+      }),
+    );
+    const built = buildOverlapCheckGeometry(parts);
+    return findMeshOverlapsAmongParts(built);
+  }
+
+  // ===========================================================================
+  // Strict interference oracle - validation round (see project instructions:
+  // "Real interference test - no exemptions, no AABB depth"). Deliberately
+  // independent of every exemption/AABB-depth-threshold mechanism elsewhere
+  // in this file (isRestExemptionActive, isLiveRestExemptionActive,
+  // computeAabbOverlapDepth, buildExplodeGateRestExemptions, etc.) - this is
+  // a from-scratch real-geometry test meant to REPLACE those, not agree with
+  // them. Two parts collide here iff:
+  //   (1) Surface test: their solids, each offset INWARD along vertex
+  //       normals by STRICT_INTERFERENCE_TOLERANCE_MM, still triangle-vs-
+  //       triangle intersect (three-mesh-bvh's MeshBVH.intersectsGeometry,
+  //       same primitive the rest of the file already trusts for real solid
+  //       intersection - see findMeshOverlapsAmongParts above). Offsetting
+  //       both sides inward means two solids merely TOUCHING at a mating fit
+  //       (coincident within tessellation noise) separate after the offset
+  //       and do NOT count - only genuine interposition beyond both sides'
+  //       tessellation tolerance still intersects post-offset.
+  //   (2) Containment test: if no surface hit, one part could still be
+  //       entirely embedded inside the other with no shared boundary at all
+  //       (impossible to catch with a surface test). Raycast-parity check:
+  //       cast a ray from one vertex of each part's UNOFFSET mesh in a fixed
+  //       non-axis-aligned direction against the other part's UNOFFSET mesh;
+  //       an odd hit count means that vertex is inside the other solid.
+  // No AABB/bounding-box depth or extent enters this decision anywhere, and
+  // no exemption table is consulted - a pair either fails both tests (clear)
+  // or fails at least one (collision).
+  // ===========================================================================
+
+  /**
+   * Chosen for the Knuckle Joint validation round. The file's tessellation
+   * uses OCCT's "bounding_box_ratio" linear deflection, ratio 0.04 for this
+   * file's byte size (see occ-worker.ts's resolveAdaptiveDeflections) -
+   * OCCT computes the actual linear deflection ONCE as
+   * ratio * diag(wholeShapeBoundingBox), applied uniformly to every face.
+   * For the Knuckle Joint assembly (bbox diagonal measured at 303.33mm) that
+   * is 0.04 * 303.33 = 12.13mm - reported here as the configured figure, but
+   * it is NOT the real per-vertex deviation on this assembly's curved mating
+   * faces: OCCT's mesher also enforces angularDeflection (0.7 * 0.04 = 0.028
+   * rad here) at every curved face independent of the linear ceiling, and
+   * for a 19mm-radius cylindrical face that bounds chordal deviation to
+   * ~19 * (0.028^2 / 8) ~= 0.0019mm - three orders of magnitude tighter, and
+   * the actual binding constraint on every round mating surface in this
+   * assembly (the linear ceiling only ever binds on large near-flat
+   * regions, which is not where this test's mating pairs live). Using the
+   * nominal 12.13mm figure directly as the offset would be larger than half
+   * the taper lock pin's own 6.5mm cross-section and collapse/invert it.
+   * Confirmed empirically, not just by formula: sampling every world-space
+   * vertex of the collar's own cylindrical face (debugMeasureCylindricalDeviation
+   * against its fitted 19mm-radius axis) measured a real max deviation of
+   * 0.000135mm - within the same order of magnitude as the angular-deflection
+   * estimate above and utterly negligible next to any feature in this
+   * assembly. STRICT_INTERFERENCE_TOLERANCE_MM is therefore set to 0.02mm -
+   * roughly 150x the measured real deviation (comfortably "just above" it),
+   * while still under 1% of the thinnest feature's own cross-section (the
+   * taper lock pin, 6.5mm) so the inward offset cannot collapse or invert
+   * it.
+   */
+  const STRICT_INTERFERENCE_TOLERANCE_MM = 0.02;
+
+  /** Non-axis-aligned so a containment ray is very unlikely to graze exactly along a mesh edge/vertex of a machined (mostly axis-aligned-feature) part. */
+  const STRICT_CONTAINMENT_RAY_DIR = new THREE.Vector3(1, 1, 1).normalize();
+
+  let strictRaycastMaterial: THREE.MeshBasicMaterial | null = null;
+  function getStrictRaycastMaterial(): THREE.MeshBasicMaterial {
+    if (!strictRaycastMaterial) {
+      // DoubleSide is load-bearing: raycast parity needs BOTH the entering
+      // (front-facing) and exiting (back-facing) crossing counted, or every
+      // ray from outside a closed solid would read as an odd/inside hit
+      // count from the entry face alone being culled or not depending on
+      // orientation.
+      strictRaycastMaterial = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide });
+    }
+    return strictRaycastMaterial;
+  }
+
+  /**
+   * Moves every vertex inward along its own (area-weighted) vertex normal by
+   * `t`. Works on both indexed and non-indexed geometry (computeVertexNormals
+   * supports both). Deliberately NOT guaranteed to stay a valid manifold on
+   * features thinner than 2t (opposite offset surfaces can cross) - that is
+   * a known limitation of a naive normal offset, not hidden here, and is
+   * exactly why STRICT_INTERFERENCE_TOLERANCE_MM above is chosen from the
+   * real measured curved-surface deviation rather than the much larger
+   * nominal linear-deflection ceiling.
+   */
+  function computeInwardOffsetGeometry(
+    geometry: THREE.BufferGeometry,
+    t: number,
+  ): THREE.BufferGeometry {
+    const offset = geometry.clone();
+    offset.computeVertexNormals();
+    const pos = offset.attributes.position as THREE.BufferAttribute;
+    const nrm = offset.attributes.normal as THREE.BufferAttribute;
+    const v = new THREE.Vector3();
+    const n = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i);
+      n.fromBufferAttribute(nrm, i);
+      if (n.lengthSq() > 1e-12) {
+        v.addScaledVector(n, -t);
+        pos.setXYZ(i, v.x, v.y, v.z);
+      }
+    }
+    pos.needsUpdate = true;
+    offset.deleteAttribute("normal");
+    offset.computeBoundingBox();
+    return offset;
+  }
+
+  type StrictOverlapPart = {
+    partKey: string;
+    name: string;
+    rawGeometry: THREE.BufferGeometry;
+    rawMesh: THREE.Mesh;
+    offsetGeometry: THREE.BufferGeometry;
+    offsetBvh: MeshBVH;
+  };
+
+  function buildStrictOverlapParts(
+    built: OverlapCheckPart[],
+    toleranceMm: number,
+    overridesByPartKey?: Map<string, THREE.Vector3>,
+  ): StrictOverlapPart[] {
+    const material = getStrictRaycastMaterial();
+    return built.map((p) => {
+      const override = overridesByPartKey?.get(p.partKey);
+      const rawGeometry =
+        override && override.lengthSq() > 0
+          ? p.geometry.clone().translate(override.x, override.y, override.z)
+          : p.geometry;
+      if (rawGeometry !== p.geometry) rawGeometry.computeBoundingBox();
+      const offsetGeometry = computeInwardOffsetGeometry(rawGeometry, toleranceMm);
+      const offsetBvh = new MeshBVH(offsetGeometry);
+      (offsetGeometry as BufferGeometryWithBVH).boundsTree = offsetBvh;
+      const rawMesh = new THREE.Mesh(rawGeometry, material);
+      rawMesh.matrixAutoUpdate = false;
+      rawMesh.matrixWorld.identity();
+      return { partKey: p.partKey, name: p.name, rawGeometry, rawMesh, offsetGeometry, offsetBvh };
+    });
+  }
+
+  /** True if `point` (world space) lands inside `mesh`'s closed solid - odd number of crossings along a fixed ray direction. Requires `mesh`'s geometry to be a closed (watertight) 2-manifold and `mesh.material.side` to be DoubleSide (see getStrictRaycastMaterial). */
+  function isPointInsideStrictSolid(point: THREE.Vector3, mesh: THREE.Mesh): boolean {
+    const raycaster = new THREE.Raycaster(point, STRICT_CONTAINMENT_RAY_DIR, 0, Infinity);
+    const hits = raycaster.intersectObject(mesh, false);
+    return hits.length % 2 === 1;
+  }
+
+  /** Every part-pair that collides under the strict interference test above - no AABB depth, no exemptions. `kind` says which test caught it. */
+  function findStrictInterferenceAmongParts(
+    parts: StrictOverlapPart[],
+  ): { a: string; b: string; aName: string; bName: string; kind: "surface" | "containment" }[] {
+    const out: { a: string; b: string; aName: string; bName: string; kind: "surface" | "containment" }[] = [];
+    for (let i = 0; i < parts.length; i++) {
+      const A = parts[i]!;
+      for (let j = i + 1; j < parts.length; j++) {
+        const B = parts[j]!;
+        if (A.offsetBvh.intersectsGeometry(B.offsetGeometry, overlapCheckIdentity)) {
+          out.push({ a: A.partKey, b: B.partKey, aName: A.name, bName: B.name, kind: "surface" });
+          continue;
+        }
+        const aPos = A.rawGeometry.attributes.position as THREE.BufferAttribute | undefined;
+        const bPos = B.rawGeometry.attributes.position as THREE.BufferAttribute | undefined;
+        const aVertex = aPos && aPos.count > 0 ? new THREE.Vector3().fromBufferAttribute(aPos, 0) : null;
+        const bVertex = bPos && bPos.count > 0 ? new THREE.Vector3().fromBufferAttribute(bPos, 0) : null;
+        const aInsideB = aVertex ? isPointInsideStrictSolid(aVertex, B.rawMesh) : false;
+        const bInsideA = bVertex ? isPointInsideStrictSolid(bVertex, A.rawMesh) : false;
+        if (aInsideB || bInsideA) {
+          out.push({ a: A.partKey, b: B.partKey, aName: A.name, bName: B.name, kind: "containment" });
+        }
+      }
+    }
+    return out;
+  }
+
+  /** Test/verification only (validation round) - moves every part to its real position at `amount` (restoring the prior amount afterward), applies an optional additional world-space translation per part on top of that, then runs the strict interference test (see the module doc comment above) with no AABB depth and no exemptions anywhere in the decision. */
+  function checkStrictInterferenceAtAmount(
+    amount: number,
+    toleranceMm: number = STRICT_INTERFERENCE_TOLERANCE_MM,
+    overridesByPartKey?: Record<string, { x: number; y: number; z: number }>,
+  ): { a: string; b: string; aName: string; bName: string; kind: "surface" | "containment" }[] {
+    if (!explodePlan) return [];
+    const prevAmount = explodeAmount;
+    applyExplodeAmount(amount);
+    const parts = Array.from(explodePlan.entries()).map(([partKey, entry]) => ({
+      partKey,
+      name:
+        typeof entry.object.name === "string" && entry.object.name.length > 0
+          ? entry.object.name
+          : partKey,
+      object: entry.object,
+    }));
+    const built = buildOverlapCheckGeometry(parts);
+    applyExplodeAmount(prevAmount);
+    const overrides = overridesByPartKey
+      ? new Map(
+          Object.entries(overridesByPartKey).map(([k, v]) => [k, new THREE.Vector3(v.x, v.y, v.z)]),
+        )
+      : undefined;
+    const strictParts = buildStrictOverlapParts(built, toleranceMm, overrides);
+    return findStrictInterferenceAmongParts(strictParts);
+  }
+
+  /** Diagnostic only (validation round) - samples every world-space vertex of `partKey`'s current-position mesh, keeps only those within +/-20% of `nominalRadius` from the given axis line (i.e. plausibly on a cylindrical face rather than a flat end-cap), and reports the max |actual radius - nominalRadius| among them. Used to measure the REAL achieved curved-surface tessellation deviation for choosing STRICT_INTERFERENCE_TOLERANCE_MM, since the nominal linear-deflection ratio is not the real per-vertex bound (see that constant's doc comment). */
+  function debugMeasureCylindricalDeviation(
+    partKey: string,
+    axisPoint: { x: number; y: number; z: number },
+    axisDir: { x: number; y: number; z: number },
+    nominalRadius: number,
+  ): { maxAbsDeviationMm: number; onSurfaceSampleCount: number; totalSampleCount: number } | null {
+    if (!explodePlan) return null;
+    const entry = explodePlan.get(partKey);
+    if (!entry) return null;
+    const built = buildOverlapCheckGeometry([
+      { partKey, name: partKey, object: entry.object },
+    ]);
+    const part = built[0];
+    if (!part) return null;
+    const pos = part.geometry.attributes.position as THREE.BufferAttribute;
+    const ap = new THREE.Vector3(axisPoint.x, axisPoint.y, axisPoint.z);
+    const ad = new THREE.Vector3(axisDir.x, axisDir.y, axisDir.z).normalize();
+    const p = new THREE.Vector3();
+    const rel = new THREE.Vector3();
+    const radial = new THREE.Vector3();
+    let maxDev = 0;
+    let onSurfaceCount = 0;
+    for (let i = 0; i < pos.count; i++) {
+      p.fromBufferAttribute(pos, i);
+      rel.copy(p).sub(ap);
+      const along = rel.dot(ad);
+      radial.copy(rel).addScaledVector(ad, -along);
+      const r = radial.length();
+      if (r > nominalRadius * 0.8 && r < nominalRadius * 1.2) {
+        onSurfaceCount++;
+        maxDev = Math.max(maxDev, Math.abs(r - nominalRadius));
+      }
+    }
+    return { maxAbsDeviationMm: maxDev, onSurfaceSampleCount: onSurfaceCount, totalSampleCount: pos.count };
+  }
+
+  /** Diagnostic only (validation round, ad hoc) - raw min/max radius (no nominal filtering) among `partKey`'s world-space vertices whose position along `axisDir` from `axisPoint` falls in [alongMin, alongMax]. Used to characterize a specific axial band (e.g. where two parts' bounding boxes overlap) without any assumption about what radius should be there. */
+  function debugRadiusBandStats(
+    partKey: string,
+    axisPoint: { x: number; y: number; z: number },
+    axisDir: { x: number; y: number; z: number },
+    alongMin: number,
+    alongMax: number,
+    toleranceMm?: number,
+  ): { minRadius: number; maxRadius: number; sampleCount: number } | null {
+    if (!explodePlan) return null;
+    const entry = explodePlan.get(partKey);
+    if (!entry) return null;
+    const built = buildOverlapCheckGeometry([
+      { partKey, name: partKey, object: entry.object },
+    ]);
+    const part = built[0];
+    if (!part) return null;
+    const pos = (
+      toleranceMm ? computeInwardOffsetGeometry(part.geometry, toleranceMm) : part.geometry
+    ).attributes.position as THREE.BufferAttribute;
+    const ap = new THREE.Vector3(axisPoint.x, axisPoint.y, axisPoint.z);
+    const ad = new THREE.Vector3(axisDir.x, axisDir.y, axisDir.z).normalize();
+    const p = new THREE.Vector3();
+    const rel = new THREE.Vector3();
+    const radial = new THREE.Vector3();
+    let min = Infinity;
+    let max = -Infinity;
+    let count = 0;
+    for (let i = 0; i < pos.count; i++) {
+      p.fromBufferAttribute(pos, i);
+      rel.copy(p).sub(ap);
+      const along = rel.dot(ad);
+      if (along < alongMin || along > alongMax) continue;
+      radial.copy(rel).addScaledVector(ad, -along);
+      const r = radial.length();
+      min = Math.min(min, r);
+      max = Math.max(max, r);
+      count++;
+    }
+    return { minRadius: min, maxRadius: max, sampleCount: count };
+  }
+
+  // ===========================================================================
+  // Runtime clearance gate - WIRED into setExplodeAmount below (see
+  // computeGatedDistancesForAmount), so this is what the slider and
+  // playExplode actually render, not a side-channel diagnostic. Stage
+  // order/windows are computed ONCE upfront (computeExplodeBlockingOrder +
+  // computeExplodeStageWindows) and trusted for the whole animation via
+  // fixed [stageStart, stageEnd] windows. Pass 6's blocking edges are real
+  // mesh-vs-mesh sweeps now (see computeMeshBlockersForSignedAxis), not a
+  // bbox proxy, but the order can still be wrong when the real assembly has
+  // a genuine physical cycle (two parts that truly do mutually block each
+  // other), or when Pass 3's cheaper bbox sign test (pickBestSignByBbox)
+  // picked a sign a real mesh sweep would have blocked. When that happens,
+  // a part can be scheduled to move before something still in its own path
+  // has actually cleared. Rather than freeze that part at 0 progress for
+  // the rest of the animation, this gate binary-searches for the furthest
+  // point along its own path that stays clear THIS frame, so the part
+  // keeps advancing (just slower than the raw plan) instead of visibly
+  // stopping dead.
+  //
+  // Performance: a per-frame full geometry rebuild + fresh BVH per part
+  // (what the diagnostic tool above did, and what a naive port of it into
+  // setExplodeAmount would do) is not viable at 60fps - see
+  // buildExplodeGateSolids's doc comment. Every part's mesh is instead
+  // baked ONCE, at its rest position, into a cached BVH when the plan is
+  // computed; a candidate distance is tested by translating that fixed
+  // geometry (cheap: one Matrix4 + one intersectsGeometry call, no
+  // rebuild), with a translated-AABB pre-check first to reject most pairs
+  // before the real triangle-vs-triangle test ever runs.
+  // ===========================================================================
+
+  type ExplodeGateSolid = {
+    partKey: string;
+    name: string;
+    axis: THREE.Vector3;
+    geometry: THREE.BufferGeometry;
+    bvh: MeshBVH;
+  };
+
+  /**
+   * Bakes every part's mesh geometry ONCE, at its REST position
+   * (originalPosition, zero explode offset), and builds a BVH for it - a
+   * per-PLAN cache (rebuilt only when computeExplodePlan produces a new
+   * plan - see invalidateExplodeGateState), not a per-frame one. A
+   * candidate distance is later tested by translating this fixed geometry
+   * (see isExplodeDistanceClear), never by rebuilding it: rebuilding
+   * geometry and a MeshBVH from scratch on every one of ~10 binary-search
+   * iterations, on every render frame, is exactly the cost that made the
+   * diagnostic tool above unfit to run from setExplodeAmount directly.
+   */
+  function buildExplodeGateSolids(): Map<string, ExplodeGateSolid> {
+    const out = new Map<string, ExplodeGateSolid>();
+    if (!explodePlan) return out;
+    for (const [partKey, entry] of explodePlan) {
+      const name =
+        typeof entry.object.name === "string" && entry.object.name.length > 0
+          ? entry.object.name
+          : partKey;
+      const savedPos = entry.object.position.clone();
+      const savedEdgePos = entry.edgeObjects.map((o) => o.position.clone());
+      entry.object.position.copy(entry.originalPosition);
+      for (const edgeObject of entry.edgeObjects) edgeObject.position.set(0, 0, 0);
+      const built = buildOverlapCheckGeometry([
+        { partKey, name, object: entry.object },
+      ]);
+      entry.object.position.copy(savedPos);
+      entry.edgeObjects.forEach((o, i) => o.position.copy(savedEdgePos[i]!));
+      entry.object.updateWorldMatrix(true, true);
+      const solid = built[0];
+      if (solid) {
+        out.set(partKey, {
+          partKey,
+          name,
+          axis: entry.axis.clone(),
+          geometry: solid.geometry,
+          bvh: solid.bvh,
+        });
+      }
+    }
+    return out;
+  }
+
+  /** Lazily builds (and caches) the rest-position solids above - see explodeGateSolids's declaration for the invalidation contract. */
+  function getExplodeGateSolids(): Map<string, ExplodeGateSolid> {
+    if (!explodeGateSolids) explodeGateSolids = buildExplodeGateSolids();
+    return explodeGateSolids;
+  }
+
+  /**
+   * Every part-pair that already intersects at REST (distance 0 for both -
+   * i.e. their as-imported, untouched position). Real assemblies routinely
+   * model a mating fit (a stud seated in its hole, a shaft in its bushing)
+   * at literal zero nominal clearance, which a solid mesh-vs-mesh test
+   * reports as "intersecting" for the part's entire insertion depth, not
+   * just a hairline at distance 0 - confirmed on the Stuffing Box fixture,
+   * where several such pairs stayed flagged "not clear" for most of the
+   * part's travel, well past where the UNGATED plan had already separated
+   * them cleanly. That's not a motion-ordering defect for the gate to
+   * catch (see the "Runtime clearance gate" section comment below for what
+   * the gate DOES target) - it's the source geometry's own baseline, and
+   * every part's exit here is a single monotonic sweep along a fixed axis,
+   * so a pair touching at rest and then separating can't later re-collide
+   * within the same animation. Exempting these pairs for the whole
+   * lifetime of the plan is therefore safe, and leaves every OTHER pair -
+   * including ones this same part might newly sweep into mid-motion, the
+   * actual failure mode the gate exists for - fully gated.
+   */
+  function buildExplodeGateRestExemptions(
+    solids: Map<string, ExplodeGateSolid>,
+  ): Map<string, Set<string>> {
+    const exemptions = new Map<string, Set<string>>();
+    const keys = Array.from(solids.keys());
+    for (const key of keys) exemptions.set(key, new Set());
+    const pairs: { a: string; b: string }[] = [];
+    for (let i = 0; i < keys.length; i++) {
+      for (let j = i + 1; j < keys.length; j++) {
+        const a = keys[i]!;
+        const b = keys[j]!;
+        if (!arePartsClearAtDistances(solids, a, 0, b, 0)) {
+          exemptions.get(a)!.add(b);
+          exemptions.get(b)!.add(a);
+          pairs.push({
+            a: solids.get(a)?.name ?? a,
+            b: solids.get(b)?.name ?? b,
+          });
+        }
+      }
+    }
+    console.debug("[ExplodeView][DIAG][gate exemptions]", pairs);
+    return exemptions;
+  }
+
+  /** Lazily builds (and caches) the rest-touching exemption set above. */
+  function getExplodeGateRestExemptions(
+    solids: Map<string, ExplodeGateSolid>,
+  ): Map<string, Set<string>> {
+    if (!explodeGateRestExemptions) {
+      explodeGateRestExemptions = buildExplodeGateRestExemptions(solids);
+    }
+    return explodeGateRestExemptions;
+  }
+
+  /**
+   * Real mesh-vs-mesh penetration depth, AT REST (distance 0 for both), for
+   * every pair buildExplodeGateRestExemptions already flagged as touching -
+   * the actual baseline isLiveRestExemptionActive bounds a rest-touching
+   * pair's allowed departure by. Kept as a separate cache from
+   * explodeGateRestExemptions rather than folded into it, so that widely-
+   * shared Set<string> membership structure (used well beyond the live
+   * gate - see getExplodeGateRestExemptions's other call sites) never needs
+   * to change shape; the small extra pair-detection pass this duplicates is
+   * a one-time per-plan cost, not a per-frame one.
+   */
+  function buildExplodeGateRestDepths(
+    solids: Map<string, ExplodeGateSolid>,
+  ): Map<string, Map<string, number>> {
+    const depths = new Map<string, Map<string, number>>();
+    const keys = Array.from(solids.keys());
+    for (const key of keys) depths.set(key, new Map());
+    for (let i = 0; i < keys.length; i++) {
+      for (let j = i + 1; j < keys.length; j++) {
+        const a = keys[i]!;
+        const b = keys[j]!;
+        const aBox0 = solids.get(a)?.geometry.boundingBox;
+        const bBox0 = solids.get(b)?.geometry.boundingBox;
+        if (!aBox0 || !bBox0) continue;
+        if (arePartsClearAtDistances(solids, a, 0, b, 0)) continue;
+        const depth = computeAabbOverlapDepth(aBox0, bBox0);
+        depths.get(a)!.set(b, depth);
+        depths.get(b)!.set(a, depth);
+      }
+    }
+    return depths;
+  }
+
+  /** Lazily builds (and caches) the rest-depth map above. */
+  function getExplodeGateRestDepths(
+    solids: Map<string, ExplodeGateSolid>,
+  ): Map<string, Map<string, number>> {
+    if (!explodeGateRestDepthByPair) {
+      explodeGateRestDepthByPair = buildExplodeGateRestDepths(solids);
+    }
+    return explodeGateRestDepthByPair;
+  }
+
+  /**
+   * The core pairwise primitive: true if `a` (at `aDistance` along its own
+   * axis) and `b` (at `bDistance` along its own axis) do NOT intersect.
+   * Both parties' cached rest geometry (see buildExplodeGateSolids) is
+   * translated by a plain Matrix4 - no rebuild, no new BVH - with a
+   * translated-AABB pre-check first to reject most pairs before the real
+   * triangle-vs-triangle BVH test ever runs. Deliberately tests EXACTLY
+   * the one named pair and nothing else - isExplodeDistanceClear and
+   * buildExplodeGateRestExemptions both loop over solids calling this once
+   * per neighbor; neither should (and originally, incorrectly, one did)
+   * fold "everyone else's rest position" into a single call meant to
+   * answer one pair's question.
+   */
+  function arePartsClearAtDistances(
+    solids: Map<string, ExplodeGateSolid>,
+    aKey: string,
+    aDistance: number,
+    bKey: string,
+    bDistance: number,
+  ): boolean {
+    const a = solids.get(aKey);
+    const b = solids.get(bKey);
+    const aBox0 = a?.geometry.boundingBox;
+    const bBox0 = b?.geometry.boundingBox;
+    if (!a || !b || !aBox0 || !bBox0) return true;
+    const aOffset = a.axis.clone().multiplyScalar(aDistance);
+    const bOffset = b.axis.clone().multiplyScalar(bDistance);
+    const aBox = aBox0.clone().translate(aOffset);
+    const bBox = bBox0.clone().translate(bOffset);
+    if (!aBox.intersectsBox(bBox)) return true; // cheap reject
+    // Translation-invariance: testing a-at-rest (untransformed BVH)
+    // against b-translated-by-(bOffset - aOffset) is equivalent to testing
+    // a-at-aOffset against b-at-bOffset - see buildExplodeGateSolids's doc
+    // comment.
+    const translation = bOffset.sub(aOffset);
+    const matrix = new THREE.Matrix4().makeTranslation(
+      translation.x,
+      translation.y,
+      translation.z,
+    );
+    return !a.bvh.intersectsGeometry(b.geometry, matrix);
+  }
+
+  /**
+   * True only if `exemptions` marks (aKey, bKey) as touching at rest AND
+   * BOTH are still within EXPLODE_GATE_REST_EXEMPTION_MAX_DEPARTURE_MM of
+   * their own rest distance (0) right now, at `aDistance`/`bDistance`.
+   *
+   * buildExplodeGateRestExemptions's classification itself (a nominal
+   * zero-clearance mating fit really does overlap at rest, not a defect) is
+   * a one-time, rest-position-only fact and safe to compute once per plan.
+   * But honoring it FOREVER regardless of how far either part has since
+   * moved was a separate, unsound claim layered on top: it assumed a pair
+   * touching at rest can only ever separate monotonically from there, so
+   * skipping the pair forever was "safe". Real sized data (project memory
+   * "explode veto freeze fix and blind spot sizing") disproved that for this
+   * fixture set - several exempted pairs (e.g. bush<->shaft, body<->bush)
+   * stayed 11mm-55mm deep well past rest, and two of them never separated
+   * even at 100% amount - exactly the case a permanent exemption hides for
+   * the pair's entire remaining travel instead of just its rest contact.
+   *
+   * Every call site below already computes both live distances to run the
+   * real clearance test right after - this reuses them, so the exemption
+   * decision is made fresh at evaluation time with the exact same inputs,
+   * never cached across frames or amounts.
+   */
+  function isRestExemptionActive(
+    exemptions: Map<string, Set<string>> | null | undefined,
+    aKey: string,
+    aDistance: number,
+    bKey: string,
+    bDistance: number,
+  ): boolean {
+    if (!exemptions?.get(aKey)?.has(bKey)) return false;
+    return (
+      Math.abs(aDistance) <= EXPLODE_GATE_REST_EXEMPTION_MAX_DEPARTURE_MM &&
+      Math.abs(bDistance) <= EXPLODE_GATE_REST_EXEMPTION_MAX_DEPARTURE_MM
+    );
+  }
+
+  /**
+   * Live-gate-only replacement for isRestExemptionActive's flat
+   * EXPLODE_GATE_REST_EXEMPTION_MAX_DEPARTURE_MM position threshold - see
+   * project memory "explode exemption removed full path oracle results" for
+   * the real numbers that disproved that threshold: every rest-overlapping
+   * pair got capped at EXACTLY 0.5mm of travel, since the instant either
+   * party crossed that flat threshold the pair fell straight through to the
+   * real clearance test at its FULL rest depth (which can be 38mm+), which
+   * of course still failed - so the pair could never actually separate at
+   * all, "nothing converges" (every part stalls the frame its own stage
+   * window first demands >0.5mm).
+   *
+   * A rest-touching pair (buildExplodeGateRestExemptions) instead stays
+   * exempt for as long as its CURRENT real penetration depth - evaluated at
+   * the two distances actually passed in by the caller, which are always
+   * this frame's live/fresh working values (previousGated, the veto's
+   * continuously-updated `committed`, or a bisection's own probe point -
+   * never a value parked from many frames ago) - has not grown past its OWN
+   * rest depth (buildExplodeGateRestDepths): you may keep overlapping while
+   * separating, but never by more than the geometry already did at rest,
+   * and never regress past that. This only ever masks the SAME overlap the
+   * source geometry already baked in, so a pair's depth growing beyond its
+   * rest baseline (a genuine NEW collision - see the Stuffing Box
+   * bush<->bush/bush<->gland cases the old flat threshold hid entirely) is
+   * never exempted, no matter how close to rest either part's distance is.
+   *
+   * Used ONLY by the live gate's own decision path (isExplodeDistanceClear,
+   * findWholeAssemblyOverlaps, collectExplodeGateBlockers, and
+   * resolveWholeAssemblyVeto's relaxation bisection - i.e. everything
+   * transitively reachable from computeGatedDistancesForAmount, plus the
+   * diagnostic wrappers that deliberately share that exact same decision
+   * logic: diagnoseExplodeGate and debugFullRangeClearSearch). The separate
+   * offline Phase 3/4 planning/certification infrastructure keeps calling
+   * the original isRestExemptionActive unchanged - a distinct, already-
+   * verified code path this task did not ask to touch.
+   */
+  function isLiveRestExemptionActive(
+    solids: Map<string, ExplodeGateSolid>,
+    exemptions: Map<string, Set<string>> | null | undefined,
+    restDepthByPair: Map<string, Map<string, number>> | null | undefined,
+    aKey: string,
+    aDistance: number,
+    bKey: string,
+    bDistance: number,
+  ): boolean {
+    if (!exemptions?.get(aKey)?.has(bKey)) return false;
+    const a = solids.get(aKey);
+    const b = solids.get(bKey);
+    const aBox0 = a?.geometry.boundingBox;
+    const bBox0 = b?.geometry.boundingBox;
+    if (!a || !b || !aBox0 || !bBox0) return false;
+    const aBox = aBox0.clone().translate(a.axis.clone().multiplyScalar(aDistance));
+    const bBox = bBox0.clone().translate(b.axis.clone().multiplyScalar(bDistance));
+    const currentDepth = computeAabbOverlapDepth(aBox, bBox);
+    const restDepth = restDepthByPair?.get(aKey)?.get(bKey) ?? 0;
+    return currentDepth <= restDepth + EXPLODE_GATE_REST_EXEMPTION_DEPTH_EPS_MM;
+  }
+
+  /**
+   * The final whole-assembly veto - the last word after every per-part
+   * decision in computeGatedDistancesForAmount has already produced its own
+   * candidate distance. Each part's own check above (isExplodeDistanceClear,
+   * via resolveExplodeGateStep) only tests ITS candidate against every OTHER
+   * part's START-OF-CALL position (`previousGated` - Jacobi-style, see
+   * computeGatedDistancesForAmount's doc comment): two parts that are each
+   * individually clear against the OTHER's stale position can still end up
+   * overlapping once BOTH of their fresh candidates are applied together in
+   * the same frame - a real gap the per-part gate alone cannot close by
+   * construction. This function is the guard against exactly that: the same
+   * real mesh-vs-mesh oracle every other pairwise test in this file already
+   * uses (arePartsClearAtDistances - literal cached-BVH
+   * MeshBVH.intersectsGeometry, not a bbox proxy), run across every pair of
+   * parts' FRESH candidate distances from THIS SAME call, all at once,
+   * respecting the same rest-touching exemptions the per-part gate uses (a
+   * mating fit modeled at zero nominal clearance is a real geometry
+   * baseline, not a violation - see buildExplodeGateRestExemptions).
+   */
+  function findWholeAssemblyOverlaps(
+    solids: Map<string, ExplodeGateSolid>,
+    distanceByPartKey: Map<string, number>,
+    exemptions: Map<string, Set<string>>,
+    restDepthByPair: Map<string, Map<string, number>>,
+  ): ExplodeGateOverlap[] {
+    const keys = Array.from(solids.keys());
+    const overlaps: ExplodeGateOverlap[] = [];
+    for (let i = 0; i < keys.length; i++) {
+      const aKey = keys[i]!;
+      for (let j = i + 1; j < keys.length; j++) {
+        const bKey = keys[j]!;
+        const aDistance = distanceByPartKey.get(aKey) ?? 0;
+        const bDistance = distanceByPartKey.get(bKey) ?? 0;
+        if (isLiveRestExemptionActive(solids, exemptions, restDepthByPair, aKey, aDistance, bKey, bDistance)) continue;
+        if (arePartsClearAtDistances(solids, aKey, aDistance, bKey, bDistance)) {
+          continue;
+        }
+        const a = solids.get(aKey)!;
+        const b = solids.get(bKey)!;
+        const aBox0 = a.geometry.boundingBox;
+        const bBox0 = b.geometry.boundingBox;
+        const aBox = aBox0
+          ? aBox0.clone().translate(a.axis.clone().multiplyScalar(aDistance))
+          : null;
+        const bBox = bBox0
+          ? bBox0.clone().translate(b.axis.clone().multiplyScalar(bDistance))
+          : null;
+        overlaps.push({
+          a: aKey,
+          b: bKey,
+          aName: a.name,
+          bName: b.name,
+          depth: aBox && bBox ? computeAabbOverlapDepth(aBox, bBox) : 0,
+        });
+      }
+    }
+    return overlaps;
+  }
+
+  /**
+   * Resolves whatever findWholeAssemblyOverlaps flags on `nextGated`
+   * without the all-or-nothing freeze's fatal flaw: reverting EVERY part to
+   * `previousGated` verbatim, on every single call, recomputes an
+   * identical `nextGated` from an identical frozen baseline the very next
+   * frame (previousGated never itself advances) - producing the exact same
+   * overlap forever, a true PERMANENT stuck-frozen state once triggered,
+   * confirmed via a real sweep (project memory "explode bush window live
+   * fix and dense rank bug"). This is the same class of missing-escape-
+   * valve bug bisectFurthestClearDistance had before the wide-search
+   * fallback/live-collision precedence were added to resolveExplodeGateStep
+   * - recurring here one level up, at the whole-assembly level, because
+   * this veto was added later and never got an analogous escape valve.
+   *
+   * Two phases:
+   * 1. Best-effort relaxation: for every part named in ANY reported
+   *    overlap (not the whole assembly), binary-search [its own
+   *    previousGated position, its own original nextGated candidate]
+   *    (bisectFurthestClearDistance) against the CURRENT working map
+   *    (`committed` - Gauss-Seidel, so a part processed later in the same
+   *    round already sees an earlier part's fresh, partially-relaxed
+   *    position instead of its stale full candidate), then re-checks the
+   *    whole assembly and repeats for a bounded number of rounds. This is
+   *    what lets `committed` differ from `previousGated` frame to frame -
+   *    breaking the "identical inputs forever" cycle - so a genuinely
+   *    resolvable conflict (the common case: two parts that each just
+   *    needed a smaller step this frame) creeps toward clear over
+   *    successive frames instead of being wiped on every single one. Parts
+   *    never named in any overlap are untouched here, so they keep their
+   *    full nextGated candidate - a part elsewhere in the assembly with a
+   *    perfectly legal move no longer holds just because some unrelated
+   *    pair is in conflict.
+   * 2. Authoritative cleanup: whatever STILL overlaps after phase 1 (a
+   *    genuine structural conflict this frame - e.g. two axes that
+   *    actually cross, see the bush<->bush case) gets reverted to
+   *    previousGated exactly, one pass at a time, re-checking after each.
+   *    This guarantees termination at a fully clean state no matter what
+   *    phase 1 did or didn't resolve (previousGated-vs-previousGated pairs
+   *    are already known clean from the last committed frame, and each
+   *    pass can only shrink the still-fresh set, never grow it) - the same
+   *    zero-overlap guarantee the old code had, just scoped to the parts
+   *    actually still in conflict rather than the whole assembly.
+   */
+  function resolveWholeAssemblyVeto(
+    solids: Map<string, ExplodeGateSolid>,
+    previousGated: Map<string, number>,
+    nextGated: Map<string, number>,
+    exemptions: Map<string, Set<string>>,
+    restDepthByPair: Map<string, Map<string, number>>,
+    yieldRank?: Map<string, number>,
+  ): { committed: Map<string, number>; frozenOverlaps: ExplodeGateOverlap[] } {
+    const committed = new Map(nextGated);
+    let overlaps = findWholeAssemblyOverlaps(solids, committed, exemptions, restDepthByPair);
+
+    for (
+      let round = 0;
+      round < EXPLODE_GATE_VETO_RELAX_ROUNDS && overlaps.length > 0;
+      round++
+    ) {
+      const involved = new Set<string>();
+      for (const o of overlaps) {
+        involved.add(o.a);
+        involved.add(o.b);
+      }
+      // Relaxation is Gauss-Seidel: whichever part is processed FIRST is
+      // bisected back against the other's still-FULL candidate, so it takes
+      // the whole loss; the part processed after it then sees that fresh,
+      // relaxed position and usually keeps its own full step. So this order
+      // decides which of two conflicting parts yields. Set insertion order
+      // is just partKey order, which agrees with the plan's stage order in
+      // one direction of travel and contradicts it in the other - the
+      // earlier-stage part yielded to the later-stage one, letting a
+      // later-stage part (the Sheet Metal Clamp's dowel pin) re-enter before
+      // the part it must wait for (the upper leaf) was home (see project
+      // memory "explode real timing recording and low fps strand"). Callers
+      // that know the direction of travel pass `yieldRank` (lower = yields
+      // first); the stable sort leaves equal ranks, and every caller that
+      // passes none, in the old order.
+      const relaxOrder = Array.from(involved);
+      if (yieldRank) {
+        relaxOrder.sort((a, b) => (yieldRank.get(a) ?? 0) - (yieldRank.get(b) ?? 0));
+      }
+      let progressed = false;
+      for (const partKey of relaxOrder) {
+        const prev = previousGated.get(partKey) ?? 0;
+        const candidate = nextGated.get(partKey) ?? prev;
+        if (Math.abs(candidate - prev) < 1e-9) continue;
+        const before = committed.get(partKey) ?? prev;
+        const bisected = bisectFurthestClearDistance(prev, candidate, (d) =>
+          isExplodeDistanceClear(solids, partKey, d, committed, exemptions, restDepthByPair) &&
+          isSweptPathClear(solids, partKey, prev, d, committed, exemptions, restDepthByPair),
+        );
+        if (Math.abs(bisected - before) > 1e-9) progressed = true;
+        committed.set(partKey, bisected);
+      }
+      overlaps = findWholeAssemblyOverlaps(solids, committed, exemptions, restDepthByPair);
+      if (!progressed) break;
+    }
+
+    const frozenOverlaps: ExplodeGateOverlap[] = [];
+    for (let guard = 0; guard < solids.size && overlaps.length > 0; guard++) {
+      for (const o of overlaps) {
+        committed.set(o.a, previousGated.get(o.a) ?? 0);
+        committed.set(o.b, previousGated.get(o.b) ?? 0);
+      }
+      frozenOverlaps.push(...overlaps);
+      overlaps = findWholeAssemblyOverlaps(solids, committed, exemptions, restDepthByPair);
+    }
+
+    return { committed, frozenOverlaps };
+  }
+
+  /**
+   * True if part `partKey`, placed at `distance` along its own axis, is
+   * clear of every OTHER cached solid at the distance
+   * `neighborDistanceByPartKey` gives it (0 / rest if a part has no entry
+   * yet) - skipping any neighbor listed in `partKey`'s entry of `exemptions`
+   * (pairs already touching at rest, see buildExplodeGateRestExemptions;
+   * pass `null` only while BUILDING that exemption set itself, so the
+   * rest-touching test isn't circularly exempted from itself). Cheap
+   * enough to call from a binary search on every render frame (see
+   * arePartsClearAtDistances). Exits on the FIRST blocking neighbor found
+   * (this is the hot-path yes/no test used to drive the search;
+   * collectExplodeGateBlockers below is the slower "collect everything"
+   * version used once per hold, for reporting).
+   */
+  function isExplodeDistanceClear(
+    solids: Map<string, ExplodeGateSolid>,
+    partKey: string,
+    distance: number,
+    neighborDistanceByPartKey: Map<string, number>,
+    exemptions: Map<string, Set<string>> | null,
+    restDepthByPair: Map<string, Map<string, number>> | null,
+  ): boolean {
+    if (!solids.has(partKey)) return true;
+    for (const otherKey of solids.keys()) {
+      if (otherKey === partKey) continue;
+      const otherDistance = neighborDistanceByPartKey.get(otherKey) ?? 0;
+      if (isLiveRestExemptionActive(solids, exemptions, restDepthByPair, partKey, distance, otherKey, otherDistance)) continue;
+      if (
+        !arePartsClearAtDistances(solids, partKey, distance, otherKey, otherDistance)
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** Same pairwise test as isExplodeDistanceClear, but collects every blocking neighbor (with an approximate penetration depth) instead of exiting on the first - only used once per logged hold in diagnoseExplodeGate, never in the live per-frame path. */
+  function collectExplodeGateBlockers(
+    solids: Map<string, ExplodeGateSolid>,
+    partKey: string,
+    distance: number,
+    neighborDistanceByPartKey: Map<string, number>,
+    exemptions: Map<string, Set<string>>,
+    restDepthByPair: Map<string, Map<string, number>>,
+  ): ExplodeGateHold["heldBy"] {
+    const heldBy: ExplodeGateHold["heldBy"] = [];
+    const self = solids.get(partKey);
+    const selfBox0 = self?.geometry.boundingBox;
+    if (!self || !selfBox0) return heldBy;
+    const selfOffset = self.axis.clone().multiplyScalar(distance);
+    const selfBox = selfBox0.clone().translate(selfOffset);
+    for (const [otherKey, other] of solids) {
+      if (otherKey === partKey) continue;
+      const otherBox0 = other.geometry.boundingBox;
+      if (!otherBox0) continue;
+      const otherDistance = neighborDistanceByPartKey.get(otherKey) ?? 0;
+      if (isLiveRestExemptionActive(solids, exemptions, restDepthByPair, partKey, distance, otherKey, otherDistance)) continue;
+      if (arePartsClearAtDistances(solids, partKey, distance, otherKey, otherDistance)) {
+        continue;
+      }
+      const otherOffset = other.axis.clone().multiplyScalar(otherDistance);
+      const otherBox = otherBox0.clone().translate(otherOffset);
+      heldBy.push({
+        partKey: otherKey,
+        name: other.name,
+        depth: computeAabbOverlapDepth(selfBox, otherBox),
+      });
+    }
+    return heldBy;
+  }
+
+  /**
+   * Binary-searches [knownClearDistance, candidateDistance] for the
+   * furthest point that stays clear per `isClear`, in `iterations` steps
+   * (10 by default - candidate/current distances here are on the order of
+   * an assembly's own size, so 10 halvings land well under manufacturing
+   * tolerance). `knownClearDistance` is trusted clear, not re-verified -
+   * callers should test `candidateDistance` directly first (the common
+   * case, one cheap check) and only reach for this when that fails. This
+   * is the ONE search implementation shared by both the live per-frame
+   * gate (computeGatedDistancesForAmount) and the diagnostic step
+   * simulator (diagnoseExplodeGate) - the graduated-advance behavior the
+   * task asked for, not two separate ad hoc searches.
+   */
+  function bisectFurthestClearDistance(
+    knownClearDistance: number,
+    candidateDistance: number,
+    isClear: (distance: number) => boolean,
+    iterations = EXPLODE_GATE_BISECT_ITERATIONS,
+  ): number {
+    let lo = knownClearDistance;
+    let hi = candidateDistance;
+    for (let i = 0; i < iterations; i++) {
+      const mid = lo + (hi - lo) / 2;
+      if (isClear(mid)) lo = mid;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  /**
+   * True only if `partKey`'s ENTIRE swept path from `fromDistance` to
+   * `toDistance` along its own axis stays clear of every other neighbor at
+   * `neighborDistanceByPartKey`'s value for it - not just the two
+   * endpoints. Closes a real tunneling bug (see project memory "explode
+   * exemption removed full path oracle results"): every clearance check in
+   * this file used to test a single DISTANCE, never the path taken to
+   * reach it, so a step whose candidate happened to land clear on the far
+   * side of a thin obstacle - Reverse's nut-vs-stud return being the
+   * confirmed real repro, where the nut's start and end positions were
+   * both individually clear but the stud sat squarely in between - could
+   * jump straight through it in one frame: a real, visible "teleport",
+   * indistinguishable at the time from a legitimate large step.
+   *
+   * Broad-phase only (translated-AABB slab sweep, computeSweptBoxOverlapInterval
+   * - the SAME primitive the offline blocking-order planner already uses
+   * for "is anything in the way along this exit line", see
+   * computeBboxBlockersForSignedAxis - reused here rather than a second ad
+   * hoc implementation): true continuous per-triangle collision detection
+   * isn't available (MeshBVH here only exposes a fixed-pose
+   * intersectsGeometry test, not a swept one), and an AABB-vs-AABB slab
+   * sweep is authoritative for "could these two ever have touched over
+   * this interval" even though it can occasionally be more conservative
+   * than the exact mesh (an AABB is a superset of every mesh it bounds) -
+   * for a live per-frame gate that is the correct direction to err in: a
+   * false "blocked" costs one extra bisection step; a false "clear" is
+   * exactly the tunneling bug this exists to close. Once the broad phase
+   * flags a candidate in-range overlap, a handful of exact triangle-vs-
+   * triangle samples (the same arePartsClearAtDistances oracle every other
+   * check in this file uses) across that flagged sub-interval confirm it's
+   * a real hit, not just two bounding boxes grazing past each other.
+   *
+   * Exempted pairs (buildExplodeGateRestExemptions) skip the sweep the same
+   * way the endpoint checks do, relying on the same whole-lifetime
+   * monotonic-separation assumption that exemption is already built on
+   * (see buildExplodeGateRestExemptions's doc comment) - this file has no
+   * primitive for a continuous depth bound, and re-deriving one here would
+   * be new scope beyond the tunneling bug this function targets.
+   */
+  function isSweptPathClear(
+    solids: Map<string, ExplodeGateSolid>,
+    partKey: string,
+    fromDistance: number,
+    toDistance: number,
+    neighborDistanceByPartKey: Map<string, number>,
+    exemptions: Map<string, Set<string>> | null,
+    restDepthByPair: Map<string, Map<string, number>> | null,
+  ): boolean {
+    const self = solids.get(partKey);
+    const selfBox0 = self?.geometry.boundingBox;
+    if (!self || !selfBox0) return true;
+    const tMin = Math.min(fromDistance, toDistance);
+    const tMax = Math.max(fromDistance, toDistance);
+    if (tMax - tMin < 1e-9) return true;
+    const SWEEP_CONFIRM_SAMPLES = 5;
+    for (const [otherKey, other] of solids) {
+      if (otherKey === partKey) continue;
+      const otherBox0 = other.geometry.boundingBox;
+      if (!otherBox0) continue;
+      const otherDistance = neighborDistanceByPartKey.get(otherKey) ?? 0;
+      if (
+        isLiveRestExemptionActive(solids, exemptions, restDepthByPair, partKey, fromDistance, otherKey, otherDistance) &&
+        isLiveRestExemptionActive(solids, exemptions, restDepthByPair, partKey, toDistance, otherKey, otherDistance)
+      ) {
+        continue;
+      }
+      const staticBox = otherBox0.clone().translate(other.axis.clone().multiplyScalar(otherDistance));
+      const interval = computeSweptBoxOverlapInterval(selfBox0, self.axis, staticBox, tMin, tMax);
+      if (!interval) continue;
+      for (let i = 0; i <= SWEEP_CONFIRM_SAMPLES; i++) {
+        const probe = interval.lo + ((interval.hi - interval.lo) * i) / SWEEP_CONFIRM_SAMPLES;
+        if (!arePartsClearAtDistances(solids, partKey, probe, otherKey, otherDistance)) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Samples `partKey`'s FULL [0, axisMax] axis range (not just a narrow
+   * [current, candidate] search window) at `samples` even steps, testing
+   * each sample against `neighborDistanceByPartKey`/`exemptions` (or, if
+   * `onlyAgainst` is given, a pairwise-only test against just that one
+   * neighbor via arePartsClearAtDistances). The ONE sampling implementation
+   * shared by the live gate's wide-search fallback (findReachableClearDistance,
+   * used from computeGatedDistancesForAmount) and the diagnostic
+   * debugFullRangeClearSearch wrapper - not two separate scans.
+   */
+  function sampleExplodeGateClearance(
+    solids: Map<string, ExplodeGateSolid>,
+    partKey: string,
+    axisMax: number,
+    samples: number,
+    neighborDistanceByPartKey: Map<string, number>,
+    exemptions: Map<string, Set<string>> | null,
+    restDepthByPair: Map<string, Map<string, number>> | null,
+    onlyAgainst: string | null,
+  ): { distance: number; clear: boolean }[] {
+    const out: { distance: number; clear: boolean }[] = [];
+    const n = Math.max(1, Math.floor(samples));
+    for (let i = 0; i <= n; i++) {
+      const d = (axisMax * i) / n;
+      const clear = onlyAgainst
+        ? arePartsClearAtDistances(
+            solids,
+            partKey,
+            d,
+            onlyAgainst,
+            neighborDistanceByPartKey.get(onlyAgainst) ?? 0,
+          )
+        : isExplodeDistanceClear(
+            solids,
+            partKey,
+            d,
+            neighborDistanceByPartKey,
+            exemptions,
+            restDepthByPair,
+          );
+      out.push({ distance: d, clear });
+    }
+    return out;
+  }
+
+  /**
+   * Wide-search fallback for a part the narrow per-frame bisection
+   * (bisectFurthestClearDistance, restricted to one frame's [current,
+   * candidate] window) made no progress on - samples the part's FULL [0,
+   * axisMax] axis range via sampleExplodeGateClearance and returns the
+   * clear sample closest to `reference` (the frame's ungated target, raw),
+   * or null if every sample is blocked - a genuine structural dead end,
+   * not a search-window limitation. Only called for a part that's actually
+   * stuck this frame (see computeGatedDistancesForAmount), so the coarser
+   * EXPLODE_GATE_WIDE_SEARCH_SAMPLES sample count isn't a per-frame cost -
+   * most frames never reach this function at all.
+   */
+  function findReachableClearDistance(
+    solids: Map<string, ExplodeGateSolid>,
+    partKey: string,
+    axisMax: number,
+    reference: number,
+    neighborDistanceByPartKey: Map<string, number>,
+    exemptions: Map<string, Set<string>>,
+    restDepthByPair: Map<string, Map<string, number>>,
+  ): number | null {
+    const samples = sampleExplodeGateClearance(
+      solids,
+      partKey,
+      axisMax,
+      EXPLODE_GATE_WIDE_SEARCH_SAMPLES,
+      neighborDistanceByPartKey,
+      exemptions,
+      restDepthByPair,
+      null,
+    );
+    let best: number | null = null;
+    let bestDistance = Infinity;
+    for (const sample of samples) {
+      if (!sample.clear) continue;
+      const distance = Math.abs(sample.distance - reference);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = sample.distance;
+      }
+    }
+    return best;
+  }
+
+  /** One part's outcome from resolveExplodeGateStep - see that function's doc comment. */
+  type ExplodeGateStepResolution = {
+    result: number;
+    /** The rate-limited target this step tried BEFORE any bisection/wide-search fallback - `current` moved toward `raw` by at most `stepMagnitude`. Exposed for resolveMutualBlockPair's call site, which needs each stuck part's own original desired delta to retry jointly. */
+    candidate: number;
+    /** False only in the PART8/PART11 "live collision" scenario - see resolveExplodeGateStep's doc comment. */
+    currentIsClear: boolean;
+    clearAtCandidate: boolean;
+    /** True whenever the wide-search fallback (findReachableClearDistance) had to run this call - the narrow [current, candidate] bisection alone made no progress. */
+    narrowSearchStuck: boolean;
+    /** The wide search's chosen target, or null if it never ran (narrowSearchStuck was false) or found nothing (genuine dead end - see `deadEnd`). */
+    wideTarget: number | null;
+    /** True if the wide search found no clear position anywhere on the part's axis - a genuine structural dead end, not a search-window limitation. `result` is held at `current` in this case. */
+    deadEnd: boolean;
+    /** True if a wide-search target WAS found but this call still made zero progress toward it (the swept-path safety net bisected the whole reachable-this-frame window back down to exactly `current`) - the same observable outcome as `deadEnd`, just reached via a different branch, and possibly transient (see this field's assignment site for why it's not folded into `deadEnd` directly). computeGatedDistancesForAmount requires several CONSECUTIVE frames of this before treating it as a confirmed dead end. */
+    noProgressThisFrame: boolean;
+    /** Only populated when narrowSearchStuck - which neighbor(s), at THEIR neighborDistanceByPartKey position, actually blocked this part's candidate (see collectExplodeGateBlockers). Used by computeGatedDistancesForAmount to detect a MUTUAL block (see resolveMutualBlockPair) - a neighbor that is itself also stuck on this same part this frame, rather than genuinely static. */
+    blockedBy: string[];
+  };
+
+  /**
+   * Resolves ONE part's gated distance for a single step, given its
+   * current (last verified clear) distance, this step's ungated raw
+   * target, and the step's rate-limit budget - the exact decision logic
+   * shared by BOTH the live per-frame gate (computeGatedDistancesForAmount,
+   * called every real animation frame with a small per-frame
+   * `stepMagnitude`) and the diagnostic step simulator (diagnoseExplodeGate,
+   * called at coarser stepPercent increments with `stepMagnitude` set to
+   * the full |raw - current| gap so its own `candidate` reduces to `raw`
+   * exactly, matching its pre-existing behavior) - one implementation, so
+   * the two can never silently drift apart the way a hand-duplicated copy
+   * would.
+   *
+   * Order of attempts:
+   * 1. RATE-LIMITED candidate: `current` moved toward `raw` by at most
+   *    `stepMagnitude` (direction-agnostic clamp - see
+   *    computeGatedDistancesForAmount's doc comment for why). One cheap
+   *    clearance check - the overwhelming common case.
+   * 2. NARROW bisect: if the candidate is blocked, binary-search
+   *    [current, candidate] (bisectFurthestClearDistance) for the furthest
+   *    point that stays clear this step.
+   * 3. WIDE search fallback: if the narrow bisect made no progress at all
+   *    (`narrowSearchStuck`) - the per-step window itself never reached far
+   *    enough to find the real clear zone, a confirmed real bug, not a
+   *    structural dead end (see findReachableClearDistance) - sample the
+   *    part's FULL axis range for the reachable clear point closest to
+   *    `raw`, then move toward THAT by the same bounded step, never
+   *    jumping straight to it (the "hold then teleport" snap this gate
+   *    exists to avoid).
+   * 4. LIVE-COLLISION precedence: before any of the above, `current` itself
+   *    is checked for clearance. It's supposed to already be verified
+   *    clear - every other path through this function only ever advances
+   *    FROM a clear point - but a neighbor's own motion since it was last
+   *    verified can leave it penetrating anyway (the PART8/PART11 repro).
+   *    When that happens it overrides the normal candidate/bisect attempt
+   *    entirely this step, going straight to the step-3 wide-search
+   *    recovery instead of wasting a narrow attempt against a start point
+   *    that's already invalid.
+   * 5. DEAD END: if the wide search itself finds no clear position
+   *    anywhere on the part's axis, that's a genuine structural dead end
+   *    (same category as the reversed-axis case) - `result` holds at
+   *    `current`, `deadEnd` comes back true, and the caller decides how to
+   *    report it (never silently).
+   */
+  function resolveExplodeGateStep(
+    solids: Map<string, ExplodeGateSolid>,
+    partKey: string,
+    axisMax: number,
+    current: number,
+    raw: number,
+    stepMagnitude: number,
+    neighborDistanceByPartKey: Map<string, number>,
+    exemptions: Map<string, Set<string>>,
+    restDepthByPair: Map<string, Map<string, number>>,
+  ): ExplodeGateStepResolution {
+    const candidate = THREE.MathUtils.clamp(
+      raw,
+      current - stepMagnitude,
+      current + stepMagnitude,
+    );
+    // Sweep-aware (see isSweptPathClear's doc comment): a distance can only
+    // ever be accepted as "clear" here if the PATH from `current` (this
+    // part's last verified-clear anchor) to it is also swept-clear, not
+    // just the endpoint itself - closes the tunneling/teleport bug a plain
+    // endpoint test can't see (a thin obstacle strictly between the two
+    // that both sides individually clear).
+    const isClearAt = (d: number) =>
+      isExplodeDistanceClear(
+        solids,
+        partKey,
+        d,
+        neighborDistanceByPartKey,
+        exemptions,
+        restDepthByPair,
+      ) && isSweptPathClear(solids, partKey, current, d, neighborDistanceByPartKey, exemptions, restDepthByPair);
+
+    const currentIsClear = isClearAt(current);
+    let clearAtCandidate = false;
+    let bisected = current;
+    let narrowSearchStuck = !currentIsClear;
+    if (currentIsClear) {
+      clearAtCandidate = isClearAt(candidate);
+      if (!clearAtCandidate) {
+        bisected = bisectFurthestClearDistance(current, candidate, isClearAt);
+        narrowSearchStuck = Math.abs(bisected - current) < 1e-9;
+      }
+    }
+
+    let result: number;
+    let wideTarget: number | null = null;
+    let deadEnd = false;
+    let noProgressThisFrame = false;
+    let blockedBy: string[] = [];
+    if (!narrowSearchStuck) {
+      result = clearAtCandidate ? candidate : bisected;
+    } else {
+      blockedBy = collectExplodeGateBlockers(
+        solids,
+        partKey,
+        currentIsClear ? candidate : current,
+        neighborDistanceByPartKey,
+        exemptions,
+        restDepthByPair,
+      ).map((h) => h.partKey);
+      wideTarget = findReachableClearDistance(
+        solids,
+        partKey,
+        axisMax,
+        raw,
+        neighborDistanceByPartKey,
+        exemptions,
+        restDepthByPair,
+      );
+      if (wideTarget === null) {
+        deadEnd = true;
+        result = current;
+      } else {
+        const clamped = THREE.MathUtils.clamp(wideTarget, current - stepMagnitude, current + stepMagnitude);
+        // Final swept-path safety net: findReachableClearDistance only
+        // verified the ENDPOINT sample was clear, and the clamp above only
+        // bounds the step's MAGNITUDE, not whether the path to it tunnels
+        // through something - re-run the same sweep-aware isClearAt used
+        // above (still anchored at `current`) and bisect back if it
+        // doesn't hold, instead of trusting the clamp alone.
+        result = isClearAt(clamped)
+          ? clamped
+          : bisectFurthestClearDistance(current, clamped, isClearAt);
+        // A wide-search target existing doesn't mean THIS frame could make
+        // any real use of it: the reachable point may sit far beyond what
+        // stepMagnitude allows this frame, and the swept-path safety net
+        // above can then bisect the whole [current, clamped] window back
+        // down to exactly current - genuinely zero progress THIS FRAME, the
+        // same observable outcome as wideTarget === null above, just
+        // reached via a different branch. This is reported via
+        // `noProgressThisFrame`, NOT folded into `deadEnd` itself - a
+        // single stuck frame is common and often transient (another part
+        // still settling this same tick can open the path up again next
+        // frame), so the caller (computeGatedDistancesForAmount) requires
+        // several CONSECUTIVE occurrences before treating it as a genuine,
+        // reportable dead end - see EXPLODE_GATE_DEAD_END_CONFIRM_FRAMES's
+        // doc comment for why, and the Stuffing Box bush<->bush pair (see
+        // project memory "explode gate mutual-block, baseline-bound, bush-
+        // shaft axis recheck") for a confirmed real dead end that stays
+        // stuck for 200+ consecutive frames, previously burning the full
+        // Play before the settle loop gave up. Once confirmed over several
+        // frames, the caller promotes this to the same deadEnd treatment
+        // (explodeGateDeadEndLoggedKeys/isExplodeGateConvergedOrStuck) so
+        // the wait ends as soon as it's genuinely known, not 4 seconds
+        // later.
+        if (Math.abs(result - current) < 1e-9) {
+          noProgressThisFrame = true;
+        }
+      }
+    }
+
+    return {
+      result,
+      candidate,
+      currentIsClear,
+      clearAtCandidate,
+      narrowSearchStuck,
+      wideTarget,
+      deadEnd,
+      noProgressThisFrame,
+      blockedBy,
+    };
+  }
+
+  /**
+   * The live, per-frame gate - called from inside setExplodeAmount on
+   * EVERY call (every slider drag tick, every playExplode rAF frame), not
+   * on a fixed step size. For each part whose raw stage-window target has
+   * changed since the last call, tries a RATE-LIMITED candidate first (one
+   * cheap isExplodeDistanceClear check - the overwhelming common case,
+   * since the ordering pipeline already avoids overlap most of the time
+   * and this gate exists for the residual cases); only when that fails
+   * does it binary-search back toward the part's own last verified-clear
+   * distance for the furthest point that stays clear this frame, instead
+   * of freezing it.
+   *
+   * The candidate is NOT the raw target directly - it's a per-frame DELTA
+   * applied on top of wherever the gate actually left the part last frame.
+   * While the part is still inside its own [stageStart, stageEnd] window,
+   * that delta is this frame's raw DELTA (rawNow - rawPrev, i.e. what the
+   * ungated animation itself would have advanced this part by). A part
+   * that was held behind raw for several frames (still blocked) therefore
+   * can't leap straight to the newly-legal ceiling the instant a neighbor
+   * clears - it resumes at normal per-frame pace from where it was, and
+   * only catches up to raw gradually. This trades a slower catch-up for
+   * eliminating the visible "hold then teleport" snap a direct-to-ceiling
+   * jump produces. The step size is direction-agnostic: candidate is
+   * `current` moved toward `raw` by at most this frame's step magnitude
+   * (THREE.MathUtils.clamp(raw, current - stepMagnitude, current +
+   * stepMagnitude)), never derived from amountDelta/rawDelta's sign
+   * directly - it self-corrects toward raw the same way whether amount is
+   * increasing or decreasing, and can never cross past raw in either
+   * direction. Amount only ever increases in the old, forward-only test
+   * suite, where this reduces to exactly the prior Math.min(raw, current +
+   * rawDelta) formula (current <= raw always holds there, so the clamp's
+   * lower bound never binds) - see project memory "explode gate reverse
+   * overshoot fix" for the reverse/scrubbing case this generalizes to and
+   * why the old one-sided Math.min ceiling let gatedDistance run negative
+   * once amount started decreasing.
+   *
+   * A part whose OWN raw target has already saturated (amount has passed
+   * its stageEnd, so raw == entry.distance and stops changing every frame)
+   * but that is STILL behind (current < raw) does NOT get skipped, even
+   * though rawNow - rawPrev is 0 - only a part that's both caught up AND
+   * has an unchanged raw target is skipped (nothing left to do). A still-
+   * behind part instead keeps advancing at its own NOMINAL pace
+   * (entry.distance / span, i.e. the average rate it would have moved at
+   * across its own window) applied to the magnitude of this frame's GLOBAL
+   * amount delta, so it keeps closing the gap at roughly the rate it was
+   * already moving at, all the way to amount=1 if necessary, rather than
+   * freezing solid the instant its nominal window closes - a real,
+   * measured failure mode (a part blocked anywhere within its own window
+   * would otherwise never get another chance to advance for the rest of
+   * the animation, even at amount=1 - see project memory "explode gate
+   * rate limit stranding fix"). Either way the result is clamped toward
+   * `raw` by the same direction-agnostic step above, so this catch-up can
+   * never overshoot the part's true target from either side.
+   *
+   * With overlapping-but-mostly-disjoint stage windows (see
+   * EXPLODE_STAGE_OVERLAP), only a small handful of parts are ever
+   * actively in motion (or catching up) at a given amount, so skipping the
+   * rest entirely is still the dominant real-world cost saver, not the
+   * cached-BVH translation trick alone. Jacobi-style: every neighbor test
+   * in this call reads explodeGatedDistanceByPartKey as it stood at the
+   * START of this call (`previousGated` below), never a value already
+   * updated earlier in this same pass, so the result doesn't depend on Map
+   * iteration order.
+   */
+  function computeGatedDistancesForAmount(amount: number): Map<string, number> {
+    if (!explodePlan) return new Map();
+    const solids = getExplodeGateSolids();
+    const exemptions = getExplodeGateRestExemptions(solids);
+    const restDepthByPair = getExplodeGateRestDepths(solids);
+    const previousGated = explodeGatedDistanceByPartKey;
+    const previousRaw = explodeRawDistanceByPartKey;
+    const amountDelta = amount - explodeLastGateAmount;
+
+    const nextGated = new Map<string, number>();
+    const nextRaw = new Map<string, number>();
+    // Per-part step inputs, kept around after the main loop below so the
+    // mutual-block pass (see resolveMutualBlockPair's call site further
+    // down) can retry a stuck pair jointly without recomputing raw/current/
+    // stepMagnitude from scratch.
+    const stepInputsByPartKey = new Map<
+      string,
+      { current: number; candidate: number; narrowSearchStuck: boolean; blockedBy: string[] }
+    >();
+    for (const [partKey, entry] of explodePlan) {
+      const span = entry.stageEnd - entry.stageStart;
+      const localAmount =
+        span > 1e-9
+          ? THREE.MathUtils.clamp((amount - entry.stageStart) / span, 0, 1)
+          : amount >= entry.stageStart
+            ? 1
+            : 0;
+      const raw = entry.distance * localAmount;
+      nextRaw.set(partKey, raw);
+      const rawPrev = previousRaw.get(partKey) ?? 0;
+      const current = previousGated.get(partKey) ?? 0;
+      const rawDelta = raw - rawPrev;
+      const remainingGap = raw - current;
+      if (Math.abs(rawDelta) < 1e-9 && Math.abs(remainingGap) < 1e-9) {
+        nextGated.set(partKey, current);
+        continue;
+      }
+      const nominalRate = span > 1e-9 ? entry.distance / span : 0;
+      // Magnitude only - direction comes from (raw - current) below, not
+      // from rawDelta/amountDelta's sign, so this self-corrects on reverse
+      // (see the direction-agnostic-clamp note in the doc comment above).
+      // Capped at what EXPLODE_GATE_MAX_STEP_AMOUNT_DELTA worth of amount
+      // progress would produce at this part's OWN nominal rate - regardless
+      // of how large rawDelta/amountDelta actually is for THIS call - see
+      // that constant's doc comment for why a single big jump (a slider
+      // click-to-position) must not resolve straight to raw in one atomic,
+      // only-checked-against-stale-neighbors step. A normal real animation
+      // frame's rawDelta is itself already ~= nominalRate * amountDelta
+      // (well under the cap), so this is a no-op for ordinary per-frame
+      // calls of any stage-window span. A degenerate zero-width window
+      // (nominalRate is 0 by construction - localAmount jumps straight from
+      // 0 to 1 rather than interpolating) has no pacing concept to cap
+      // against, so it falls back to a fraction of its own full distance
+      // instead - same idea, just without a span to divide by. Any
+      // remainder from a capped big jump is picked up by the settle loop's
+      // follow-up frames (runExplodeSettleLoop), the same way a normal
+      // rate-limited catch-up already works.
+      const stepCapRate = nominalRate > 1e-9 ? nominalRate : entry.distance;
+      const stepMagnitude = Math.min(
+        Math.abs(rawDelta) > 1e-9
+          ? Math.abs(rawDelta)
+          : nominalRate * Math.abs(amountDelta),
+        stepCapRate * EXPLODE_GATE_MAX_STEP_AMOUNT_DELTA,
+      );
+      const {
+        result,
+        candidate,
+        currentIsClear,
+        clearAtCandidate,
+        narrowSearchStuck,
+        wideTarget,
+        deadEnd,
+        noProgressThisFrame,
+        blockedBy,
+      } = resolveExplodeGateStep(
+        solids,
+        partKey,
+        entry.distance,
+        current,
+        raw,
+        stepMagnitude,
+        previousGated,
+        exemptions,
+        restDepthByPair,
+      );
+
+      // A structural dead end (no clear position anywhere on the axis) is
+      // trusted immediately - unambiguous by construction. A same-frame
+      // "found a target but made zero use of it" result is NOT trusted
+      // until it repeats EXPLODE_GATE_DEAD_END_CONFIRM_FRAMES times in a
+      // row (see that constant's doc comment) - a single occurrence is
+      // common and often transient.
+      const noProgressStreak = noProgressThisFrame
+        ? (explodeGateNoProgressStreakByPartKey.get(partKey) ?? 0) + 1
+        : 0;
+      explodeGateNoProgressStreakByPartKey.set(partKey, noProgressStreak);
+      const confirmedDeadEnd = deadEnd || noProgressStreak >= EXPLODE_GATE_DEAD_END_CONFIRM_FRAMES;
+
+      // Throttled to once per stuck episode - a part parked on a genuine
+      // dead end for many consecutive frames (a whole playExplode tween,
+      // potentially) would otherwise spam this on every one of them.
+      if (confirmedDeadEnd) {
+        if (!explodeGateDeadEndLoggedKeys.has(partKey)) {
+          console.warn("[ExplodeGateDebug][dead-end]", {
+            partKey,
+            name: entry.object.name || partKey,
+            amount: Number(amount.toFixed(6)),
+            current: Number(current.toFixed(4)),
+            raw: Number(raw.toFixed(4)),
+          });
+        }
+        explodeGateDeadEndLoggedKeys.add(partKey);
+      } else {
+        explodeGateDeadEndLoggedKeys.delete(partKey);
+      }
+
+      nextGated.set(partKey, result);
+      if (narrowSearchStuck) {
+        stepInputsByPartKey.set(partKey, { current, candidate, narrowSearchStuck, blockedBy });
+      }
+      if (explodeGateDebugWatchKeys.has(partKey)) {
+        console.debug("[ExplodeGateDebug]", {
+          partKey,
+          amount: Number(amount.toFixed(6)),
+          current: Number(current.toFixed(4)),
+          raw: Number(raw.toFixed(4)),
+          rawPrev: Number(rawPrev.toFixed(4)),
+          rawDelta: Number(rawDelta.toFixed(4)),
+          remainingGap: Number(remainingGap.toFixed(4)),
+          stepMagnitude: Number(stepMagnitude.toFixed(4)),
+          currentIsClear,
+          clearAtCandidate,
+          narrowSearchStuck,
+          wideTarget: wideTarget === null ? null : Number(wideTarget.toFixed(4)),
+          deadEnd,
+          blockedBy,
+          result: Number(result.toFixed(4)),
+          progressed: Math.abs(result - current) > 1e-9,
+        });
+      }
+    }
+
+    // Mutual-block concurrent resolution - the per-part loop above tests
+    // EVERY part's candidate against every other part's stale start-of-call
+    // position (previousGated, Jacobi-style - see this function's own doc
+    // comment). That is exactly wrong for two parts that are blocking EACH
+    // OTHER this frame: A's wide search sees B parked at previousGated and
+    // finds nothing (deadEnd or a token partial move); B's own wide search,
+    // in the very same call, symmetrically sees A parked and finds nothing
+    // either - so BOTH freeze at `current` forever, even on fixtures where
+    // moving them together clears the pair immediately (confirmed - see
+    // project memory "explode exemption removed full path oracle results":
+    // "every such pair clears under simultaneous co-movement" for KJ/SMC's
+    // stuck units). resolveWholeAssemblyVeto cannot rescue this case either
+    // - it only reacts to an actual OVERLAP in nextGated, and a pair that
+    // both individually froze at `current` produces no overlap at all for
+    // it to see.
+    //
+    // For every pair the loop above flagged as narrowSearchStuck on BOTH
+    // sides, with each one's own blockedBy list naming the OTHER (a genuine
+    // mutual lock, not just incidental proximity), retry their SAME two
+    // rate-limited candidates (stepInputsByPartKey's `candidate`, the exact
+    // per-part-bounded target the individual attempt already tried and
+    // failed at) but jointly: bisect a single shared advance fraction t -
+    // both parts always move together at t, each still within its own
+    // per-frame step budget, never past its own candidate - for the
+    // furthest t where the real mesh oracle (arePartsClearAtDistances, via
+    // isExplodeDistanceClear/isSweptPathClear) reports BOTH clear of each
+    // other's FRESH position at that same t AND of every unrelated
+    // neighbor's own previousGated position. This is the same rate-limited
+    // step and the same mesh oracle the per-part loop already uses - only
+    // WHO gets tested against WHAT changes (each other's live joint
+    // position, not a frozen one). Only applied when it beats what the
+    // individual attempt already achieved, so it can never regress a part
+    // that already made some progress on its own.
+    const resolvedMutualPairKeys = new Set<string>();
+    for (const [aKey, aInput] of stepInputsByPartKey) {
+      for (const bKey of aInput.blockedBy) {
+        const bInput = stepInputsByPartKey.get(bKey);
+        if (!bInput || !bInput.blockedBy.includes(aKey)) continue;
+        const pairKey = aKey < bKey ? `${aKey}|${bKey}` : `${bKey}|${aKey}`;
+        if (resolvedMutualPairKeys.has(pairKey)) continue;
+        resolvedMutualPairKeys.add(pairKey);
+
+        const aDelta = aInput.candidate - aInput.current;
+        const bDelta = bInput.candidate - bInput.current;
+        if (Math.abs(aDelta) < 1e-9 && Math.abs(bDelta) < 1e-9) continue;
+
+        const isJointStepClear = (t: number): boolean => {
+          const aPos = aInput.current + t * aDelta;
+          const bPos = bInput.current + t * bDelta;
+          const neighborsForA = new Map(previousGated);
+          neighborsForA.set(bKey, bPos);
+          const neighborsForB = new Map(previousGated);
+          neighborsForB.set(aKey, aPos);
+          return (
+            isExplodeDistanceClear(solids, aKey, aPos, neighborsForA, exemptions, restDepthByPair) &&
+            isExplodeDistanceClear(solids, bKey, bPos, neighborsForB, exemptions, restDepthByPair) &&
+            isSweptPathClear(solids, aKey, aInput.current, aPos, neighborsForA, exemptions, restDepthByPair) &&
+            isSweptPathClear(solids, bKey, bInput.current, bPos, neighborsForB, exemptions, restDepthByPair)
+          );
+        };
+        // t=0 (both at their own frame-start `current`) is trusted clear
+        // without re-checking - both were each verified clear against
+        // every neighbor, including each other, at the end of the PRIOR
+        // frame's veto pass (the same "knownClearDistance is trusted, not
+        // re-verified" contract bisectFurthestClearDistance's own doc
+        // comment states).
+        const t = bisectFurthestClearDistance(0, 1, isJointStepClear);
+        if (t < 1e-6) continue;
+
+        const aJoint = aInput.current + t * aDelta;
+        const bJoint = bInput.current + t * bDelta;
+        const aExisting = nextGated.get(aKey) ?? aInput.current;
+        const bExisting = nextGated.get(bKey) ?? bInput.current;
+        const improvesA = Math.abs(aJoint - aInput.current) > Math.abs(aExisting - aInput.current) + 1e-9;
+        const improvesB = Math.abs(bJoint - bInput.current) > Math.abs(bExisting - bInput.current) + 1e-9;
+        if (!improvesA && !improvesB) continue;
+
+        nextGated.set(aKey, aJoint);
+        nextGated.set(bKey, bJoint);
+        explodeGateDeadEndLoggedKeys.delete(aKey);
+        explodeGateDeadEndLoggedKeys.delete(bKey);
+        explodeGateNoProgressStreakByPartKey.set(aKey, 0);
+        explodeGateNoProgressStreakByPartKey.set(bKey, 0);
+        console.debug("[ExplodeGateDebug][mutual-block-resolved]", {
+          amount: Number(amount.toFixed(6)),
+          a: aKey,
+          b: bKey,
+          t: Number(t.toFixed(4)),
+          aJoint: Number(aJoint.toFixed(4)),
+          bJoint: Number(bJoint.toFixed(4)),
+        });
+      }
+    }
+
+    // Final whole-assembly veto (see findWholeAssemblyOverlaps) - runs AFTER
+    // every part above has already produced its own candidate, across every
+    // pair's FRESH nextGated distance at once (not the stale per-part
+    // snapshot each individual check above used), catching the Jacobi gap
+    // two individually-legal candidates can still open between them. Unlike
+    // a plain freeze-everyone-to-previousGated, resolveWholeAssemblyVeto
+    // only reverts the parts actually named in a REMAINING overlap after a
+    // best-effort relaxation pass - see its doc comment for why an
+    // unconditional whole-assembly freeze here can never recover once
+    // triggered (previousGated never itself advances, so an unconditional
+    // freeze recomputes the identical conflict from the identical baseline
+    // forever).
+    //
+    // When two parts' fresh positions conflict, the one the plan orders LATER
+    // in the direction of travel is the one that should wait: forward that is
+    // the larger stageStart, in reverse the smaller stageEnd (a reverse
+    // animation returns the late-stage parts first). yieldRank puts that part
+    // first in the veto's relaxation order - see resolveWholeAssemblyVeto.
+    const vetoYieldRank = new Map<string, number>();
+    for (const [partKey, entry] of explodePlan) {
+      vetoYieldRank.set(partKey, amountDelta >= 0 ? -entry.stageStart : entry.stageEnd);
+    }
+    const { committed, frozenOverlaps } = resolveWholeAssemblyVeto(
+      solids,
+      previousGated,
+      nextGated,
+      exemptions,
+      restDepthByPair,
+      vetoYieldRank,
+    );
+    if (frozenOverlaps.length > 0) {
+      // Throttled to once per veto episode, matching the dead-end log
+      // pattern above - a frame-by-frame freeze during a playExplode tween
+      // would otherwise spam this on every one of them.
+      if (!explodeLastWholeAssemblyVeto) {
+        console.warn("[ExplodeGateDebug][whole-assembly-veto]", {
+          amount: Number(amount.toFixed(6)),
+          overlaps: frozenOverlaps.map(
+            (o) => `${o.aName} <-> ${o.bName} (${o.depth.toFixed(3)}mm)`,
+          ),
+        });
+      }
+      explodeLastWholeAssemblyVeto = { amount, overlaps: frozenOverlaps };
+    } else {
+      explodeLastWholeAssemblyVeto = null;
+    }
+    explodeGatedDistanceByPartKey = committed;
+    explodeRawDistanceByPartKey = nextRaw;
+    explodeLastGateAmount = amount;
+    return committed;
+  }
+
+  function getExplodeGateDebugState(): {
+    partKey: string;
+    gatedDistance: number;
+    rawDistance: number;
+  }[] {
+    if (!explodePlan) return [];
+    const out: { partKey: string; gatedDistance: number; rawDistance: number }[] =
+      [];
+    for (const [partKey] of explodePlan) {
+      out.push({
+        partKey,
+        gatedDistance: explodeGatedDistanceByPartKey.get(partKey) ?? 0,
+        rawDistance: explodeRawDistanceByPartKey.get(partKey) ?? 0,
+      });
+    }
+    return out;
+  }
+
+  /** Test/verification only - the whole-assembly veto's (resolveWholeAssemblyVeto) most recent outcome: null if the last computeGatedDistancesForAmount call ended with zero real overlaps across every pair (either nothing conflicted, or the best-effort relaxation pass resolved it - the frame still committed real progress), or the amount and the overlap list for whichever pairs the authoritative cleanup pass actually had to revert to their prior position (only those parts are frozen this frame - everyone else committed normally). Lets a test or the "report where it freezes" step read exactly which pair caused a freeze without reverse-engineering it from gatedDistance staying still across steps. */
+  function getExplodeWholeAssemblyVetoState(): {
+    amount: number;
+    overlaps: ExplodeGateOverlap[];
+  } | null {
+    return explodeLastWholeAssemblyVeto;
+  }
+
+  /** DIAGNOSTIC-ONLY, temporary - see the matching doc comment on the Viewer type. */
+  function setExplodeGateDebugWatch(partKeys: string[]): void {
+    explodeGateDebugWatchKeys = new Set(partKeys);
+  }
+
+  /** DIAGNOSTIC-ONLY, temporary - see the matching doc comment on the Viewer type. Thin wrapper around sampleExplodeGateClearance, the same sampling the live gate's wide-search fallback (findReachableClearDistance) now uses internally when a part gets stuck. */
+  function debugFullRangeClearSearch(
+    partKey: string,
+    onlyAgainst: string | null,
+    samples: number,
+  ): { distance: number; clear: boolean }[] {
+    if (!explodePlan) return [];
+    const entry = explodePlan.get(partKey);
+    if (!entry) return [];
+    const solids = getExplodeGateSolids();
+    const exemptions = getExplodeGateRestExemptions(solids);
+    const restDepthByPair = getExplodeGateRestDepths(solids);
+    return sampleExplodeGateClearance(
+      solids,
+      partKey,
+      entry.distance,
+      samples,
+      explodeGatedDistanceByPartKey,
+      exemptions,
+      restDepthByPair,
+      onlyAgainst,
+    );
+  }
+
+  /**
+   * Diagnostic dry-run - see the matching doc comment on the Viewer type
+   * for the contract. Simulates the sequenced explode timeline in
+   * `stepPercent` increments; at each step, for every part whose ungated
+   * stage-window target changed this step, resolves it via
+   * resolveExplodeGateStep - the SAME step-resolution function the live
+   * gate (computeGatedDistancesForAmount) calls every real frame, with
+   * `stepMagnitude` set to the full |raw - current| gap so its internal
+   * candidate reduces to `raw` exactly (matching this tool's own
+   * step-at-a-time granularity, coarser than a real animation frame) -
+   * graduated advance (narrow bisect, then a wide-axis-range search if the
+   * narrow one made no progress at all), not a freeze. Neighbor tests use
+   * a start-of-step snapshot of every OTHER part's gated distance
+   * (Jacobi-style, order-independent within the step) - unlike the
+   * pre-bisection version of this tool, that snapshot now includes
+   * already-settled parts too, not just other still-moving ones, since the
+   * live gate this dry-run is meant to describe checks against everyone.
+   */
+  function diagnoseExplodeGate(stepPercent = 5): ExplodeGateStepLog[] {
+    if (!explodePlan) return [];
+    const prevAmount = explodeAmount;
+    const entries = Array.from(explodePlan.entries());
+    const solids = getExplodeGateSolids();
+    const exemptions = getExplodeGateRestExemptions(solids);
+    const restDepthByPair = getExplodeGateRestDepths(solids);
+
+    const nameOf =(partKey: string, entry: ExplodePlanEntry): string =>
+      typeof entry.object.name === "string" && entry.object.name.length > 0
+        ? entry.object.name
+        : partKey;
+
+    const localAmountOf = (entry: ExplodePlanEntry, t: number): number => {
+      const span = entry.stageEnd - entry.stageStart;
+      return span > 1e-9
+        ? THREE.MathUtils.clamp((t - entry.stageStart) / span, 0, 1)
+        : t >= entry.stageStart
+          ? 1
+          : 0;
+    };
+
+    // Bypasses setExplodeAmount deliberately - that function moves every
+    // part in lockstep off the SAME global amount, which is exactly what
+    // this gate needs to override per-part. Never calls requestRender, so
+    // nothing reaches the screen until the final restore below.
+    const applyDelta = (entry: ExplodePlanEntry, distance: number): void => {
+      entry.object.position
+        .copy(entry.originalPosition)
+        .addScaledVector(entry.axis, distance);
+    };
+
+    const gatedDistance = new Map<string, number>();
+    for (const [partKey] of entries) gatedDistance.set(partKey, 0);
+
+    const steps: number[] = [];
+    for (let p = 0; p <= 100; p += stepPercent) steps.push(Math.min(1, p / 100));
+    if (steps[steps.length - 1] !== 1) steps.push(1);
+
+    const allParts = entries.map(([partKey, entry]) => ({
+      partKey,
+      name: nameOf(partKey, entry),
+      object: entry.object,
+    }));
+
+    const log: ExplodeGateStepLog[] = [];
+
+    for (const t of steps) {
+      // Start-of-step snapshot - the fixed reference every hold/bisect
+      // decision this step is tested against (Jacobi-style).
+      const snapshot = new Map(gatedDistance);
+      const stepHolds: ExplodeGateHold[] = [];
+
+      for (const [partKey, entry] of entries) {
+        const raw = entry.distance * localAmountOf(entry, t);
+        const current = snapshot.get(partKey)!;
+        if (Math.abs(raw - current) < 1e-9) continue; // nothing attempted
+
+        const { result: advanced } = resolveExplodeGateStep(
+          solids,
+          partKey,
+          entry.distance,
+          current,
+          raw,
+          Math.abs(raw - current),
+          snapshot,
+          exemptions,
+          restDepthByPair,
+        );
+        gatedDistance.set(partKey, advanced);
+
+        if (Math.abs(advanced - raw) > 1e-9) {
+          stepHolds.push({
+            partKey,
+            name: nameOf(partKey, entry),
+            rawDistance: raw,
+            gatedDistance: advanced,
+            shift: raw - advanced,
+            heldBy: collectExplodeGateBlockers(
+              solids,
+              partKey,
+              raw,
+              snapshot,
+              exemptions,
+              restDepthByPair,
+            ),
+          });
+        }
+      }
+
+      // Full-assembly comparison for this step: the INDEPENDENT, slower
+      // real-geometry oracle (buildOverlapCheckGeometry/
+      // findMeshOverlapsAmongParts) - deliberately NOT this gate's own fast
+      // cached test, for the same reason checkExplodeOverlapsAtAmount
+      // doesn't share code with the ordering pipeline: a checker built
+      // from the same logic being checked can only confirm it agrees with
+      // itself. Applied once across EVERY part at this step's UNGATED
+      // stage-window position, then again at the GATED position.
+      for (const [, entry] of entries) {
+        applyDelta(entry, entry.distance * localAmountOf(entry, t));
+      }
+      const ungatedOverlaps = findMeshOverlapsAmongParts(
+        buildOverlapCheckGeometry(allParts),
+      );
+
+      for (const [partKey, entry] of entries) {
+        applyDelta(entry, gatedDistance.get(partKey)!);
+      }
+      const gatedOverlaps = findMeshOverlapsAmongParts(
+        buildOverlapCheckGeometry(allParts),
+      );
+
+      log.push({ amount: t, holds: stepHolds, ungatedOverlaps, gatedOverlaps });
+      console.debug("[ExplodeView][DIAG][gate]", {
+        amount: t,
+        holds: stepHolds.map((h) => ({
+          part: h.name,
+          rawDistance: Number(h.rawDistance.toFixed(3)),
+          gatedDistance: Number(h.gatedDistance.toFixed(3)),
+          shift: Number(h.shift.toFixed(3)),
+          heldBy: h.heldBy.map((x) => `${x.name} (${x.depth.toFixed(3)}mm)`),
+        })),
+        ungatedOverlapCount: ungatedOverlaps.length,
+        gatedOverlapCount: gatedOverlaps.length,
+      });
+    }
+
+    applyExplodeAmount(prevAmount);
+    return log;
+  }
+
+  /**
+   * True once every part in the current explode plan has either reached its
+   * raw stage-window target (within EXPLODE_SETTLE_CONVERGENCE_EPS_MM) or
+   * the live gate has already flagged it a genuine dead end
+   * (explodeGateDeadEndLoggedKeys, set by computeGatedDistancesForAmount) -
+   * i.e. the gate itself has confirmed it can make no further progress, not
+   * just that it hasn't yet. Used by playExplode's settle phase as the real
+   * completion condition, replacing a fixed elapsed-time check that could
+   * abandon a rate-limited/blocked part mid-motion (see project memory
+   * "explode real toggle freeze and play reverse stranding", item 4).
+   */
+  function isExplodeGateConvergedOrStuck(): boolean {
+    if (!explodePlan) return true;
+    for (const partKey of explodePlan.keys()) {
+      if (explodeGateDeadEndLoggedKeys.has(partKey)) continue;
+      const gated = explodeGatedDistanceByPartKey.get(partKey) ?? 0;
+      const raw = explodeRawDistanceByPartKey.get(partKey) ?? 0;
+      if (Math.abs(gated - raw) > EXPLODE_SETTLE_CONVERGENCE_EPS_MM) return false;
+    }
+    return true;
+  }
+
+  /** Diagnostic detail for the settle-timeout warning below - which parts are still short of their raw target, and by how much, when EXPLODE_SETTLE_MAX_EXTRA_MS's safety cap fires. */
+  function getExplodeGateUnsettledParts(): { partKey: string; gap: number }[] {
+    if (!explodePlan) return [];
+    const out: { partKey: string; gap: number }[] = [];
+    for (const partKey of explodePlan.keys()) {
+      if (explodeGateDeadEndLoggedKeys.has(partKey)) continue;
+      const gated = explodeGatedDistanceByPartKey.get(partKey) ?? 0;
+      const raw = explodeRawDistanceByPartKey.get(partKey) ?? 0;
+      const gap = Math.abs(gated - raw);
+      if (gap > EXPLODE_SETTLE_CONVERGENCE_EPS_MM) {
+        out.push({ partKey, gap: Number(gap.toFixed(4)) });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Shared settle phase - bounded background convergence after `amount`
+   * itself has stopped changing, used by BOTH playExplode's post-tween
+   * hand-off AND the public setExplodeAmount wrapper's post-slider-tick
+   * follow-up (see that function's doc comment and project memory "explode
+   * dead-end scc accepted-overlap and slider settle policy" - prior to that
+   * session, setExplodeAmount had NO settle mechanism at all, so a slider
+   * release could freeze wherever the last input event happened to land,
+   * worse than Play's own result on the identical target). Owns the single
+   * shared explodeAnimRAF slot for as long as it runs - callers must
+   * `stopExplodeAnimation()` first if they might already hold it (this
+   * function itself never needs to, since it's only ever entered right
+   * after a caller's own tick/apply already owns that slot or has just
+   * cleared it).
+   *
+   * Keeps calling applyExplodeAmount(target) once per animation frame via a
+   * deliberate backdate of explodeLastGateAmount (never the rendered
+   * explodeAmount itself, which stays at target throughout) - see
+   * EXPLODE_SETTLE_VIRTUAL_STEP's doc comment for why this synthetic
+   * per-frame budget is necessary once the real driving delta has gone to
+   * zero - until every part converges (isExplodeGateConvergedOrStuck) or
+   * EXPLODE_SETTLE_MAX_EXTRA_MS elapses since THIS specific settle window
+   * started.
+   */
+  function runExplodeSettleLoop(
+    target: number,
+    onTick?: (amount: number) => void,
+    onDone?: () => void,
+  ): void {
+    // Only the magnitude of (target - explodeLastGateAmount) is ever read
+    // (see computeGatedDistancesForAmount's amountDelta -> Math.abs), so
+    // this sign is cosmetic, not load-bearing - kept anyway so a mid-settle
+    // diagnostic dump reads naturally (offset on the trailing side of the
+    // direction of travel).
+    const settleBackdateSign = target >= explodeLastGateAmount ? 1 : -1;
+    let settleDeadlineMs: number | null = null;
+
+    const settleStep = () => {
+      if (isExplodeGateConvergedOrStuck()) {
+        explodeAnimRAF = null;
+        onDone?.();
+        return;
+      }
+      const now = performance.now();
+      if (settleDeadlineMs === null) settleDeadlineMs = now + EXPLODE_SETTLE_MAX_EXTRA_MS;
+      if (now > settleDeadlineMs) {
+        const unsettled = getExplodeGateUnsettledParts();
+        // Every still-unsettled part here is either a genuine unexplained
+        // stall (a real bug - keep the loud settle-timeout label) or a
+        // confirmed Stage 6 dead-end SCC member for which no translation-
+        // only disassembly order exists at all (ExplodeStageAssignment.
+        // deadEnd, surfaced per-unit via explodeCertifiedPlanUnitStatus/
+        // getExplodeCertifiedPlanUnitStatus - see project memory "explode
+        // stuffing box scc reconfirmed after jacobi fix"). Dead-end members
+        // get no gate/veto exemption (see getExplodeDeadEndMemberKeys), so
+        // this label is the honest record of a member the real gate could
+        // not carry to its target.
+        const knownSccMemberKeys = getExplodeDeadEndMemberKeys();
+        const isKnownArchitecturalLimit =
+          unsettled.length > 0 && unsettled.every((u) => knownSccMemberKeys.has(u.partKey));
+        console.warn(
+          isKnownArchitecturalLimit
+            ? "[ExplodeGateDebug][settle-scc-limit]"
+            : "[ExplodeGateDebug][settle-timeout]",
+          { target, unsettled },
+        );
+        explodeAnimRAF = null;
+        onDone?.();
+        return;
+      }
+      // Synthetic per-frame progress budget for the live gate's rate-
+      // limited "still behind" catch-up branch - see
+      // EXPLODE_SETTLE_VIRTUAL_STEP's doc comment for why this is necessary
+      // (the real tween/tick above already pinned `amount` at `target`
+      // exactly, so without this, amountDelta reads as 0 forever and any
+      // part not yet caught up freezes in place). The rendered/reported
+      // explodeAmount itself never leaves `target` - only the gate's own
+      // bookkeeping of "how much did amount just move by" is backdated.
+      explodeLastGateAmount = target - settleBackdateSign * EXPLODE_SETTLE_VIRTUAL_STEP;
+      applyExplodeAmount(target);
+      onTick?.(target);
+      explodeAnimRAF = requestAnimationFrame(settleStep);
+    };
+    explodeAnimRAF = requestAnimationFrame(settleStep);
+  }
+
+  /**
+   * playExplode's answer to EXPLODE_GATE_MAX_STEP_AMOUNT_DELTA for an amount
+   * driven by TIME rather than by a one-shot jump: runs the live gate through
+   * every intermediate amount between its previous call and `amount`, in
+   * steps no larger than that cap, without rendering - the caller's own
+   * applyExplodeAmount(amount) is the final step and does the rendering.
+   *
+   * Why this is needed: the tween's per-frame amount delta is set by how long
+   * the frame really took (peak 3*dt/1750 for the ease-out cubic, which passes
+   * the cap once dt > ~29ms, i.e. below ~34fps). A gate call handed more than
+   * the cap applies only the cap (computeGatedDistancesForAmount's
+   * stepMagnitude) and the excess is dropped, so every part falls behind its
+   * raw target by its own amount and, because a step never exceeds the raw
+   * delta, never repays it while raw is still moving. On the Sheet Metal
+   * Clamp's Reverse that lag lets the dowel pin (a LATER stage) re-enter its
+   * hole before the upper leaf (an earlier one) is home, and the half-seated
+   * pin then blocks the leaf for good (see project memory "explode real
+   * timing recording and low fps strand"). Splitting the frame keeps every
+   * gate call under the cap, the same per-step behavior every frame above
+   * ~34fps already gets, regardless of how long the frame actually was.
+   *
+   * Deliberately NOT applied to setExplodeAmount's slider path: a slider
+   * click-to-position is the one-shot jump the cap exists to pace through
+   * runExplodeSettleLoop, and dozens of gate calls inside one input event
+   * would freeze the UI instead of pacing it. Bounded in wall-clock time by
+   * EXPLODE_TICK_SUBSTEP_BUDGET_MS; a no-op (zero extra calls) whenever the
+   * frame's delta is already within the cap.
+   */
+  function advanceExplodeGateForTick(amount: number): void {
+    if (!explodePlan || !EXPLODE_GATE_ENABLED) return;
+    const to = THREE.MathUtils.clamp(amount, 0, 1);
+    const from = explodeLastGateAmount;
+    const delta = to - from;
+    const steps = Math.ceil(Math.abs(delta) / EXPLODE_GATE_MAX_STEP_AMOUNT_DELTA - 1e-9);
+    const deadline = performance.now() + EXPLODE_TICK_SUBSTEP_BUDGET_MS;
+    // The last of the `steps` steps is the caller's own applyExplodeAmount.
+    for (let i = 1; i < steps; i++) {
+      if (performance.now() > deadline) break;
+      computeGatedDistancesForAmount(from + (delta * i) / steps);
+    }
+  }
+
+  /**
+   * setExplodeAmount's own answer to EXPLODE_GATE_MAX_STEP_AMOUNT_DELTA for
+   * a one-shot jump (a slider click-to-position, or any other programmatic
+   * setExplodeAmount call whose delta from explodeLastGateAmount exceeds the
+   * cap): runs the live gate through every intermediate GLOBAL amount
+   * between explodeLastGateAmount and `amount`, in steps no larger than the
+   * cap, without rendering - setExplodeAmount's own applyExplodeAmount call
+   * is the final step and does the rendering.
+   *
+   * Why this is needed, and why runExplodeSettleLoop alone doesn't cover it:
+   * a direct jump computes every part's raw stage-window target against the
+   * FINAL global amount on setExplodeAmount's very first call - unlike a
+   * sweep through intermediate global amounts, this makes every part's raw
+   * target reach its end value in that same call regardless of stage order,
+   * discarding the sequencing stage windows exist to provide (see
+   * computeExplodeStageWindows). The settle loop's later per-frame catch-up
+   * cannot restore that ordering afterward, since raw is already final for
+   * every part from the first call - a later-stage part (e.g. a fastener)
+   * can then race a same-direction earlier-stage part it should be waiting
+   * on and re-enter before that part is clear. Same failure family as
+   * advanceExplodeGateForTick's own doc comment describes for a slow
+   * playExplode frame, reachable here instead via a single big slider jump
+   * regardless of frame rate (see project memory "explode low fps strand
+   * fix cap substep veto order time budget", "Not fixed / not tested").
+   *
+   * Deliberately its own function, not a call to advanceExplodeGateForTick -
+   * that path is playExplode-tick-specific and this hardens setExplodeAmount's
+   * one-shot entry point on its own terms rather than merging the two.
+   * Uses the SAME cheap dry-run technique (bare computeGatedDistancesForAmount
+   * calls, no render) under its own wall-clock budget
+   * (EXPLODE_JUMP_SUBSTEP_BUDGET_MS); any remainder past that budget is still
+   * picked up afterward by setExplodeAmount's own runExplodeSettleLoop call,
+   * same as any other capped step.
+   */
+  function advanceExplodeGateForJump(amount: number): void {
+    if (!explodePlan || !EXPLODE_GATE_ENABLED) return;
+    const to = THREE.MathUtils.clamp(amount, 0, 1);
+    const from = explodeLastGateAmount;
+    const delta = to - from;
+    const steps = Math.ceil(Math.abs(delta) / EXPLODE_GATE_MAX_STEP_AMOUNT_DELTA - 1e-9);
+    const deadline = performance.now() + EXPLODE_JUMP_SUBSTEP_BUDGET_MS;
+    // The last of the `steps` steps is the caller's own applyExplodeAmount.
+    for (let i = 1; i < steps; i++) {
+      if (performance.now() > deadline) break;
+      computeGatedDistancesForAmount(from + (delta * i) / steps);
+    }
   }
 
   function playExplode(
@@ -5239,16 +11971,55 @@ export function createViewer(container: HTMLElement): Viewer {
       const progress = Math.min(elapsed / duration, 1);
       const eased = 1 - Math.pow(1 - progress, 3);
       const amount = THREE.MathUtils.lerp(start, target, eased);
-      setExplodeAmount(amount);
+      advanceExplodeGateForTick(amount);
+      applyExplodeAmount(amount);
       onTick?.(amount);
       if (progress < 1) {
         explodeAnimRAF = requestAnimationFrame(tick);
       } else {
-        explodeAnimRAF = null;
-        onDone?.();
+        // The eased tween has reached its target amount exactly, but the
+        // live gate may still be holding some part short of its raw target
+        // - hand off to the shared settle phase instead of unconditionally
+        // finishing here, so a blocked/rate-limited part keeps getting
+        // frames until it actually converges or the gate itself reports
+        // it's stuck.
+        runExplodeSettleLoop(target, onTick, onDone);
       }
     };
     explodeAnimRAF = requestAnimationFrame(tick);
+  }
+
+  /**
+   * Public entry point (the ONLY setExplodeAmount exposed on the Viewer
+   * interface, called from cad-viewer.tsx's slider onChange on every real
+   * drag tick and from any one-shot programmatic set). First runs the jump
+   * through advanceExplodeGateForJump - a no-op for an ordinary small drag
+   * tick (delta already under EXPLODE_GATE_MAX_STEP_AMOUNT_DELTA), but for a
+   * big one-shot jump this sweeps the live gate through intermediate GLOBAL
+   * amounts first so parts still activate in stage order instead of every
+   * part's raw target landing at once - then applies the real, immediate
+   * position for `amount` exactly like before (same responsive per-tick
+   * feel, same real amountDelta driving the final step, still benefiting
+   * from EXPLODE_GATE_MAX_STEP_AMOUNT_DELTA's anti-teleport cap on that
+   * step), then - unlike before sub-stepping existed - schedules a bounded
+   * background settle window (runExplodeSettleLoop) so a part the live gate
+   * hasn't fully caught up to by the time input events stop keeps getting
+   * frames, mirroring the settle phase playExplode already had. Cancels any
+   * PREVIOUS pending settle window first (stopExplodeAnimation) so a fast
+   * drag's many ticks don't stack concurrent rAF chains - only the LATEST
+   * call's settle window survives to actually run once input goes quiet.
+   * See project memory "explode dead-end scc accepted-overlap and slider
+   * settle policy" for why the settle window was missing before and what
+   * broke without it, and "explode low fps strand fix cap substep veto
+   * order time budget" for why a big jump needed its own sub-stepping too
+   * (a slider jump could strand a part exactly like the low-fps playExplode
+   * case that memory fixed, independent of frame rate).
+   */
+  function setExplodeAmount(amount: number): void {
+    advanceExplodeGateForJump(amount);
+    applyExplodeAmount(amount);
+    stopExplodeAnimation();
+    runExplodeSettleLoop(amount);
   }
 
   function resetExplode(): void {
@@ -5264,6 +12035,17 @@ export function createViewer(container: HTMLElement): Viewer {
       }
     }
     explodeAmount = 0;
+    // Positions are genuinely back at rest now - clear (not invalidate) the
+    // gated-distance state so the next setExplodeAmount call binary-searches
+    // from 0, matching reality, instead of a stale nonzero "last verified
+    // clear" left over from before the reset. The rest-geometry BVH cache
+    // itself is still valid (same plan, same geometry) so it's kept.
+    explodeGatedDistanceByPartKey = new Map();
+    explodeRawDistanceByPartKey = new Map();
+    explodeLastGateAmount = 0;
+    explodeGateDeadEndLoggedKeys = new Set();
+    explodeGateNoProgressStreakByPartKey = new Map();
+    explodeLastWholeAssemblyVeto = null;
     markVisibleMeshRaycastTargetsDirty();
     requestUpdateSilhouette?.();
     requestRender("reset_explode");
@@ -5300,11 +12082,11 @@ export function createViewer(container: HTMLElement): Viewer {
    * explode offset as the new "assembled" position if a recompute ran
    * while parts were displaced.
    */
-  function recomputeExplodePlanPreservingAmount(): ExplodeDebugEntry[] {
+  async function recomputeExplodePlanPreservingAmount(): Promise<ExplodeDebugEntry[]> {
     const preserved = explodeAmount;
-    setExplodeAmount(0);
-    const entries = computeExplodePlan();
-    setExplodeAmount(preserved);
+    applyExplodeAmount(0);
+    const entries = await computeExplodePlan();
+    applyExplodeAmount(preserved);
     return entries;
   }
 
@@ -5328,10 +12110,10 @@ export function createViewer(container: HTMLElement): Viewer {
   }
 
   /** Forces a part's explode axis to a world-aligned direction, discarding whatever geometry detection chose. Pass null to clear just this override (keeping any stage/direction overrides on the same part). */
-  function setExplodePartAxisOverride(
+  async function setExplodePartAxisOverride(
     partKey: string,
     axis: ExplodeAxisOverride | null,
-  ): ExplodeDebugEntry[] {
+  ): Promise<ExplodeDebugEntry[]> {
     if (axis === null) {
       const override = explodeOverridesByPartKey.get(partKey);
       if (override) delete override.axisOverride;
@@ -5343,10 +12125,10 @@ export function createViewer(container: HTMLElement): Viewer {
   }
 
   /** Reverses a part's exit direction relative to whatever axis (auto or overridden) is currently in effect. */
-  function setExplodePartDirectionFlip(
+  async function setExplodePartDirectionFlip(
     partKey: string,
     flipped: boolean,
-  ): ExplodeDebugEntry[] {
+  ): Promise<ExplodeDebugEntry[]> {
     if (flipped) {
       getOrCreateExplodeOverride(partKey).directionFlipped = true;
     } else {
@@ -5367,10 +12149,10 @@ export function createViewer(container: HTMLElement): Viewer {
    * every other part's override; mergeManualStageOverrides collapses
    * everything back to clean consecutive stage numbers afterward.
    */
-  function reorderExplodePart(
+  async function reorderExplodePart(
     partKey: string,
     targetIndex: number,
-  ): ExplodeDebugEntry[] {
+  ): Promise<ExplodeDebugEntry[]> {
     const order = lastExplodeOrder.filter((key) => key !== partKey);
     const clampedIndex = Math.max(0, Math.min(targetIndex, order.length));
     const beforeKey = clampedIndex > 0 ? order[clampedIndex - 1] : null;
@@ -5393,13 +12175,13 @@ export function createViewer(container: HTMLElement): Viewer {
   }
 
   /** Clears every override (stage, axis, direction) for one part, restoring its automatic computation. */
-  function resetExplodePartOverride(partKey: string): ExplodeDebugEntry[] {
+  async function resetExplodePartOverride(partKey: string): Promise<ExplodeDebugEntry[]> {
     explodeOverridesByPartKey.delete(partKey);
     return recomputeExplodePlanPreservingAmount();
   }
 
   /** Clears every override on every part, restoring the fully automatic plan. */
-  function resetAllExplodeOverrides(): ExplodeDebugEntry[] {
+  async function resetAllExplodeOverrides(): Promise<ExplodeDebugEntry[]> {
     explodeOverridesByPartKey.clear();
     return recomputeExplodePlanPreservingAmount();
   }
@@ -12993,6 +19775,26 @@ export function createViewer(container: HTMLElement): Viewer {
     clearIsolation,
     showAllParts,
     computeExplodePlan,
+    setActiveAssemblyKey,
+    checkExplodeOverlapsAtAmount,
+    checkExplodeOverlapsAtCurrentPosition,
+    checkStrictInterferenceAtAmount,
+    debugMeasureCylindricalDeviation,
+    debugRadiusBandStats,
+    diagnoseExplodeGate,
+    getExplodeGateDebugState,
+    getExplodeWholeAssemblyVetoState,
+    setExplodeGateDebugWatch,
+    debugFullRangeClearSearch,
+    certifyExplodeFullPlan,
+    getLastExplodeCertifiedPlan,
+    getExplodeCertifiedPlanActive,
+    getExplodeCertifiedPlanUnitStatus,
+    debugUnitPairClearanceAtMultiples,
+    debugLivePartPairClearanceAtMultiples,
+    debugGoverningBlockerForUnit,
+    debugExplodeStageDistanceSolveTrace,
+    debugUnitGeometryInfo,
     setExplodeAmount,
     playExplode,
     stopExplodeAnimation,

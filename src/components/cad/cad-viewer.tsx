@@ -2066,6 +2066,10 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       if (!file || !viewerRef.current || !workerRef.current) return;
       const ext = getFileExt(file);
       const fileKey = getFileCacheKey(file);
+      // So computeExplodePlan's dead-end-SCC permutation search cache
+      // (viewer.ts, explodeSccOrderSearchCache) can key on which assembly
+      // is loaded - set before anything else in this load cycle runs.
+      viewerRef.current?.setActiveAssemblyKey(fileKey);
 
       const load = async () => {
         const requestId = ++loadRequestRef.current;
@@ -2928,11 +2932,22 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       }
       if (parts.length === 0) return;
       viewerRef.current?.clearIsolation();
-      const entries = viewerRef.current?.computeExplodePlan() ?? [];
-      console.debug("[ExplodeView] rules fired", entries);
-      setExplodeEntries(entries);
-      setExplodeActive(true);
-      setExplodePendingParts(false);
+      // computeExplodePlan now resolves asynchronously (its dead-end-SCC
+      // search may run a chunked, non-blocking brute-force pass on a
+      // cache miss) - `cancelled` avoids setting state from a stale call
+      // if this effect's own dependencies change again before it resolves.
+      let cancelled = false;
+      (async () => {
+        const entries = (await viewerRef.current?.computeExplodePlan()) ?? [];
+        if (cancelled) return;
+        console.debug("[ExplodeView] rules fired", entries);
+        setExplodeEntries(entries);
+        setExplodeActive(true);
+        setExplodePendingParts(false);
+      })();
+      return () => {
+        cancelled = true;
+      };
     }, [explodePendingParts, isLoading, assemblyMode, parts]);
 
     // Display order for the "Order" panel's list - sorted by final stage,
@@ -5278,11 +5293,22 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                         } else if (assemblyMode === "parts" && parts.length > 0) {
                           viewerRef.current?.clearIsolation();
                           setPartMenu(null);
-                          const entries =
-                            viewerRef.current?.computeExplodePlan() ?? [];
-                          console.debug("[ExplodeView] rules fired", entries);
-                          setExplodeEntries(entries);
-                          setExplodeActive(true);
+                          // computeExplodePlan resolves asynchronously (its
+                          // dead-end-SCC search can take real wall-clock
+                          // time on a cold cache, even though it no longer
+                          // blocks the tab while doing so) - show the same
+                          // "pending" toggle/loading state the not-yet-
+                          // loaded branch below already uses, so the toggle
+                          // doesn't look unresponsive while it resolves.
+                          setExplodePendingParts(true);
+                          (async () => {
+                            const entries =
+                              (await viewerRef.current?.computeExplodePlan()) ?? [];
+                            console.debug("[ExplodeView] rules fired", entries);
+                            setExplodeEntries(entries);
+                            setExplodeActive(true);
+                            setExplodePendingParts(false);
+                          })();
                         } else {
                           // Needs the same per-part mesh load "Assembly
                           // parts" triggers, but deliberately does NOT set
@@ -5378,9 +5404,9 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                           <button
                             type="button"
                             disabled={!sortedExplodeEntries.some((e) => e.overridden)}
-                            onClick={() => {
+                            onClick={async () => {
                               const next =
-                                viewerRef.current?.resetAllExplodeOverrides() ?? [];
+                                (await viewerRef.current?.resetAllExplodeOverrides()) ?? [];
                               setExplodeEntries(next);
                             }}
                             className={`cad-btn cad-btn--small ${
@@ -5396,15 +5422,15 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                         <div
                           className="cad-explode-order-list"
                           onDragOver={(e) => e.preventDefault()}
-                          onDrop={(e) => {
+                          onDrop={async (e) => {
                             e.preventDefault();
                             const draggedKey = e.dataTransfer.getData("text/plain");
                             if (draggedKey) {
                               const next =
-                                viewerRef.current?.reorderExplodePart(
+                                (await viewerRef.current?.reorderExplodePart(
                                   draggedKey,
                                   sortedExplodeEntries.length,
-                                ) ?? [];
+                                )) ?? [];
                               setExplodeEntries(next);
                             }
                             setExplodeDraggedPartKey(null);
@@ -5444,7 +5470,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                                     cur === index ? null : cur,
                                   );
                                 }}
-                                onDrop={(e) => {
+                                onDrop={async (e) => {
                                   e.preventDefault();
                                   e.stopPropagation();
                                   const draggedKey = e.dataTransfer.getData("text/plain");
@@ -5461,10 +5487,10 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                                       target -= 1;
                                     }
                                     const next =
-                                      viewerRef.current?.reorderExplodePart(
+                                      (await viewerRef.current?.reorderExplodePart(
                                         draggedKey,
                                         target,
-                                      ) ?? [];
+                                      )) ?? [];
                                     setExplodeEntries(next);
                                   }
                                   setExplodeDraggedPartKey(null);
@@ -5499,11 +5525,11 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                                   {entry.overridden && (
                                     <button
                                       type="button"
-                                      onClick={() => {
+                                      onClick={async () => {
                                         const next =
-                                          viewerRef.current?.resetExplodePartOverride(
+                                          (await viewerRef.current?.resetExplodePartOverride(
                                             entry.partKey,
-                                          ) ?? [];
+                                          )) ?? [];
                                         setExplodeEntries(next);
                                       }}
                                       className="cad-icon-btn cad-icon-btn--enabled"
@@ -5526,12 +5552,12 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                                   </span>
                                   <button
                                     type="button"
-                                    onClick={() => {
+                                    onClick={async () => {
                                       const next =
-                                        viewerRef.current?.setExplodePartDirectionFlip(
+                                        (await viewerRef.current?.setExplodePartDirectionFlip(
                                           entry.partKey,
                                           !entry.directionFlipped,
-                                        ) ?? [];
+                                        )) ?? [];
                                       setExplodeEntries(next);
                                     }}
                                     className={`cad-btn cad-btn--small ${
@@ -5548,13 +5574,13 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                                     <button
                                       key={axis}
                                       type="button"
-                                      onClick={() => {
+                                      onClick={async () => {
                                         const isActive = activeAxis === axis;
                                         const next =
-                                          viewerRef.current?.setExplodePartAxisOverride(
+                                          (await viewerRef.current?.setExplodePartAxisOverride(
                                             entry.partKey,
                                             isActive ? null : axis,
-                                          ) ?? [];
+                                          )) ?? [];
                                         setExplodeEntries(next);
                                       }}
                                       className={`cad-btn cad-explode-axis-btn ${
