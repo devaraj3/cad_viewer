@@ -388,6 +388,9 @@ export type Viewer = {
     geom: THREE.BufferGeometry,
     opts?: { refit?: boolean },
   ) => void;
+  setBendLineOverlay: (
+    segments: Array<{ a: [number, number, number]; b: [number, number, number] }> | null,
+  ) => void;
   loadObject3D: (
     object: THREE.Object3D,
     options?: { explodeTopLevel?: boolean },
@@ -11767,6 +11770,86 @@ export function createViewer(container: HTMLElement): Viewer {
     return null;
   }
 
+  let bendLineOverlayGroup: THREE.Group | null = null;
+
+  function clearBendLineOverlay() {
+    if (!bendLineOverlayGroup) return;
+    const group = bendLineOverlayGroup;
+    bendLineOverlayGroup = null;
+    try {
+      group.traverse((obj: any) => {
+        if (obj?.geometry) {
+          try {
+            disposeGeometryBoundsTree(obj.geometry);
+            obj.geometry.dispose();
+          } catch {
+            /* ignore */
+          }
+        }
+        if (obj?.material) {
+          try {
+            if (Array.isArray(obj.material)) obj.material.forEach((m: any) => m?.dispose?.());
+            else obj.material?.dispose?.();
+          } catch {
+            /* ignore */
+          }
+        }
+      });
+      if (group.parent) group.parent.remove(group);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /**
+   * Dashed fold-line overlay for the sheet-metal flat pattern view. `segments`
+   * are already in the primary mesh's post-recenter local frame (the caller
+   * mirrors recenterGeometryAtOrigin's own translate-to-bbox-center math
+   * before calling this, since that function mutates its geom argument in
+   * place and this overlay is a separate object with no such hook). Each
+   * segment gets its own [0, length] lineDistance run rather than a shared
+   * running total - these are independent fold lines, not one connected
+   * polyline, so a shared run would dash them inconsistently relative to
+   * each segment's own endpoints.
+   */
+  function setBendLineOverlay(
+    segments: Array<{ a: [number, number, number]; b: [number, number, number] }> | null,
+  ) {
+    clearBendLineOverlay();
+    if (!segments || segments.length === 0) {
+      requestRender("bend_line_overlay_clear");
+      return;
+    }
+    const positions: number[] = [];
+    const distances: number[] = [];
+    for (const seg of segments) {
+      const [ax, ay, az] = seg.a;
+      const [bx, by, bz] = seg.b;
+      positions.push(ax, ay, az, bx, by, bz);
+      const len = Math.hypot(bx - ax, by - ay, bz - az);
+      distances.push(0, len);
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geom.setAttribute("lineDistance", new THREE.Float32BufferAttribute(distances, 1));
+    const dashSize = THREE.MathUtils.clamp(modelDiagonal * 0.01, 0.5, 3);
+    const mat = new THREE.LineDashedMaterial({
+      color: 0x1d4ed8,
+      dashSize,
+      gapSize: dashSize * 0.6,
+      depthTest: false,
+      depthWrite: false,
+    });
+    const line = new THREE.LineSegments(geom, mat);
+    line.renderOrder = 9999;
+    const group = new THREE.Group();
+    group.userData.__bendLineOverlay = true;
+    group.add(line);
+    modelRoot.add(group);
+    bendLineOverlayGroup = group;
+    requestRender("bend_line_overlay_set");
+  }
+
   function replacePrimaryGeometry(
     geom: THREE.BufferGeometry,
     opts?: { refit?: boolean },
@@ -11782,6 +11865,7 @@ export function createViewer(container: HTMLElement): Viewer {
     clearWireframeOverlays();
     clearFeatureEdges();
     clearEdgeHighlight();
+    clearBendLineOverlay();
     cadMeshData.delete(mesh);
 
     const prevGeom = mesh.geometry as THREE.BufferGeometry | undefined;
@@ -12059,6 +12143,7 @@ export function createViewer(container: HTMLElement): Viewer {
     clearFeatureEdges();
     clearWireframeOverlays();
     clearCadTopology();
+    clearBendLineOverlay();
     resetIsolationSnapshot();
     clearModelRootChildren();
     if (featureEdgesGroup.parent !== modelRoot) {
@@ -12976,6 +13061,7 @@ export function createViewer(container: HTMLElement): Viewer {
   return {
     loadMeshFromGeometry,
     replacePrimaryGeometry,
+    setBendLineOverlay,
     loadObject3D,
     clear,
     setView,

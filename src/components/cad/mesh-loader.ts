@@ -65,23 +65,13 @@ type TessWithTopologyReq = {
   };
 };
 
-type AnalyzeSheetMetalReq = {
+type SheetMetalAnalyzeReq = {
   id: string;
-  type: "analyze_sheetmetal";
-  payload: {
-    buffer: ArrayBuffer;
-    ext: CADExt;
-  };
-};
-
-type UnfoldSheetMetalReq = {
-  id: string;
-  type: "unfold_sheetmetal";
+  type: "sheet_metal_analyze";
   payload: {
     buffer: ArrayBuffer;
     ext: CADExt;
     kFactor: number;
-    thicknessOverrideMM?: number;
   };
 };
 
@@ -167,34 +157,40 @@ export const DEFAULT_WORKER_CAPABILITIES: WorkerCapabilities = {
   supportedExactCadFormats: [],
 };
 
-export type SheetMetalMeta = {
-  isAssembly: boolean;
+export type SheetMetalDetectionSummary = {
   isSheetMetal: boolean;
+  reason?: string;
+  reasonDetail?: string;
   thicknessMM?: number;
-  bendCount?: number;
-  reason?:
-    | "assembly"
-    | "not_sheetmetal"
-    | "not_brep_source"
-    | "unsupported_surfaces"
-    | "analysis_failed"
-    | string;
+  bendCount: number;
+  embossCount: number;
+  steppedFeatureCount: number;
 };
 
-type AnalyzeSheetMetalOk = {
-  id: string;
-  ok: true;
-  meta: SheetMetalMeta;
+export type SheetMetalBendLineSegment = {
+  a: [number, number, number];
+  b: [number, number, number];
 };
 
-type UnfoldSheetMetalOk = {
+export type SheetMetalUnfoldOutcome =
+  | { ok: true; flat: THREE.BufferGeometry; bendLineSegments: SheetMetalBendLineSegment[] }
+  | { ok: false; reason: string; reasonDetail: string };
+
+export type SheetMetalAnalysisResult = {
+  detection: SheetMetalDetectionSummary;
+  /** null when detection.isSheetMetal is false - unfold was never attempted. */
+  unfold: SheetMetalUnfoldOutcome | null;
+};
+
+type SheetMetalAnalyzeOk = {
   id: string;
   ok: true;
-  meta: SheetMetalMeta;
-  flat: {
-    positions: Float32Array;
-    indices: Uint32Array;
-  };
+  type: "sheet_metal_analyze";
+  detection: SheetMetalDetectionSummary;
+  unfold:
+    | { ok: true; flat: { positions: Float32Array; indices: Uint32Array }; bendLineSegments: SheetMetalBendLineSegment[] }
+    | { ok: false; reason: string; reasonDetail: string }
+    | null;
 };
 
 export type CadAssemblyNode = {
@@ -447,23 +443,33 @@ function normalizeCadPartId(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function normalizeSheetMetalMeta(raw: any): SheetMetalMeta {
+function normalizeSheetMetalDetectionSummary(
+  raw: any,
+): SheetMetalDetectionSummary {
   if (!raw || typeof raw !== "object") {
     return {
-      isAssembly: false,
       isSheetMetal: false,
+      bendCount: 0,
+      embossCount: 0,
+      steppedFeatureCount: 0,
       reason: "analysis_failed",
     };
   }
-
   const thicknessMM = Number(raw.thicknessMM);
   const bendCount = Number(raw.bendCount);
+  const embossCount = Number(raw.embossCount);
+  const steppedFeatureCount = Number(raw.steppedFeatureCount);
   return {
-    isAssembly: !!raw.isAssembly,
     isSheetMetal: !!raw.isSheetMetal,
     thicknessMM: Number.isFinite(thicknessMM) ? thicknessMM : undefined,
-    bendCount: Number.isFinite(bendCount) ? bendCount : undefined,
+    bendCount: Number.isFinite(bendCount) ? bendCount : 0,
+    embossCount: Number.isFinite(embossCount) ? embossCount : 0,
+    steppedFeatureCount: Number.isFinite(steppedFeatureCount)
+      ? steppedFeatureCount
+      : 0,
     reason: typeof raw.reason === "string" ? raw.reason : undefined,
+    reasonDetail:
+      typeof raw.reasonDetail === "string" ? raw.reasonDetail : undefined,
   };
 }
 
@@ -1230,24 +1236,38 @@ export async function loadMeshAssemblyAsObject3D(
   return object;
 }
 
+/**
+ * Runs sheet-metal detection + (if detected) an unfold attempt at the given
+ * K-factor, in a single worker round trip - the worker needs the detection
+ * result as unfoldSheetMetal's input anyway, so there is nothing to save by
+ * splitting this into two messages. Called once on file load (default
+ * K-factor, to populate the info line and learn whether Unfold should be
+ * disabled) and again whenever the user edits K-factor while unfolded.
+ */
 export async function analyzeCadSheetMetal(
   file: File | string,
   worker: Worker,
-): Promise<SheetMetalMeta> {
+  opts: { kFactor: number },
+): Promise<SheetMetalAnalysisResult> {
   const { fileObj, ext } = await resolveInputFile(file);
   if (!isCADExt(ext)) {
     return {
-      isAssembly: false,
-      isSheetMetal: false,
-      reason: "not_brep_source",
+      detection: {
+        isSheetMetal: false,
+        bendCount: 0,
+        embossCount: 0,
+        steppedFeatureCount: 0,
+        reason: "not_brep_source",
+      },
+      unfold: null,
     };
   }
 
   const id = Math.random().toString(36).slice(2);
   const buf = await fileObj.arrayBuffer();
 
-  return new Promise<SheetMetalMeta>((resolve, reject) => {
-    const handle = (e: MessageEvent<AnalyzeSheetMetalOk | TessErr>) => {
+  return new Promise<SheetMetalAnalysisResult>((resolve, reject) => {
+    const handle = (e: MessageEvent<SheetMetalAnalyzeOk | TessErr>) => {
       const data = e.data;
       if (!data || data.id !== id) return;
       worker.removeEventListener("message", handle as any);
@@ -1262,100 +1282,53 @@ export async function analyzeCadSheetMetal(
         );
         return;
       }
-      resolve(normalizeSheetMetalMeta(data.meta));
+
+      const detection = normalizeSheetMetalDetectionSummary(data.detection);
+      let unfold: SheetMetalUnfoldOutcome | null = null;
+      if (data.unfold) {
+        if (data.unfold.ok) {
+          const positions =
+            data.unfold.flat?.positions instanceof Float32Array
+              ? data.unfold.flat.positions
+              : new Float32Array(data.unfold.flat?.positions ?? []);
+          const indices =
+            data.unfold.flat?.indices instanceof Uint32Array
+              ? data.unfold.flat.indices
+              : new Uint32Array(data.unfold.flat?.indices ?? []);
+          const flat = new THREE.BufferGeometry();
+          flat.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+          flat.setIndex(new THREE.BufferAttribute(indices, 1));
+          flat.computeVertexNormals();
+          computeGeometryBoundsTree(flat);
+          unfold = {
+            ok: true,
+            flat,
+            bendLineSegments: Array.isArray(data.unfold.bendLineSegments)
+              ? data.unfold.bendLineSegments
+              : [],
+          };
+        } else {
+          unfold = {
+            ok: false,
+            reason: data.unfold.reason,
+            reasonDetail: data.unfold.reasonDetail,
+          };
+        }
+      }
+
+      resolve({ detection, unfold });
     };
 
     worker.addEventListener("message", handle as any);
     worker.postMessage(
       {
         id,
-        type: "analyze_sheetmetal",
-        payload: { buffer: buf, ext },
-      } as AnalyzeSheetMetalReq,
+        type: "sheet_metal_analyze",
+        payload: { buffer: buf, ext, kFactor: opts.kFactor },
+      } as SheetMetalAnalyzeReq,
       [buf],
     );
   });
-}
-
-export async function unfoldCadSheetMetal(
-  file: File | string,
-  worker: Worker,
-  opts: { kFactor: number; thicknessOverrideMM?: number },
-): Promise<{ flat: THREE.BufferGeometry; meta: SheetMetalMeta }> {
-  const { fileObj, ext } = await resolveInputFile(file);
-  if (!isCADExt(ext)) {
-    return {
-      meta: {
-        isAssembly: false,
-        isSheetMetal: false,
-        reason: "not_brep_source",
-      },
-      flat: new THREE.BufferGeometry(),
-    };
-  }
-
-  const id = Math.random().toString(36).slice(2);
-  const buf = await fileObj.arrayBuffer();
-
-  return new Promise<{ flat: THREE.BufferGeometry; meta: SheetMetalMeta }>(
-    (resolve, reject) => {
-      const handle = (e: MessageEvent<UnfoldSheetMetalOk | TessErr>) => {
-        const data = e.data;
-        if (!data || data.id !== id) return;
-        worker.removeEventListener("message", handle as any);
-
-        if (!data.ok) {
-          reject(
-            new Error(
-              "error" in data && typeof data.error === "string"
-                ? data.error
-                : "OpenCascade error",
-            ),
-          );
-          return;
-        }
-
-        const positions =
-          data.flat?.positions instanceof Float32Array
-            ? data.flat.positions
-            : new Float32Array(data.flat?.positions ?? []);
-        const indices =
-          data.flat?.indices instanceof Uint32Array
-            ? data.flat.indices
-            : new Uint32Array(data.flat?.indices ?? []);
-        if (positions.length === 0 || indices.length === 0) {
-          reject(new Error("Unfolded flat pattern is empty"));
-          return;
-        }
-
-        const flat = new THREE.BufferGeometry();
-        flat.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-        flat.setIndex(new THREE.BufferAttribute(indices, 1));
-        flat.computeVertexNormals();
-        computeGeometryBoundsTree(flat);
-
-        resolve({
-          flat,
-          meta: normalizeSheetMetalMeta(data.meta),
-        });
-      };
-
-      worker.addEventListener("message", handle as any);
-      worker.postMessage(
-        {
-          id,
-          type: "unfold_sheetmetal",
-          payload: {
-            buffer: buf,
-            ext,
-            kFactor: opts.kFactor,
-            thicknessOverrideMM: opts.thicknessOverrideMM,
-          },
-        } as UnfoldSheetMetalReq,
-        [buf],
-      );
-    },
-  );
 }
 
 export async function exportCadPartExact(
