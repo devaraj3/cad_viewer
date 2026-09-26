@@ -120,6 +120,18 @@ export type HiddenLineComputeResult = {
 
 export type HiddenLineViewName = "front" | "top" | "right";
 
+/** A full camera+controls pose (both projections kept in sync, only one active at a time) - see getCameraSnapshot/applyCameraSnapshot. */
+export type CameraSnapshot = {
+  perspPosition: THREE.Vector3;
+  orthoPosition: THREE.Vector3;
+  orthoLeft: number;
+  orthoRight: number;
+  orthoTop: number;
+  orthoBottom: number;
+  target: THREE.Vector3;
+  up: THREE.Vector3;
+};
+
 /**
  * One continuous run of hidden-line result geometry, already projected into
  * the captured view's own pixel space (the same space canvasWidth/
@@ -399,6 +411,17 @@ export type Viewer = {
   setView: (
     preset: "top" | "front" | "right" | "iso" | "bottom" | "left" | "back",
   ) => void;
+  /**
+   * Smoothly animates to `preset` and fits the current model bounds, then
+   * settles into exactly the same resting state setView()+fitCameraToBox()
+   * would reach instantly (used for the sheet-metal Unfold-on transition).
+   */
+  animatePresetViewFit: (
+    preset: "top" | "front" | "right" | "iso" | "bottom" | "left" | "back",
+    durationMs?: number,
+  ) => void;
+  getCameraSnapshot: () => CameraSnapshot;
+  applyCameraSnapshot: (snapshot: CameraSnapshot) => void;
   setProjection: (mode: "perspective" | "orthographic") => void;
   setFeatureEdgesEnabled: (enabled: boolean) => void;
   setExactCadEdgeDisplayOptions: (
@@ -12247,6 +12270,109 @@ export function createViewer(container: HTMLElement): Viewer {
     requestRender("set_view");
   }
 
+  function getCameraSnapshot(): CameraSnapshot {
+    return {
+      perspPosition: persp.position.clone(),
+      orthoPosition: ortho.position.clone(),
+      orthoLeft: ortho.left,
+      orthoRight: ortho.right,
+      orthoTop: ortho.top,
+      orthoBottom: ortho.bottom,
+      target: controls.target.clone(),
+      up: activeCamera.up.clone(),
+    };
+  }
+
+  function applyCameraSnapshot(snapshot: CameraSnapshot): void {
+    persp.position.copy(snapshot.perspPosition);
+    ortho.position.copy(snapshot.orthoPosition);
+    ortho.left = snapshot.orthoLeft;
+    ortho.right = snapshot.orthoRight;
+    ortho.top = snapshot.orthoTop;
+    ortho.bottom = snapshot.orthoBottom;
+    persp.up.copy(snapshot.up);
+    ortho.up.copy(snapshot.up);
+    persp.lookAt(snapshot.target);
+    ortho.lookAt(snapshot.target);
+    persp.updateProjectionMatrix();
+    ortho.updateProjectionMatrix();
+    controls.target.copy(snapshot.target);
+    controls.update();
+    requestUpdateSilhouette?.();
+    scheduleExactCurveFeatureResample("apply_camera_snapshot");
+    emitViewChanged();
+    requestRender("apply_camera_snapshot");
+  }
+
+  function animateCameraToSnapshot(target: CameraSnapshot, durationMs: number): void {
+    const startPersp = persp.position.clone();
+    const startOrtho = ortho.position.clone();
+    const startTarget = controls.target.clone();
+    const startUp = activeCamera.up.clone();
+    const startOrthoLeft = ortho.left;
+    const startOrthoRight = ortho.right;
+    const startOrthoTop = ortho.top;
+    const startOrthoBottom = ortho.bottom;
+    const startTime = performance.now();
+
+    const step = () => {
+      const t = Math.min(1, (performance.now() - startTime) / durationMs);
+      const ease = 1 - Math.pow(1 - t, 3);
+
+      persp.position.lerpVectors(startPersp, target.perspPosition, ease);
+      ortho.position.lerpVectors(startOrtho, target.orthoPosition, ease);
+      ortho.left = THREE.MathUtils.lerp(startOrthoLeft, target.orthoLeft, ease);
+      ortho.right = THREE.MathUtils.lerp(startOrthoRight, target.orthoRight, ease);
+      ortho.top = THREE.MathUtils.lerp(startOrthoTop, target.orthoTop, ease);
+      ortho.bottom = THREE.MathUtils.lerp(startOrthoBottom, target.orthoBottom, ease);
+      const nextTarget = new THREE.Vector3().lerpVectors(startTarget, target.target, ease);
+      const nextUp = new THREE.Vector3().lerpVectors(startUp, target.up, ease).normalize();
+
+      persp.up.copy(nextUp);
+      ortho.up.copy(nextUp);
+      persp.lookAt(nextTarget);
+      ortho.lookAt(nextTarget);
+      persp.updateProjectionMatrix();
+      ortho.updateProjectionMatrix();
+      controls.target.copy(nextTarget);
+      controls.update();
+      requestUpdateSilhouette?.();
+      requestRender("animate_camera_to_snapshot");
+
+      if (t < 1) {
+        requestAnimationFrame(step);
+      } else {
+        scheduleExactCurveFeatureResample("animate_camera_to_snapshot_done");
+        emitViewChanged();
+      }
+    };
+
+    step();
+  }
+
+  /**
+   * Smoothly animates to `preset` and fits the current model bounds -
+   * computed by instantly running the trusted setView()+fitCameraToBox()
+   * math, snapshotting that resting state, reverting to the pre-call state
+   * (all synchronous, before any paint happens), then animating from there
+   * to the snapshot. Guarantees the animation settles into exactly the same
+   * pose the instant version would reach.
+   */
+  function animatePresetViewFit(
+    preset: "top" | "front" | "right" | "iso" | "bottom" | "left" | "back",
+    durationMs = 450,
+  ): void {
+    const startSnapshot = getCameraSnapshot();
+    setView(preset);
+    const box = new THREE.Box3().setFromObject(modelRoot);
+    if (!box.isEmpty()) {
+      fitCameraToBox(box, 1.5);
+    }
+    const endSnapshot = getCameraSnapshot();
+    applyCameraSnapshot(startSnapshot);
+    animateCameraToSnapshot(endSnapshot, durationMs);
+  }
+
   /**
    * Like setView(), but Top/Bottom use the TRUE perpendicular direction -
    * no off-axis tilt. setView() deliberately tilts Top/Bottom slightly to
@@ -13065,6 +13191,9 @@ export function createViewer(container: HTMLElement): Viewer {
     loadObject3D,
     clear,
     setView,
+    animatePresetViewFit,
+    getCameraSnapshot,
+    applyCameraSnapshot,
     setProjection,
     setFeatureEdgesEnabled,
     setExactCadEdgeDisplayOptions,

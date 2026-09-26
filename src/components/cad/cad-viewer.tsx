@@ -19,7 +19,9 @@ import {
   type HiddenLineViewSetResult,
   type ExplodeDebugEntry,
   type ExplodeAxisOverride,
+  type CameraSnapshot,
 } from "./viewer";
+import { layFlatPatternOnBed } from "../../utils/sheet-metal/lay-flat-on-bed";
 import {
   analyzeCadSheetMetal,
   buildCadAssemblyFromCachePayload,
@@ -977,6 +979,15 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
     const [kFactor, setKFactor] = useState(DEFAULT_K_FACTOR);
     const [isUnfolding, setIsUnfolding] = useState(false);
     const [flattenError, setFlattenError] = useState<string | null>(null);
+    // The flat pattern's grid-squaring rotation (radians), fed back into
+    // layFlatPatternOnBed as `preferredAngleRad` on every K-factor recompute
+    // so the plate doesn't visibly jump to a new rotation on small edits -
+    // only a materially different developed shape re-squares it. Reset on
+    // every new load (see clearFlatCache).
+    const flatLayAngleRef = useRef<number | null>(null);
+    // The camera pose from just before Unfold was turned on, restored
+    // exactly when it's turned back off. Reset on every new load.
+    const flatCameraSnapshotRef = useRef<CameraSnapshot | null>(null);
     const snapshotTakenRef = useRef(false);
     const loadRequestRef = useRef(0);
     const unfoldRequestRef = useRef(0);
@@ -1883,36 +1894,52 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
 
     // viewer.replacePrimaryGeometry recenters whatever geometry it's given
     // to its own bbox center (see recenterGeometryAtOrigin in viewer.ts),
-    // mutating a clone - the bend-line segments are a separate overlay with
-    // no such hook, so this mirrors that same translate-to-bbox-center math
-    // against the pristine (pre-clone) flat geometry to keep the dashed
-    // lines aligned with the recentered mesh.
+    // mutating it in place - the bend-line segments are a separate overlay
+    // with no such hook, so this mirrors that same translate-to-bbox-center
+    // math to keep the dashed lines aligned with the recentered mesh.
+    // `center` MUST be captured by the caller BEFORE handing the geometry to
+    // replacePrimaryGeometry (which mutates it in place) - reading it off
+    // the geometry here, after the fact, would return the already-recentered
+    // (near-zero) center and leave the overlay stranded at its pre-recenter
+    // offset instead of on the plate (a real bug this comment is here to
+    // stop from coming back).
     function applyBendLineOverlay(
       viewer: Viewer,
-      flatGeom: THREE.BufferGeometry,
+      center: THREE.Vector3,
       segments: SheetMetalBendLineSegment[],
+      // Applied to each raw segment endpoint BEFORE the center subtraction -
+      // the same lay-flat-on-bed rotation (thickness-to-up-axis + grid
+      // squaring) already baked into the mesh, since the segments come from
+      // the unfold worker in the UN-rotated frame.
+      orientMatrix?: THREE.Matrix4,
     ) {
       if (segments.length === 0) {
         viewer.setBendLineOverlay(null);
         return;
       }
-      flatGeom.computeBoundingBox();
-      const center =
-        flatGeom.boundingBox?.getCenter(new THREE.Vector3()) ??
-        new THREE.Vector3();
+      const v = new THREE.Vector3();
+      const orient = (p: [number, number, number]): [number, number, number] => {
+        if (!orientMatrix) return p;
+        v.set(p[0], p[1], p[2]).applyMatrix4(orientMatrix);
+        return [v.x, v.y, v.z];
+      };
       viewer.setBendLineOverlay(
-        segments.map((seg) => ({
-          a: [
-            seg.a[0] - center.x,
-            seg.a[1] - center.y,
-            seg.a[2] - center.z,
-          ] as [number, number, number],
-          b: [
-            seg.b[0] - center.x,
-            seg.b[1] - center.y,
-            seg.b[2] - center.z,
-          ] as [number, number, number],
-        })),
+        segments.map((seg) => {
+          const a = orient(seg.a);
+          const b = orient(seg.b);
+          return {
+            a: [a[0] - center.x, a[1] - center.y, a[2] - center.z] as [
+              number,
+              number,
+              number,
+            ],
+            b: [b[0] - center.x, b[1] - center.y, b[2] - center.z] as [
+              number,
+              number,
+              number,
+            ],
+          };
+        }),
       );
     }
 
@@ -1991,6 +2018,8 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
 
     function clearFlatCache() {
       setSheetMetalUnfold(null);
+      flatLayAngleRef.current = null;
+      flatCameraSnapshotRef.current = null;
     }
 
     function clearFormedCache() {
@@ -3105,6 +3134,47 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       sheetMetalUiEnabled &&
       (sheetMetalStatus === "analyzing" || sheetMetalStatus === "ready");
 
+    // Restores the formed part after Unfold is turned off (by the toggle
+    // itself, or because a K-factor edit made the shape un-unfoldable):
+    // restores the EXACT pre-unfold camera pose if we captured one, since a
+    // generic refit would re-frame from whatever direction the camera
+    // happens to be pointing post-flatten (usually Top), not where the user
+    // actually was.
+    function restoreFormedViewAfterFlatOff(viewer: Viewer, formed: THREE.BufferGeometry) {
+      const snapshot = flatCameraSnapshotRef.current;
+      viewer.replacePrimaryGeometry(formed.clone(), { refit: !snapshot });
+      setDimsFromGeometry(formed);
+      if (snapshot) {
+        viewer.applyCameraSnapshot(snapshot);
+        flatCameraSnapshotRef.current = null;
+      }
+    }
+
+    // Orients a freshly-unfolded flat mesh to lie on the grid bed (thickness
+    // on the up axis, footprint squared to the grid, longer side along X -
+    // see layFlatPatternOnBed's own doc comment) and applies the matching
+    // bend-line overlay. `flat` is cloned first since the lay-flat transform
+    // mutates in place and sheetMetalUnfold.flat must stay in its original,
+    // un-rotated frame for the next K-factor recompute/toggle to start from.
+    function orientAndShowFlatPattern(
+      viewer: Viewer,
+      flat: THREE.BufferGeometry,
+      bendLineSegments: SheetMetalBendLineSegment[],
+      refit: boolean,
+    ) {
+      const oriented = flat.clone();
+      const layFlat = layFlatPatternOnBed(oriented, flatLayAngleRef.current);
+      flatLayAngleRef.current = layFlat.angleRad;
+      // Captured BEFORE replacePrimaryGeometry recenters `oriented` in place
+      // - see applyBendLineOverlay's doc comment for why this order matters.
+      oriented.computeBoundingBox();
+      const center =
+        oriented.boundingBox?.getCenter(new THREE.Vector3()) ?? new THREE.Vector3();
+      viewer.replacePrimaryGeometry(oriented, { refit });
+      setDimsFromGeometry(oriented);
+      applyBendLineOverlay(viewer, center, bendLineSegments, layFlat.matrix);
+    }
+
     // Toggling Unfold never needs a worker round trip: detection + an
     // unfold attempt at the current K-factor already ran right after load
     // (see the sheet_metal_analyze call in the load effect) so the flat
@@ -3116,19 +3186,22 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
 
       if (!nextEnabled) {
         viewer.setBendLineOverlay(null);
-        viewer.replacePrimaryGeometry(formedGeom.clone(), { refit: true });
-        setDimsFromGeometry(formedGeom);
+        restoreFormedViewAfterFlatOff(viewer, formedGeom);
         setFlatEnabled(false);
         setFlattenError(null);
         return;
       }
 
       if (!sheetMetalUnfold?.ok) return;
-      const flat = sheetMetalUnfold.flat;
       setFlattenError(null);
-      viewer.replacePrimaryGeometry(flat.clone(), { refit: true });
-      setDimsFromGeometry(flat);
-      applyBendLineOverlay(viewer, flat, sheetMetalUnfold.bendLineSegments);
+      flatCameraSnapshotRef.current = viewer.getCameraSnapshot();
+      orientAndShowFlatPattern(
+        viewer,
+        sheetMetalUnfold.flat,
+        sheetMetalUnfold.bendLineSegments,
+        false,
+      );
+      viewer.animatePresetViewFit("top");
       setFlatEnabled(true);
     };
 
@@ -3162,15 +3235,19 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
         const viewer = viewerRef.current;
         if (!flatEnabled || !viewer) return;
         if (result.unfold?.ok) {
-          const flat = result.unfold.flat;
-          viewer.replacePrimaryGeometry(flat.clone(), { refit: false });
-          setDimsFromGeometry(flat);
-          applyBendLineOverlay(viewer, flat, result.unfold.bendLineSegments);
+          // refit: false - orientation is kept stable (see
+          // layFlatPatternOnBed/flatLayAngleRef) and the camera must not
+          // jump on a K-factor edit.
+          orientAndShowFlatPattern(
+            viewer,
+            result.unfold.flat,
+            result.unfold.bendLineSegments,
+            false,
+          );
         } else {
           viewer.setBendLineOverlay(null);
           if (formedGeom) {
-            viewer.replacePrimaryGeometry(formedGeom.clone(), { refit: true });
-            setDimsFromGeometry(formedGeom);
+            restoreFormedViewAfterFlatOff(viewer, formedGeom);
           }
           setFlatEnabled(false);
         }
