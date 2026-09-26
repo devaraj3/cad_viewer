@@ -1,6 +1,23 @@
 import type { Vec3 } from "./geometry";
 
 /**
+ * The edge's true curve type, straight from OCC's own curve analysis
+ * (`ExactEdge.curveKind` upstream) - independent of, and more reliable
+ * than, trying to re-fit a curve type from the sampled `polyline` below.
+ * Only "line" and "circle" are acted on by the DXF exporter (as
+ * LINE/CIRCLE/ARC entities); everything else falls back to a polyline.
+ */
+export type UnfoldCurveKind = "line" | "circle" | "ellipse" | "bspline" | "other";
+
+/** Analytic curve parameters, in the ORIGINAL (pre-unfold) 3D frame - exact, not fitted from tessellation. Only meaningful when `curveKind` is "circle" (a full circle or a partial arc). */
+export type UnfoldCurveAnalytic = {
+  center?: Vec3;
+  axis?: Vec3;
+  radius?: number;
+  isFullCircle?: boolean;
+};
+
+/**
  * One boundary edge of the B-Rep, as needed by the unfold engine - richer
  * than `SheetMetalEdgeInput` (which only carries face adjacency for
  * detection) because flattening needs the edge's actual 3D curve geometry:
@@ -21,6 +38,10 @@ export type UnfoldEdgeInput = {
    * not by trusting this array's own start/end.
    */
   polyline: Vec3[];
+  /** OCC's own curve classification for this edge - undefined if the source didn't provide it (older/unsupported runtime), in which case consumers fall back to treating it as a plain polyline. */
+  curveKind?: UnfoldCurveKind;
+  /** Exact analytic parameters when `curveKind === "circle"` - undefined otherwise. */
+  curveAnalytic?: UnfoldCurveAnalytic;
 };
 
 export type UnfoldOptions = {
@@ -48,11 +69,42 @@ export type Point2 = [number, number];
 /** Closed 2D polygon loop; does not repeat the first point at the end. */
 export type FlatLoop = Point2[];
 
+/**
+ * One analytic segment of a flat-pattern loop, in the flat 2D frame
+ * (already through the wall's rigid transform) - built alongside the
+ * tessellated `FlatLoop` point arrays specifically so a DXF (or other
+ * CAM-facing) exporter can emit true LINE/ARC/CIRCLE entities instead of
+ * always falling back to a polyline. `outer`/`holes` (the plain point
+ * loops) stay the single source of truth for triangulation/rendering;
+ * these curve loops are consumed only by exporters that care about exact
+ * entity type.
+ */
+export type FlatCurveSegment =
+  | { kind: "line"; a: Point2; b: Point2 }
+  | {
+      kind: "arc";
+      center: Point2;
+      radius: number;
+      /** Degrees, CCW from +X, DXF ARC convention (sweeps CCW from start to end). */
+      startAngleDeg: number;
+      endAngleDeg: number;
+    }
+  | { kind: "circle"; center: Point2; radius: number }
+  /** Non-analytic fallback (bspline/ellipse edge, or a developed bend-strip boundary) - ordered points, first != last (loop closure is implicit). */
+  | { kind: "polyline"; points: Point2[] };
+
+/** One closed loop's worth of analytic segments, in traversal order. */
+export type FlatCurveLoop = FlatCurveSegment[];
+
 export type FlatOutlinePart = {
   wallId: string;
   sourceFaceIds: string[];
   outer: FlatLoop;
   holes: FlatLoop[];
+  /** Same loop as `outer`, as analytic segments. */
+  outerCurves: FlatCurveLoop;
+  /** Same loops as `holes`, as analytic segments. */
+  holeCurves: FlatCurveLoop[];
 };
 
 export type FlatBendLine = {

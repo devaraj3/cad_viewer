@@ -1,5 +1,5 @@
 import type { Vec3 } from "./geometry";
-import type { UnfoldEdgeInput } from "./unfold-types";
+import type { UnfoldCurveAnalytic, UnfoldCurveKind, UnfoldEdgeInput } from "./unfold-types";
 
 /** Raw per-edge shape needed for unfolding, as returned by TessellateWithTopology's `topology.edges` (a superset of `RawTopologyEdge` in from-topology.ts, which only keeps what detection needs). */
 export type RawTopologyEdgeWithGeometry = {
@@ -8,6 +8,10 @@ export type RawTopologyEdgeWithGeometry = {
   adjacentFaceIds: string[];
   /** Flattened (x,y,z,x,y,z,...) polyline sampled along the edge's curve, ordered from vertexIds[0] to vertexIds[1]. */
   samplePositions?: number[] | Float32Array | Float64Array;
+  /** OCC's own curve classification - undefined if the source didn't provide it. */
+  curveKind?: UnfoldCurveKind;
+  /** Exact analytic curve parameters (only meaningful when curveKind === "circle"). */
+  analytic?: UnfoldCurveAnalytic;
 };
 
 export type RawTopologyVertex = {
@@ -38,6 +42,8 @@ export function buildUnfoldEdgesFromTopology(
       vertexIds: e.vertexIds,
       adjacentFaceIds: e.adjacentFaceIds,
       polyline,
+      curveKind: e.curveKind,
+      curveAnalytic: e.analytic,
     };
   });
 }

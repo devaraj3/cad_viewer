@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { minAreaRectAngle } from "./min-area-rect";
 
 export type LayFlatOnBedResult = {
   /**
@@ -69,11 +70,6 @@ function thicknessToUpAxisMatrix(geom: THREE.BufferGeometry): THREE.Matrix4 {
   return new THREE.Matrix4().makeRotationX(-Math.PI / 2);
 }
 
-// Reuse the previous orientation unless the freshly computed one is at
-// least this much tighter (smaller area) - a materially different shape,
-// not just floating-point noise from a slightly different K-factor.
-const STABILITY_TOLERANCE = 1.05;
-
 function squareFootprintAngle(
   geom: THREE.BufferGeometry,
   preferredAngleRad: number | null,
@@ -85,120 +81,17 @@ function squareFootprintAngle(
   for (let i = 0; i < pos.count; i++) {
     pts[i] = [pos.getX(i), pos.getZ(i)];
   }
-  const hull = convexHull2D(pts);
-  if (hull.length < 3) return { angle: preferredAngleRad ?? 0, width: 0, depth: 0 };
 
-  // Rotates the hull by `theta` (matching THREE's makeRotationY convention:
-  // x' = x*cos + z*sin, z' = -x*sin + z*cos) and returns its AABB extent.
-  const rectAt = (theta: number): { width: number; depth: number } => {
-    const cos = Math.cos(theta);
-    const sin = Math.sin(theta);
-    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-    for (const [x, z] of hull) {
-      const rx = x * cos + z * sin;
-      const rz = -x * sin + z * cos;
-      if (rx < minX) minX = rx;
-      if (rx > maxX) maxX = rx;
-      if (rz < minZ) minZ = rz;
-      if (rz > maxZ) maxZ = rz;
-    }
-    return { width: maxX - minX, depth: maxZ - minZ };
-  };
-
-  // Rotating calipers: the minimum-area bounding rectangle of a convex
-  // polygon always has one side flush with a hull edge, so it suffices to
-  // test each edge's own angle.
-  let bestAngle = 0;
-  let bestArea = Infinity;
-  let bestWidth = 0;
-  let bestDepth = 0;
-  const n = hull.length;
-  for (let i = 0; i < n; i++) {
-    const [ax, az] = hull[i];
-    const [bx, bz] = hull[(i + 1) % n];
-    const ex = bx - ax;
-    const ez = bz - az;
-    if (Math.hypot(ex, ez) < 1e-9) continue;
-    const theta = Math.atan2(ez, ex);
-    const { width, depth } = rectAt(theta);
-    const area = width * depth;
-    if (area < bestArea - 1e-9) {
-      bestArea = area;
-      bestAngle = theta;
-      bestWidth = width;
-      bestDepth = depth;
-    }
-  }
-
-  let angle = bestAngle;
-  let width = bestWidth;
-  let depth = bestDepth;
-
-  if (preferredAngleRad != null && bestArea > 0) {
-    const preferred = rectAt(preferredAngleRad);
-    const preferredArea = preferred.width * preferred.depth;
-    if (preferredArea <= bestArea * STABILITY_TOLERANCE) {
-      angle = preferredAngleRad;
-      width = preferred.width;
-      depth = preferred.depth;
-    }
-  }
-
-  // Longer side along X - applied last, and unconditionally, so this
-  // invariant holds whether `angle` came from the fresh calipers search or
-  // was reused from `preferredAngleRad` (a reused angle from a much
-  // different-shaped previous frame could otherwise leave the short side on
-  // X, which the "keep it stable" reuse above never checks for on its own).
-  if (depth > width) {
-    angle += Math.PI / 2;
-    const tmp = width;
-    width = depth;
-    depth = tmp;
-  }
-
-  return { angle, width, depth };
-}
-
-/** Andrew's monotone chain, CCW, no repeated closing point. */
-function convexHull2D(points: Array<[number, number]>): Array<[number, number]> {
-  const dedup = new Map<string, [number, number]>();
-  for (const p of points) {
-    dedup.set(`${p[0].toFixed(6)}|${p[1].toFixed(6)}`, p);
-  }
-  const pts = Array.from(dedup.values()).sort(
-    (a, b) => a[0] - b[0] || a[1] - b[1],
+  // minAreaRectAngle works in standard-math rotation convention
+  // (x' = x*cos - y*sin, y' = x*sin + y*cos) on the (x, z) pairs above
+  // (z standing in for the generic 2nd axis); THREE's makeRotationY(theta)
+  // applies x' = x*cos(theta) + z*sin(theta), z' = -x*sin(theta) +
+  // z*cos(theta) - exactly the standard-math rotation by -theta. So the
+  // preferred angle (already in "theta" space from a previous call's
+  // return value) is negated going in, and the result negated coming back.
+  const { angle: mathAngle, width, depth } = minAreaRectAngle(
+    pts,
+    preferredAngleRad != null ? -preferredAngleRad : null,
   );
-  const n = pts.length;
-  if (n < 3) return pts;
-
-  const cross = (
-    o: [number, number],
-    a: [number, number],
-    b: [number, number],
-  ) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
-
-  const lower: Array<[number, number]> = [];
-  for (const p of pts) {
-    while (
-      lower.length >= 2 &&
-      cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0
-    ) {
-      lower.pop();
-    }
-    lower.push(p);
-  }
-  const upper: Array<[number, number]> = [];
-  for (let i = n - 1; i >= 0; i--) {
-    const p = pts[i];
-    while (
-      upper.length >= 2 &&
-      cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0
-    ) {
-      upper.pop();
-    }
-    upper.push(p);
-  }
-  upper.pop();
-  lower.pop();
-  return lower.concat(upper);
+  return { angle: -mathAngle, width, depth };
 }

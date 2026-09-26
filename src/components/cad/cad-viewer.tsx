@@ -26,6 +26,7 @@ import {
   analyzeCadSheetMetal,
   buildCadAssemblyFromCachePayload,
   DEFAULT_WORKER_CAPABILITIES,
+  exportSheetMetalFlatPatternDxf,
   getWorkerCapabilities,
   loadCadAssemblyWithTopology,
   loadMeshAssemblyAsObject3D,
@@ -153,6 +154,7 @@ import { triggerSelectedPartExport } from "./cad-viewer-export-controller";
 import {
   cloneWorldBakedSubtree,
   getWorkingPartExportPlan,
+  triggerDownload,
   type PartExportPlan,
 } from "./exporters/part-export";
 import {
@@ -979,6 +981,8 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
     const [kFactor, setKFactor] = useState(DEFAULT_K_FACTOR);
     const [isUnfolding, setIsUnfolding] = useState(false);
     const [flattenError, setFlattenError] = useState<string | null>(null);
+    const [isExportingDxf, setIsExportingDxf] = useState(false);
+    const [dxfExportError, setDxfExportError] = useState<string | null>(null);
     // The flat pattern's grid-squaring rotation (radians), fed back into
     // layFlatPatternOnBed as `preferredAngleRad` on every K-factor recompute
     // so the plate doesn't visibly jump to a new rotation on small edits -
@@ -3276,6 +3280,25 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       setKFactor(next);
       if (sheetMetalStatus !== "ready") return;
       void recomputeSheetMetalUnfold(next);
+    };
+
+    const handleExportSheetMetalDxf = async () => {
+      const worker = workerRef.current;
+      if (!worker || !file || !sheetMetalUnfold?.ok) return;
+      setDxfExportError(null);
+      setIsExportingDxf(true);
+      try {
+        const partName = (loadFileName || "part").replace(/\.[^./\\]+$/, "");
+        const { fileName, dxfText } = await exportSheetMetalFlatPatternDxf(file, worker, {
+          kFactor,
+          partName,
+        });
+        triggerDownload(dxfText, fileName, "application/dxf");
+      } catch (err: any) {
+        setDxfExportError(err?.message || "Failed to export DXF.");
+      } finally {
+        setIsExportingDxf(false);
+      }
     };
 
     const handleSnapshot = (type: "normal" | "outline") => {
@@ -6019,13 +6042,29 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                         // A flat blank (no bends at all) is already flat - there's
                         // nothing to unfold and no bend allowance to configure, so
                         // just say what it is instead of offering a no-op toggle.
-                        <div className="cad-status cad-status--info">
-                          {`Sheet metal · flat blank · ${
-                            typeof sheetMetalDetection.thicknessMM === "number"
-                              ? `${sheetMetalDetection.thicknessMM.toFixed(2)} mm`
-                              : "?"
-                          }`}
-                        </div>
+                        <>
+                          <div className="cad-status cad-status--info">
+                            {`Sheet metal · flat blank · ${
+                              typeof sheetMetalDetection.thicknessMM === "number"
+                                ? `${sheetMetalDetection.thicknessMM.toFixed(2)} mm`
+                                : "?"
+                            }`}
+                          </div>
+                          {sheetMetalUnfold?.ok && (
+                            <button
+                              disabled={isExportingDxf}
+                              onClick={() => void handleExportSheetMetalDxf()}
+                              className={`cad-btn cad-btn--wide ${isExportingDxf ? "cad-btn--disabled" : "cad-btn--neutral"}`}
+                            >
+                              {isExportingDxf ? "Exporting DXF..." : "Export DXF"}
+                            </button>
+                          )}
+                          {dxfExportError && (
+                            <div className="cad-status cad-status--error">
+                              {dxfExportError}
+                            </div>
+                          )}
+                        </>
                       ) : (
                         <>
                           <div className="cad-row cad-row--between">
@@ -6107,6 +6146,20 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                           {flattenError && (
                             <div className="cad-status cad-status--error">
                               {flattenError}
+                            </div>
+                          )}
+                          {sheetMetalUnfold?.ok && (
+                            <button
+                              disabled={isExportingDxf}
+                              onClick={() => void handleExportSheetMetalDxf()}
+                              className={`cad-btn cad-btn--wide ${isExportingDxf ? "cad-btn--disabled" : "cad-btn--neutral"}`}
+                            >
+                              {isExportingDxf ? "Exporting DXF..." : "Export DXF"}
+                            </button>
+                          )}
+                          {dxfExportError && (
+                            <div className="cad-status cad-status--error">
+                              {dxfExportError}
                             </div>
                           )}
                         </>

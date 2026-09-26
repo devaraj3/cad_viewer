@@ -75,6 +75,33 @@ type SheetMetalAnalyzeReq = {
   };
 };
 
+type SheetMetalExportDxfReq = {
+  id: string;
+  type: "sheet_metal_export_dxf";
+  payload: {
+    buffer: ArrayBuffer;
+    ext: CADExt;
+    kFactor: number;
+    partName: string;
+  };
+};
+
+type SheetMetalExportDxfOk = {
+  id: string;
+  ok: true;
+  type: "sheet_metal_export_dxf";
+  fileName: string;
+  dxfText: string;
+};
+
+type SheetMetalExportDxfErr = {
+  id: string;
+  ok: false;
+  type: "sheet_metal_export_dxf";
+  reason: string;
+  reasonDetail: string;
+};
+
 type ExportPartReq = {
   id: string;
   type: "export_part";
@@ -1326,6 +1353,57 @@ export async function analyzeCadSheetMetal(
         type: "sheet_metal_analyze",
         payload: { buffer: buf, ext, kFactor: opts.kFactor },
       } as SheetMetalAnalyzeReq,
+      [buf],
+    );
+  });
+}
+
+/**
+ * Re-runs detection + unfold at the given K-factor (same round trip as
+ * `analyzeCadSheetMetal`, just a separate worker message so this hot path
+ * never has to carry the full flat-pattern outline/curve data through the
+ * live-view message shape) and builds the DXF export text on the worker.
+ */
+export async function exportSheetMetalFlatPatternDxf(
+  file: File | string,
+  worker: Worker,
+  opts: { kFactor: number; partName: string },
+): Promise<{ fileName: string; dxfText: string }> {
+  const { fileObj, ext } = await resolveInputFile(file);
+  if (!isCADExt(ext)) {
+    throw new Error("DXF export requires a CAD source (STEP/IGES/BREP).");
+  }
+
+  const id = Math.random().toString(36).slice(2);
+  const buf = await fileObj.arrayBuffer();
+
+  return new Promise<{ fileName: string; dxfText: string }>((resolve, reject) => {
+    const handle = (e: MessageEvent<SheetMetalExportDxfOk | SheetMetalExportDxfErr | TessErr>) => {
+      const data = e.data;
+      if (!data || data.id !== id) return;
+      worker.removeEventListener("message", handle as any);
+
+      if (!data.ok) {
+        const message =
+          "reasonDetail" in data && typeof data.reasonDetail === "string"
+            ? data.reasonDetail
+            : "error" in data && typeof data.error === "string"
+              ? data.error
+              : "DXF export failed.";
+        reject(new Error(message));
+        return;
+      }
+
+      resolve({ fileName: data.fileName, dxfText: data.dxfText });
+    };
+
+    worker.addEventListener("message", handle as any);
+    worker.postMessage(
+      {
+        id,
+        type: "sheet_metal_export_dxf",
+        payload: { buffer: buf, ext, kFactor: opts.kFactor, partName: opts.partName },
+      } as SheetMetalExportDxfReq,
       [buf],
     );
   });

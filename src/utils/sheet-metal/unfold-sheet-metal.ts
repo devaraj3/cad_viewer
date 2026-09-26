@@ -10,7 +10,14 @@ import {
   type Frame,
   type Rigid,
 } from "./rigid-transform";
-import { chainFaceLoops, classifyLoops } from "./unfold-topology";
+import {
+  chainFaceLoops,
+  chainFaceLoopsWithEdgeRuns,
+  classifyLoops,
+  classifyLoopsWithEdgeRuns,
+  signedAreaAroundNormal,
+  type ChainedLoop,
+} from "./unfold-topology";
 import {
   DEFAULT_SHEET_METAL_OPTIONS,
   type DetectedBend,
@@ -21,6 +28,8 @@ import { buildWallGroups, estimateSweepAngleDeg, findCylinderPairCandidates, fin
 import {
   DEFAULT_UNFOLD_OPTIONS,
   type FlatBendLine,
+  type FlatCurveLoop,
+  type FlatCurveSegment,
   type FlatLoop,
   type FlatMesh,
   type FlatOutlinePart,
@@ -479,6 +488,7 @@ function unfoldFlangeTree(
   const outline: FlatOutlinePart[] = [];
   const meshPositions: number[] = [];
   const meshIndices: number[] = [];
+  const edgeById = new Map(edges.map((e) => [e.id, e]));
 
   for (const w of walls.values()) {
     const rigid = rigidByWall.get(w.id)!;
@@ -487,12 +497,58 @@ function unfoldFlangeTree(
     )[0];
     const repFace = faceById.get(repFaceId);
     if (!repFace?.origin || !repFace.normal) continue;
-    const loops3D = chainFaceLoops(repFaceId, edges);
-    const { outer, holes } = classifyLoops(loops3D, repFace.origin, repFace.normal);
-    if (outer.length < 3) continue;
-    const outer2D = to2D(outer, rigid);
-    const holes2D = holes.map((h) => to2D(h, rigid));
-    outline.push({ wallId: w.id, sourceFaceIds: Array.from(w.members), outer: outer2D, holes: holes2D });
+    const loops3D = chainFaceLoopsWithEdgeRuns(repFaceId, edges);
+    const { outer, holes } = classifyLoopsWithEdgeRuns(loops3D, repFace.origin, repFace.normal);
+    if (outer.points.length < 3) continue;
+
+    // A wall's OUTER boundary always comes from the chosen rep skin face,
+    // but its HOLES must be gathered from EVERY member face, not just the
+    // rep face: a counterbore/recess only cuts partway through the
+    // material, so its cylindrical wall is edge-adjacent to just ONE of
+    // the wall's 2 (or more) skin faces - tracing loops from only the rep
+    // face silently drops any such feature that happens to open on the
+    // OTHER member. A genuine through-hole is found redundantly from both
+    // members and de-duplicated below (same 2D centroid + area).
+    const holeLoops: ChainedLoop[] = [...holes];
+    const seenHoles = holes.map((h) => describeLoop2D(h.points, rigid));
+    for (const memberId of w.members) {
+      if (memberId === repFaceId) continue;
+      const mFace = faceById.get(memberId);
+      if (!mFace?.origin || !mFace.normal) continue;
+      const mLoops = chainFaceLoopsWithEdgeRuns(memberId, edges);
+      const { holes: mHoles } = classifyLoopsWithEdgeRuns(mLoops, mFace.origin, mFace.normal);
+      for (const cand of mHoles) {
+        if (cand.points.length < 3) continue;
+        const desc = describeLoop2D(cand.points, rigid);
+        // Area tolerance is generous (5% relative) because the SAME physical
+        // hole traced from 2 different member faces can land on a different
+        // number of edges (see sh6/Spacer Plate v2 - one side's boundary is
+        // a single full-circle edge, the other split into 2 half-circle
+        // edges by a seam), giving a different tessellated point count and
+        // hence a measurably different shoelace-polygon area approximation
+        // of the same true circle (denser sampling -> less area deficit) -
+        // centroid position is unaffected by this and stays the tight check.
+        const isDup = seenHoles.some(
+          (s) =>
+            Math.hypot(s.centroid[0] - desc.centroid[0], s.centroid[1] - desc.centroid[1]) < 1e-2 &&
+            Math.abs(s.area - desc.area) < Math.max(1e-3, desc.area * 0.05),
+        );
+        if (isDup) continue;
+        seenHoles.push(desc);
+        holeLoops.push(cand);
+      }
+    }
+
+    const outer2D = to2D(outer.points, rigid);
+    const holes2D = holeLoops.map((h) => to2D(h.points, rigid));
+    outline.push({
+      wallId: w.id,
+      sourceFaceIds: Array.from(w.members),
+      outer: outer2D,
+      holes: holes2D,
+      outerCurves: buildCurveSegmentsForLoop(outer, edgeById, rigid),
+      holeCurves: holeLoops.map((h) => buildCurveSegmentsForLoop(h, edgeById, rigid)),
+    });
 
     const { positions, indices } = extrudePolygon(outer2D, holes2D, t);
     const base = meshPositions.length / 3;
@@ -506,12 +562,19 @@ function unfoldFlangeTree(
   for (const ext of hemExtensions) {
     const face = faceById.get(ext.faceId);
     if (!face?.origin || !face.normal) continue;
-    const loops3D = chainFaceLoops(ext.faceId, edges);
-    const { outer, holes } = classifyLoops(loops3D, face.origin, face.normal);
-    if (outer.length < 3) continue;
-    const outer2D = to2D(outer, ext.rigid);
-    const holes2D = holes.map((h) => to2D(h, ext.rigid));
-    outline.push({ wallId: ext.wallId, sourceFaceIds: [ext.faceId], outer: outer2D, holes: holes2D });
+    const loops3D = chainFaceLoopsWithEdgeRuns(ext.faceId, edges);
+    const { outer, holes } = classifyLoopsWithEdgeRuns(loops3D, face.origin, face.normal);
+    if (outer.points.length < 3) continue;
+    const outer2D = to2D(outer.points, ext.rigid);
+    const holes2D = holes.map((h) => to2D(h.points, ext.rigid));
+    outline.push({
+      wallId: ext.wallId,
+      sourceFaceIds: [ext.faceId],
+      outer: outer2D,
+      holes: holes2D,
+      outerCurves: buildCurveSegmentsForLoop(outer, edgeById, ext.rigid),
+      holeCurves: holes.map((h) => buildCurveSegmentsForLoop(h, edgeById, ext.rigid)),
+    });
 
     const { positions, indices } = extrudePolygon(outer2D, holes2D, t);
     const base = meshPositions.length / 3;
@@ -533,7 +596,25 @@ function unfoldFlangeTree(
       bl.stripOuter && bl.stripOuter.length >= 3
         ? bl.stripOuter
         : [bl.parentTangentLine[0], bl.parentTangentLine[1], bl.childTangentLine[1], bl.childTangentLine[0]];
-    outline.push({ wallId: `${bl.bendId}::strip`, sourceFaceIds: [], outer: quad, holes: [] });
+    outline.push({
+      wallId: `${bl.bendId}::strip`,
+      sourceFaceIds: [],
+      outer: quad,
+      holes: [],
+      // The strip boundary is traced via arc-length parametrization of the
+      // bend cylinder, not a rigid transform of a chained face loop, so it
+      // has no per-edge line/circle identity to recover in general - a
+      // developed bend zone's own (corner-relief) edges are exactly what
+      // the DXF spec allows to stay polylines. But its 2 TANGENT edges are
+      // known exactly (they're what `bl.parentTangentLine`/`childTangentLine`
+      // already measured) and are shared with the adjacent walls' own
+      // boundary - splitting them out explicitly as "line" segments lets a
+      // CUT-boundary exporter recognize and drop that shared seam (see
+      // buildFlatPatternDxf), instead of it staying invisible inside one
+      // opaque polyline blob.
+      outerCurves: buildStripCurveSegments(quad, bl.parentTangentLine, bl.childTangentLine),
+      holeCurves: [],
+    });
     const { positions, indices } = extrudePolygon(quad, [], t);
     const base = meshPositions.length / 3;
     appendAll(meshPositions, positions);
@@ -590,6 +671,178 @@ function to2D(loop: Vec3[], rigid: Rigid): FlatLoop {
     const q = applyRigid(rigid, p);
     return [q[0], q[1]] as Point2;
   });
+}
+
+function toPoint2D(rigid: Rigid, p: Vec3): Point2 {
+  const q = applyRigid(rigid, p);
+  return [q[0], q[1]];
+}
+
+/** A loop's 2D centroid + area (shoelace, after the wall's rigid transform) - used only to de-duplicate the same physical hole traced independently from 2 different member faces (see the multi-member hole gathering below). */
+function describeLoop2D(points3D: Vec3[], rigid: Rigid): { centroid: Point2; area: number } {
+  const pts2D = to2D(points3D, rigid);
+  let cx = 0, cy = 0;
+  for (const p of pts2D) {
+    cx += p[0];
+    cy += p[1];
+  }
+  const n = pts2D.length || 1;
+  cx /= n;
+  cy /= n;
+  let area = 0;
+  for (let i = 0; i < pts2D.length; i++) {
+    const a = pts2D[i];
+    const b = pts2D[(i + 1) % pts2D.length];
+    area += a[0] * b[1] - b[0] * a[1];
+  }
+  return { centroid: [cx, cy], area: Math.abs(area) / 2 };
+}
+
+function angleDegAround(center: Point2, p: Point2): number {
+  const raw = (Math.atan2(p[1] - center[1], p[0] - center[0]) * 180) / Math.PI;
+  const deg = raw % 360;
+  return deg < 0 ? deg + 360 : deg;
+}
+
+/** True if `midDeg` lies on the CCW arc running from `aDeg` to `bDeg` (all in degrees, any real value). */
+function isCcwBetween(aDeg: number, midDeg: number, bDeg: number): boolean {
+  const span = (((bDeg - aDeg) % 360) + 360) % 360;
+  const midSpan = (((midDeg - aDeg) % 360) + 360) % 360;
+  return midSpan <= span + 1e-6;
+}
+
+/**
+ * Converts one chained loop into analytic curve segments, in the flat 2D
+ * frame (`rigid` applied): a "line" edge -> a LINE-shaped segment, a
+ * "circle" edge -> a CIRCLE (whole loop is one full-circle edge) or ARC
+ * (partial sweep) segment using the edge's OWN exact center/radius/axis
+ * (rigid-transformed, not re-fitted from the tessellated points), anything
+ * else -> a polyline fallback. See `FlatCurveSegment`'s own doc comment for
+ * why this exists alongside the plain point loops.
+ */
+function buildCurveSegmentsForLoop(loop: ChainedLoop, edgeById: Map<string, UnfoldEdgeInput>, rigid: Rigid): FlatCurveLoop {
+  const { points, runs } = loop;
+  const n = points.length;
+  if (n === 0) return [];
+  const segments: FlatCurveSegment[] = [];
+
+  for (const run of runs) {
+    const edge = edgeById.get(run.edgeId);
+    const startIdx = run.pointStart;
+    const endIdx = (run.pointStart + run.pointCount) % n;
+    const start2D = toPoint2D(rigid, points[startIdx]);
+    const end2D = toPoint2D(rigid, points[endIdx]);
+
+    const asPolyline = (): FlatCurveSegment => {
+      const pts: Point2[] = [start2D];
+      for (let k = 1; k < run.pointCount; k++) pts.push(toPoint2D(rigid, points[startIdx + k]));
+      pts.push(end2D); // the run's own points array (see LoopEdgeRun's doc comment) excludes the shared end vertex - include it so this segment reaches the next one with no gap.
+      return { kind: "polyline", points: pts };
+    };
+
+    if (!edge?.curveKind || edge.curveKind === "other" || edge.curveKind === "ellipse" || edge.curveKind === "bspline") {
+      segments.push(asPolyline());
+      continue;
+    }
+
+    if (edge.curveKind === "line") {
+      segments.push({ kind: "line", a: start2D, b: end2D });
+      continue;
+    }
+
+    // curveKind === "circle"
+    const analytic = edge.curveAnalytic;
+    if (!analytic?.center || typeof analytic.radius !== "number") {
+      segments.push(asPolyline());
+      continue;
+    }
+    const center3D = applyRigid(rigid, analytic.center);
+    const center2D: Point2 = [center3D[0], center3D[1]];
+    const radius = analytic.radius;
+
+    if (analytic.isFullCircle && runs.length === 1) {
+      segments.push({ kind: "circle", center: center2D, radius });
+      continue;
+    }
+
+    let startDeg = angleDegAround(center2D, start2D);
+    let endDeg = angleDegAround(center2D, end2D);
+    if (run.pointCount >= 2) {
+      const midDeg = angleDegAround(center2D, toPoint2D(rigid, points[startIdx + 1]));
+      if (!isCcwBetween(startDeg, midDeg, endDeg)) {
+        [startDeg, endDeg] = [endDeg, startDeg];
+      }
+    } else {
+      // No interior sample to disambiguate direction - default to the minor (<=180deg) arc.
+      const span = (((endDeg - startDeg) % 360) + 360) % 360;
+      if (span > 180) [startDeg, endDeg] = [endDeg, startDeg];
+    }
+    segments.push({ kind: "arc", center: center2D, radius, startAngleDeg: startDeg, endAngleDeg: endDeg });
+  }
+  return segments;
+}
+
+const STRIP_TANGENT_MATCH_TOL = 1e-4;
+
+function closePoint2(a: Point2, b: Point2, tol: number): boolean {
+  return Math.abs(a[0] - b[0]) <= tol && Math.abs(a[1] - b[1]) <= tol;
+}
+
+/**
+ * Splits a bend strip's closed boundary loop (`loopPoints`, not repeating
+ * its first point) into segments: each consecutive point-pair that matches
+ * (in either direction) one of the 2 known tangent lines becomes its own
+ * explicit "line" segment; everything else (corner-relief cuts, straight or
+ * curved) accumulates into "polyline" run(s). Splitting the tangent edges
+ * out explicitly - rather than folding the whole loop into one polyline -
+ * is what lets the CUT-boundary seam dedup (buildFlatPatternDxf) recognize
+ * and drop them, since they're shared with the adjacent wall's own
+ * boundary and get drawn instead as a BEND_UP/BEND_DOWN line.
+ */
+function buildStripCurveSegments(
+  loopPoints: Point2[],
+  parentTangentLine: [Point2, Point2],
+  childTangentLine: [Point2, Point2],
+): FlatCurveLoop {
+  const n = loopPoints.length;
+  if (n < 2) return loopPoints.length > 0 ? [{ kind: "polyline", points: [...loopPoints, loopPoints[0]] }] : [];
+
+  const isTangentPair = (a: Point2, b: Point2): boolean => {
+    const lines = [parentTangentLine, childTangentLine];
+    return lines.some(
+      ([l0, l1]) =>
+        (closePoint2(a, l0, STRIP_TANGENT_MATCH_TOL) && closePoint2(b, l1, STRIP_TANGENT_MATCH_TOL)) ||
+        (closePoint2(a, l1, STRIP_TANGENT_MATCH_TOL) && closePoint2(b, l0, STRIP_TANGENT_MATCH_TOL)),
+    );
+  };
+
+  // A single linear pass (i = 0..n-1, `b` wrapping via modulo) - a
+  // non-tangent run that's still open when the scan reaches the end
+  // (because the loop started mid-run) simply ends at loopPoints[0], which
+  // is exactly where the scan's very first pair started - no gap, and no
+  // artificial re-closing needed. If that leaves the same physical run
+  // split into a leading and a trailing polyline piece (because the loop
+  // happened to start partway through it), that's cosmetic only: both
+  // pieces still connect endpoint-to-endpoint with no gap or overlap.
+  const segments: FlatCurveLoop = [];
+  let currentRun: Point2[] = [];
+  for (let i = 0; i < n; i++) {
+    const a = loopPoints[i];
+    const b = loopPoints[(i + 1) % n];
+    if (isTangentPair(a, b)) {
+      if (currentRun.length > 0) {
+        if (!closePoint2(currentRun[currentRun.length - 1], a, STRIP_TANGENT_MATCH_TOL)) currentRun.push(a);
+        segments.push({ kind: "polyline", points: currentRun });
+        currentRun = [];
+      }
+      segments.push({ kind: "line", a, b });
+    } else {
+      if (currentRun.length === 0) currentRun.push(a);
+      currentRun.push(b);
+    }
+  }
+  if (currentRun.length > 0) segments.push({ kind: "polyline", points: currentRun });
+  return segments;
 }
 
 function findTangentEdges(cylFaceId: string, memberIds: Set<string>, edges: UnfoldEdgeInput[]): UnfoldEdgeInput[] {

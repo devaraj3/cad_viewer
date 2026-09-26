@@ -18,6 +18,7 @@ export {
 } from "./unfold-from-topology";
 export { chainFaceLoops, classifyLoops, signedAreaAroundNormal } from "./unfold-topology";
 export * from "./unfold-types";
+export { buildFlatPatternDxf, buildRolledRingDxf, buildDxfFileName, type DxfExportMeta } from "./dxf-export";
 export {
   buildSheetMetalInputFromTopology,
   type BuiltSheetMetalInput,

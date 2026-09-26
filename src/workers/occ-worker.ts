@@ -12,6 +12,9 @@ import type {
   ExactVertex,
 } from "../components/cad/exact-cad-topology";
 import {
+  buildDxfFileName,
+  buildFlatPatternDxf,
+  buildRolledRingDxf,
   buildSheetMetalInputFromTopology,
   buildUnfoldEdgesFromTopology,
   detectSheetMetal,
@@ -90,6 +93,35 @@ type SheetMetalAnalyzeOk = {
   type: "sheet_metal_analyze";
   detection: SheetMetalDetectionSummary;
   unfold: SheetMetalUnfoldSummary | null;
+};
+
+type SheetMetalExportDxfReq = {
+  id: string;
+  type: "sheet_metal_export_dxf";
+  payload: {
+    buffer: ArrayBuffer;
+    ext: CADExt;
+    kFactor: number;
+    partName: string;
+    linearDeflection?: number;
+    angularDeflection?: number;
+  };
+};
+
+type SheetMetalExportDxfOk = {
+  id: string;
+  ok: true;
+  type: "sheet_metal_export_dxf";
+  fileName: string;
+  dxfText: string;
+};
+
+type SheetMetalExportDxfErr = {
+  id: string;
+  ok: false;
+  type: "sheet_metal_export_dxf";
+  reason: string;
+  reasonDetail: string;
 };
 type TessOk = {
   id: string;
@@ -1207,6 +1239,113 @@ ctx.onmessage = async (e: MessageEvent<any>) => {
         ok: false,
         error: err?.message || String(err),
       } as TessErr);
+    }
+    return;
+  }
+
+  if (type === "sheet_metal_export_dxf") {
+    try {
+      const req = payload as SheetMetalExportDxfReq["payload"];
+      if (!isCadExt(req?.ext)) {
+        throw new Error("Unsupported extension");
+      }
+
+      const mod = await init();
+      const sourceBytes = new Uint8Array(req.buffer);
+      const effectiveDeflections = resolveEffectiveDeflections(
+        req.buffer.byteLength,
+        req.linearDeflection,
+        req.angularDeflection,
+      );
+      const topologySupport = resolveTopologyRuntimeSupport(mod);
+      if (
+        !topologySupport.exactCadTopology ||
+        topologySupport.symbolName !== REQUIRED_TOPOLOGY_RUNTIME_EXPORT
+      ) {
+        throw new Error(missingTopologyAvailability(mod).message);
+      }
+      const topologyFn = mod[REQUIRED_TOPOLOGY_RUNTIME_EXPORT];
+      if (typeof topologyFn !== "function") {
+        throw new Error(missingTopologyAvailability(mod).message);
+      }
+
+      const raw = topologyFn(sourceBytes, {
+        inputExt: req.ext,
+        ext: req.ext,
+        linearDeflection: effectiveDeflections.linearDeflection,
+        angularDeflection: effectiveDeflections.angularDeflection,
+        mesh: {
+          linearDeflection: effectiveDeflections.linearDeflection,
+          angularDeflection: effectiveDeflections.angularDeflection,
+        },
+      });
+      if (!raw || raw.success === false) {
+        throw new Error(raw?.error || "Exact topology extraction failed in runtime.");
+      }
+
+      const rawTopo = raw.topology ?? raw;
+      const rawFaces: SmRawTopologyFace[] = Array.isArray(rawTopo?.faces) ? rawTopo.faces : [];
+      const rawEdges: (SmRawTopologyEdge & RawTopologyEdgeWithGeometry)[] =
+        Array.isArray(rawTopo?.edges) ? rawTopo.edges : [];
+      const rawVertices: RawTopologyVertex[] = Array.isArray(rawTopo?.vertices) ? rawTopo.vertices : [];
+      const rawMeshes = buildRawMeshesForSheetMetal(Array.isArray(raw.meshes) ? raw.meshes : []);
+
+      const built = buildSheetMetalInputFromTopology(rawFaces, rawEdges, rawMeshes);
+      const detection = detectSheetMetal(built.faces, built.edges, built.bboxDims, built.raycastGeometry);
+
+      if (!detection.isSheetMetal) {
+        ctx.postMessage({
+          id,
+          ok: false,
+          type: "sheet_metal_export_dxf",
+          reason: detection.reason ?? "not_sheet_metal",
+          reasonDetail: detection.reasonDetail ?? "Not detected as sheet metal.",
+        } as SheetMetalExportDxfErr);
+        return;
+      }
+
+      const unfoldEdges = buildUnfoldEdgesFromTopology(rawEdges, rawVertices);
+      const unfoldResult: UnfoldResult = unfoldSheetMetal(built.faces, unfoldEdges, detection, {
+        kFactor: req.kFactor,
+        skin: "outer",
+      });
+      if (!unfoldResult.ok) {
+        ctx.postMessage({
+          id,
+          ok: false,
+          type: "sheet_metal_export_dxf",
+          reason: unfoldResult.reason,
+          reasonDetail: unfoldResult.reasonDetail,
+        } as SheetMetalExportDxfErr);
+        return;
+      }
+
+      const meta = {
+        partName: req.partName,
+        thicknessMM: detection.thicknessMM ?? 0,
+        kFactor: req.kFactor,
+      };
+      const dxfText =
+        unfoldResult.kind === "flange_tree"
+          ? buildFlatPatternDxf(unfoldResult, meta)
+          : buildRolledRingDxf(unfoldResult, meta);
+      const fileName = buildDxfFileName(meta);
+
+      ctx.postMessage({
+        id,
+        ok: true,
+        type: "sheet_metal_export_dxf",
+        fileName,
+        dxfText,
+      } as SheetMetalExportDxfOk);
+    } catch (err: any) {
+      ctx.postMessage({
+        id,
+        ok: false,
+        type: "sheet_metal_export_dxf",
+        reason: "runtime_error",
+        reasonDetail: err?.message || String(err),
+      } as SheetMetalExportDxfErr);
     }
     return;
   }
