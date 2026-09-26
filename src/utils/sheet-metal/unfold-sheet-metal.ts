@@ -1,3 +1,4 @@
+import earcut, { refine as earcutRefine } from "earcut";
 import { add, cross, dot, length, normalize, scale, sub, tangentBasis, type Vec3 } from "./geometry";
 import {
   applyRigid,
@@ -495,7 +496,7 @@ function unfoldFlangeTree(
 
     const { positions, indices } = extrudePolygon(outer2D, holes2D, t);
     const base = meshPositions.length / 3;
-    meshPositions.push(...positions);
+    appendAll(meshPositions, positions);
     for (const idx of indices) meshIndices.push(idx + base);
   }
 
@@ -514,7 +515,7 @@ function unfoldFlangeTree(
 
     const { positions, indices } = extrudePolygon(outer2D, holes2D, t);
     const base = meshPositions.length / 3;
-    meshPositions.push(...positions);
+    appendAll(meshPositions, positions);
     for (const idx of indices) meshIndices.push(idx + base);
   }
 
@@ -535,7 +536,7 @@ function unfoldFlangeTree(
     outline.push({ wallId: `${bl.bendId}::strip`, sourceFaceIds: [], outer: quad, holes: [] });
     const { positions, indices } = extrudePolygon(quad, [], t);
     const base = meshPositions.length / 3;
-    meshPositions.push(...positions);
+    appendAll(meshPositions, positions);
     for (const idx of indices) meshIndices.push(idx + base);
   }
 
@@ -1070,148 +1071,146 @@ function projectOntoCanonicalPlane(p: Vec3, wall: WallInfo, faceById: Map<string
 
 // --- Meshing (triangulate-with-holes + extrude by thickness, for display) ---
 //
-// A small self-contained ear-clipping triangulator (holes handled by
-// bridging each into the outer boundary via its nearest outer vertex, the
-// classic pre-earcut technique) - avoids depending on three's Earcut, which
-// this three version's published build doesn't actually export (only its
-// unbundled src/ does).
+// Two separate concerns, kept deliberately separate:
+//
+// 1. Getting a *good* 2D triangulation of the flat outline-with-holes -
+//    delegated to `earcut` (constrained triangulation) + its `refine` pass
+//    (Lawson-flip edge legalization, which maximizes the minimum angle and
+//    removes almost all slivers). The project's previous hand-rolled
+//    ear-clipper (first-found-ear, holes spliced in via a degenerate
+//    zero-width bridge edge) produced enormous numbers of sliver triangles
+//    on every real fixture (46-67% of all triangles under 1deg minimum
+//    angle, measured on sh1/sh6/1.STEP/NewCaster/sh5) - earcut+refine is a
+//    proven, actively-maintained replacement built for exactly this.
+//
+// 2. Making sure the extruded SOLID never smooths shading across faces of
+//    different orientation. `THREE.BufferGeometry.computeVertexNormals()`
+//    (called once on the whole flat mesh in mesh-loader.ts, matching how
+//    every other CAD mesh in this app gets its normals) averages face
+//    normals over every triangle that SHARES a vertex index - so if a top-
+//    face triangle (normal +Z) and a side-wall triangle (normal horizontal)
+//    reused the same vertex slot, that vertex's normal would land somewhere
+//    between the two. The prior implementation did exactly that (top/bottom
+//    used one shared point pool, and every side-wall quad reused those same
+//    indices) - measured up to 90.0deg of vertex-normal deviation from the
+//    true plate normal on EVERY fixture tested, across essentially the
+//    whole surface (since every top/bottom vertex sits on the outline or a
+//    hole boundary, which is exactly where a wall also touches). That's the
+//    root cause of the reported shiny streaks / twisted-looking flat views.
+//    Fixed here by emitting the mesh as a flat-shaded triangle soup: every
+//    triangle (top, bottom, and every wall quad) gets its own brand-new,
+//    never-reused vertex positions, so computeVertexNormals() has nothing
+//    to average - each vertex is used by exactly one triangle, so its
+//    "averaged" normal IS that triangle's own exact face normal.
 
-function signedAreaOfIndices(points: Point2[], idx: number[]): number {
+/** Returns a copy of `loop`, reversed if needed, so its shoelace signed area has the requested sign (positive = CCW, negative = CW, in standard math XY orientation). Degenerate (near-zero-area) loops are returned unchanged. */
+function withSignedArea(loop: Point2[], wantPositive: boolean): Point2[] {
   let a = 0;
-  for (let i = 0; i < idx.length; i++) {
-    const p = points[idx[i]];
-    const q = points[idx[(i + 1) % idx.length]];
+  for (let i = 0; i < loop.length; i++) {
+    const p = loop[i];
+    const q = loop[(i + 1) % loop.length];
     a += p[0] * q[1] - q[0] * p[1];
   }
-  return a / 2;
-}
-
-function sign(v: number): number {
-  return v > 1e-12 ? 1 : v < -1e-12 ? -1 : 0;
-}
-
-function pointInTriangle(p: Point2, a: Point2, b: Point2, c: Point2): boolean {
-  const d1 = sign((b[0] - p[0]) * (a[1] - p[1]) - (a[0] - p[0]) * (b[1] - p[1]));
-  const d2 = sign((c[0] - p[0]) * (b[1] - p[1]) - (b[0] - p[0]) * (c[1] - p[1]));
-  const d3 = sign((a[0] - p[0]) * (c[1] - p[1]) - (c[0] - p[0]) * (a[1] - p[1]));
-  const hasNeg = d1 < 0 || d2 < 0 || d3 < 0;
-  const hasPos = d1 > 0 || d2 > 0 || d3 > 0;
-  return !(hasNeg && hasPos);
+  if (Math.abs(a) < 1e-12) return loop;
+  const isPositive = a > 0;
+  return isPositive === wantPositive ? loop : loop.slice().reverse();
 }
 
 /**
- * Ear-clips a simple CCW polygon given as indices into `points` (a shared
- * point pool - possibly containing points not on this loop, and possibly
- * revisiting the same original point twice via a hole-bridge). Returns
- * triangles as index triples referencing `points` directly, so callers never
- * need to remap indices after bridging holes in.
+ * Triangulates outer+holes (each a simple polygon) via earcut, refined to
+ * remove slivers. Normalizes winding first (outer CCW/positive area, holes
+ * CW/negative area - earcut's documented GeoJSON-style convention), so
+ * callers can rely on the SAME normalized loops for wall generation and get
+ * consistent outward-facing wall normals regardless of the input's own
+ * winding.
  */
-function earClipIndices(points: Point2[], loopIndices: number[]): number[] {
-  const indices = loopIndices.slice();
-  const triangles: number[] = [];
-  let guard = 0;
-  while (indices.length > 3 && guard++ < loopIndices.length * loopIndices.length + 16) {
-    let clipped = false;
-    for (let i = 0; i < indices.length; i++) {
-      const n = indices.length;
-      const iPrev = indices[(i - 1 + n) % n];
-      const iCur = indices[i];
-      const iNext = indices[(i + 1) % n];
-      const a = points[iPrev], b = points[iCur], c = points[iNext];
-      const cross = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
-      if (cross <= 1e-12) continue; // reflex or degenerate at this vertex
-      let containsOther = false;
-      for (const idx of indices) {
-        if (idx === iPrev || idx === iCur || idx === iNext) continue;
-        if (pointInTriangle(points[idx], a, b, c)) {
-          containsOther = true;
-          break;
-        }
-      }
-      if (containsOther) continue;
-      triangles.push(iPrev, iCur, iNext);
-      indices.splice(i, 1);
-      clipped = true;
-      break;
-    }
-    if (!clipped) break; // degenerate/self-intersecting input - stop rather than loop forever
+function triangulatePolygonWithHoles(
+  outer: Point2[],
+  holes: Point2[][],
+): { outerCCW: Point2[]; holesCW: Point2[][]; points: Point2[]; triangles: number[] } {
+  const outerCCW = withSignedArea(outer, true);
+  const holesCW = holes.map((h) => withSignedArea(h, false));
+
+  const points: Point2[] = [...outerCCW, ...holesCW.flat()];
+  const data: number[] = [];
+  for (const p of points) data.push(p[0], p[1]);
+  const holeIndices: number[] = [];
+  let cursor = outerCCW.length;
+  for (const h of holesCW) {
+    holeIndices.push(cursor);
+    cursor += h.length;
   }
-  if (indices.length === 3) triangles.push(indices[0], indices[1], indices[2]);
-  return triangles;
+
+  const triangles = earcut(data, holeIndices.length > 0 ? holeIndices : null, 2);
+  earcutRefine(triangles, data, 2);
+  return { outerCCW, holesCW, points, triangles };
 }
 
-/** Splices a hole's index loop into the outer index loop via a bridge to its nearest outer vertex, producing one simple index loop (repeated indices at the bridge, which is fine - they resolve to the same point). */
-function bridgeHoleIndices(points: Point2[], outerLoop: number[], holeLoop: number[]): number[] {
-  let hPos = 0;
-  for (let i = 1; i < holeLoop.length; i++) {
-    if (points[holeLoop[i]][0] > points[holeLoop[hPos]][0]) hPos = i;
+/**
+ * Appends every element of `src` onto `dest` in fixed-size chunks. A plain
+ * `dest.push(...src)` blows V8's hard limit on spread/apply argument count
+ * (a RangeError: Maximum call stack size exceeded) once `src` gets large -
+ * and the flat-shaded triangle-soup mesh below duplicates every vertex per
+ * triangle-use, so a single wall's position array can comfortably exceed
+ * that limit on real fixtures (confirmed on sh6.STEP) even though the
+ * previous shared-vertex representation never got big enough to hit it.
+ */
+function appendAll(dest: number[], src: number[]) {
+  const CHUNK = 10_000;
+  for (let i = 0; i < src.length; i += CHUNK) {
+    dest.push(...src.slice(i, i + CHUNK));
   }
-  const hIdx = holeLoop[hPos];
-  const h = points[hIdx];
-  let mPos = 0;
-  let bestDist = Infinity;
-  for (let i = 0; i < outerLoop.length; i++) {
-    const p = points[outerLoop[i]];
-    const dx = p[0] - h[0];
-    const dy = p[1] - h[1];
-    const d = dx * dx + dy * dy;
-    if (d < bestDist) {
-      bestDist = d;
-      mPos = i;
-    }
-  }
-  const rotatedHole = [...holeLoop.slice(hPos), ...holeLoop.slice(0, hPos)];
-  const merged: number[] = [];
-  for (let i = 0; i <= mPos; i++) merged.push(outerLoop[i]);
-  merged.push(...rotatedHole, rotatedHole[0]);
-  for (let i = mPos; i < outerLoop.length; i++) merged.push(outerLoop[i]);
-  return merged;
 }
 
-/** Triangulates outer+holes (each a simple polygon) into triangles indexing the concatenated [outer, ...holes] point pool - the same layout `extrudePolygon` uses for its position buffer. */
-function triangulatePolygonWithHoles(outer: Point2[], holes: Point2[][]): { points: Point2[]; triangles: number[] } {
-  const points: Point2[] = [...outer];
-  const outerIdx = outer.map((_, i) => i);
-  let mergedLoop = signedAreaOfIndices(points, outerIdx) < 0 ? outerIdx.slice().reverse() : outerIdx;
-
-  for (const hole of holes) {
-    const start = points.length;
-    points.push(...hole);
-    let holeIdx = hole.map((_, i) => start + i);
-    if (signedAreaOfIndices(points, holeIdx) > 0) holeIdx = holeIdx.slice().reverse();
-    mergedLoop = bridgeHoleIndices(points, mergedLoop, holeIdx);
-  }
-
-  const triangles = earClipIndices(points, mergedLoop);
-  return { points, triangles };
+/** Appends one flat-shaded triangle (3 brand-new, never-reused vertices) to a growing non-indexed position/index buffer pair. */
+function pushTriangleSoup(
+  positions: number[],
+  indices: number[],
+  a: readonly [number, number, number],
+  b: readonly [number, number, number],
+  c: readonly [number, number, number],
+) {
+  const base = positions.length / 3;
+  positions.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
+  indices.push(base, base + 1, base + 2);
 }
 
 function extrudePolygon(outer: Point2[], holes: Point2[][], thickness: number): { positions: number[]; indices: number[] } {
-  const { points, triangles } = triangulatePolygonWithHoles(outer, holes);
-  const n = points.length;
+  const { outerCCW, holesCW, points, triangles } = triangulatePolygonWithHoles(outer, holes);
   const positions: number[] = [];
-  for (const p of points) positions.push(p[0], p[1], 0);
-  for (const p of points) positions.push(p[0], p[1], -thickness);
-
   const indices: number[] = [];
+
   for (let i = 0; i < triangles.length; i += 3) {
-    indices.push(triangles[i], triangles[i + 1], triangles[i + 2]);
-  }
-  for (let i = 0; i < triangles.length; i += 3) {
-    indices.push(n + triangles[i + 2], n + triangles[i + 1], n + triangles[i]);
+    const a = points[triangles[i]], b = points[triangles[i + 1]], c = points[triangles[i + 2]];
+    // Top skin at z=0: outerCCW/holesCW's own winding is CCW-around-+Z (by
+    // construction above), so a->b->c already faces +Z.
+    pushTriangleSoup(positions, indices, [a[0], a[1], 0], [b[0], b[1], 0], [c[0], c[1], 0]);
+    // Bottom skin at z=-thickness: reversed winding flips the face to -Z.
+    pushTriangleSoup(positions, indices, [c[0], c[1], -thickness], [b[0], b[1], -thickness], [a[0], a[1], -thickness]);
   }
 
-  let cursor = 0;
-  const addSideWalls = (len: number) => {
-    for (let i = 0; i < len; i++) {
-      const a = cursor + i;
-      const b = cursor + ((i + 1) % len);
-      indices.push(a, b, b + n, a, b + n, a + n);
+  // One quad (2 triangles) per loop edge, walked in the loop's own
+  // normalized winding direction. For a CCW outer loop this produces
+  // outward-facing (away from the solid's interior) wall normals; the SAME
+  // vertex order/formula on a CW hole loop produces normals facing INTO the
+  // hole's empty space (also outward from the solid) - verified against a
+  // unit-square outer and a unit-square hole by hand (both land pointing
+  // away from material, as a real wall must).
+  const addSideWalls = (loop: Point2[]) => {
+    const n = loop.length;
+    for (let i = 0; i < n; i++) {
+      const p0 = loop[i];
+      const p1 = loop[(i + 1) % n];
+      const topA: [number, number, number] = [p0[0], p0[1], 0];
+      const topB: [number, number, number] = [p1[0], p1[1], 0];
+      const botA: [number, number, number] = [p0[0], p0[1], -thickness];
+      const botB: [number, number, number] = [p1[0], p1[1], -thickness];
+      pushTriangleSoup(positions, indices, topA, botA, botB);
+      pushTriangleSoup(positions, indices, topA, botB, topB);
     }
-    cursor += len;
   };
-  addSideWalls(outer.length);
-  for (const h of holes) addSideWalls(h.length);
+  addSideWalls(outerCCW);
+  for (const h of holesCW) addSideWalls(h);
 
   return { positions, indices };
 }

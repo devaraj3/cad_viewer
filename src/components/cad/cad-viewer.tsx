@@ -673,6 +673,31 @@ function clampKFactor(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
 
+/** One short line for the disabled-Unfold status text - the full reasonDetail sentence stays available via the button/status `title` (hover) only. */
+function shortSheetMetalRefusalMessage(
+  reason: string | undefined,
+  detection: SheetMetalDetectionSummary,
+): string {
+  switch (reason) {
+    case "embosses_present":
+      return `Can't unfold: ${detection.embossCount} formed feature${
+        detection.embossCount === 1 ? "" : "s"
+      } (emboss/rib)`;
+    case "non_developable_surface":
+      return "Can't unfold: non-developable bend surface";
+    case "bend_graph_not_a_tree":
+      return "Can't unfold: branching bend layout";
+    case "no_walls_found":
+      return "Can't unfold: no flat faces found";
+    case "missing_tangent_edge":
+      return "Can't unfold: incomplete bend geometry";
+    case "not_sheet_metal":
+      return "Can't unfold: not sheet metal";
+    default:
+      return "Can't unfold this part";
+  }
+}
+
 function convert(valMM: number, to: Units) {
   switch (to) {
     case "mm":
@@ -5911,83 +5936,104 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                         Analyzing sheet metal...
                       </div>
                     )}
-                    {sheetMetalStatus === "ready" && sheetMetalDetection && (
-                      <>
-                        <div className="cad-row cad-row--between">
-                          <span className="cad-label">Unfold</span>
-                          <button
-                            disabled={isUnfolding || !sheetMetalUnfold?.ok}
-                            title={
-                              sheetMetalUnfold && !sheetMetalUnfold.ok
-                                ? sheetMetalUnfold.reasonDetail ||
-                                  sheetMetalUnfold.reason
-                                : undefined
-                            }
-                            onClick={() => handleFlatToggle(!flatEnabled)}
-                            className={`cad-toggle ${flatEnabled ? "cad-toggle--on" : ""} ${
-                              isUnfolding || !sheetMetalUnfold?.ok
-                                ? "cad-toggle--disabled"
-                                : ""
-                            }`}
-                          >
-                            <span className="cad-toggle__thumb" />
-                          </button>
-                        </div>
-                        <div className="cad-row cad-row--between">
-                          <span className="cad-label">K-Factor</span>
-                          <input
-                            type="number"
-                            min={0}
-                            max={1}
-                            step={0.01}
-                            value={kFactor}
-                            onChange={(e) => handleKFactorChange(e.target.value)}
-                            className="cad-input"
-                          />
-                        </div>
-                        <div className="cad-row cad-row--between">
-                          <span className="cad-label">Thickness</span>
-                          <span className="cad-label">
-                            {typeof sheetMetalDetection.thicknessMM === "number"
-                              ? `${sheetMetalDetection.thicknessMM.toFixed(2)} mm`
-                              : "-"}
-                          </span>
-                        </div>
+                    {sheetMetalStatus === "ready" &&
+                      sheetMetalDetection &&
+                      (sheetMetalDetection.bendCount === 0 ? (
+                        // A flat blank (no bends at all) is already flat - there's
+                        // nothing to unfold and no bend allowance to configure, so
+                        // just say what it is instead of offering a no-op toggle.
                         <div className="cad-status cad-status--info">
-                          {`${sheetMetalDetection.bendCount} bend${
-                            sheetMetalDetection.bendCount === 1 ? "" : "s"
+                          {`Sheet metal · flat blank · ${
+                            typeof sheetMetalDetection.thicknessMM === "number"
+                              ? `${sheetMetalDetection.thicknessMM.toFixed(2)} mm`
+                              : "?"
                           }`}
-                          {sheetMetalDetection.embossCount > 0
-                            ? `, ${sheetMetalDetection.embossCount} emboss${
-                                sheetMetalDetection.embossCount === 1 ? "" : "es"
-                              }`
-                            : ""}
-                          {sheetMetalDetection.steppedFeatureCount > 0
-                            ? `, ${sheetMetalDetection.steppedFeatureCount} stepped feature${
-                                sheetMetalDetection.steppedFeatureCount === 1
-                                  ? ""
-                                  : "s"
-                              }`
-                            : ""}
                         </div>
-                        {sheetMetalUnfold && !sheetMetalUnfold.ok && (
+                      ) : (
+                        <>
+                          <div className="cad-row cad-row--between">
+                            <span className="cad-label">Unfold</span>
+                            <button
+                              disabled={isUnfolding || !sheetMetalUnfold?.ok}
+                              title={
+                                sheetMetalUnfold && !sheetMetalUnfold.ok
+                                  ? sheetMetalUnfold.reasonDetail ||
+                                    sheetMetalUnfold.reason
+                                  : undefined
+                              }
+                              onClick={() => handleFlatToggle(!flatEnabled)}
+                              className={`cad-toggle ${flatEnabled ? "cad-toggle--on" : ""} ${
+                                isUnfolding || !sheetMetalUnfold?.ok
+                                  ? "cad-toggle--disabled"
+                                  : ""
+                              }`}
+                            >
+                              <span className="cad-toggle__thumb" />
+                            </button>
+                          </div>
+                          <div className="cad-row cad-row--between">
+                            <span className="cad-label">K-Factor</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={1}
+                              step={0.01}
+                              value={kFactor}
+                              onChange={(e) => handleKFactorChange(e.target.value)}
+                              className="cad-input"
+                            />
+                          </div>
+                          <div className="cad-row cad-row--between">
+                            <span className="cad-label">Thickness</span>
+                            <span className="cad-label">
+                              {typeof sheetMetalDetection.thicknessMM === "number"
+                                ? `${sheetMetalDetection.thicknessMM.toFixed(2)} mm`
+                                : "-"}
+                            </span>
+                          </div>
                           <div className="cad-status cad-status--info">
-                            {sheetMetalUnfold.reasonDetail ||
-                              "Unfold unavailable for this part."}
+                            {`${sheetMetalDetection.bendCount} bend${
+                              sheetMetalDetection.bendCount === 1 ? "" : "s"
+                            }`}
+                            {sheetMetalDetection.embossCount > 0
+                              ? `, ${sheetMetalDetection.embossCount} emboss${
+                                  sheetMetalDetection.embossCount === 1 ? "" : "es"
+                                }`
+                              : ""}
+                            {sheetMetalDetection.steppedFeatureCount > 0
+                              ? `, ${sheetMetalDetection.steppedFeatureCount} stepped feature${
+                                  sheetMetalDetection.steppedFeatureCount === 1
+                                    ? ""
+                                    : "s"
+                                }`
+                              : ""}
                           </div>
-                        )}
-                        {isUnfolding && (
-                          <div className="cad-status cad-status--info">
-                            Recalculating...
-                          </div>
-                        )}
-                        {flattenError && (
-                          <div className="cad-status cad-status--error">
-                            {flattenError}
-                          </div>
-                        )}
-                      </>
-                    )}
+                          {sheetMetalUnfold && !sheetMetalUnfold.ok && (
+                            <div
+                              className="cad-status cad-status--info"
+                              title={
+                                sheetMetalUnfold.reasonDetail ||
+                                sheetMetalUnfold.reason
+                              }
+                            >
+                              {shortSheetMetalRefusalMessage(
+                                sheetMetalUnfold.reason,
+                                sheetMetalDetection,
+                              )}
+                            </div>
+                          )}
+                          {isUnfolding && (
+                            <div className="cad-status cad-status--info">
+                              Recalculating...
+                            </div>
+                          )}
+                          {flattenError && (
+                            <div className="cad-status cad-status--error">
+                              {flattenError}
+                            </div>
+                          )}
+                        </>
+                      ))}
                   </div>
                 </>
               )}
