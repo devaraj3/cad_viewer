@@ -239,35 +239,48 @@ function closeEnough(a: Point2, b: Point2, tol: number): boolean {
 }
 
 /**
- * Splits every outline part's OUTER loop segments into "kept" (genuine
- * material-boundary cuts) vs "seam" (the fold-line edge shared with an
- * adjacent wall or bend strip, which the BEND_UP/BEND_DOWN line already
- * marks and must NOT also appear as a CUT - a real cut there would sever
- * the part). A shared seam is recognized purely geometrically: the wall's
- * own boundary and the bend strip's boundary are traced independently (one
- * via a rigid transform of the flange's B-Rep loop, the other via the
- * bend cylinder's arc-length parametrization) but land on the SAME 2
- * endpoints, traversed in OPPOSITE order (each piece winds its own
- * boundary consistently, e.g. both CCW, so a shared edge is walked
- * forwards by one piece and backwards by the other). Hole loops never
- * participate (a hole is always local to exactly one wall).
+ * Splits every outline part's OUTER + HOLE loop segments into "kept"
+ * (genuine material-boundary cuts) vs "seam" (the fold-line edge shared
+ * with an adjacent wall or bend strip, which the BEND_UP/BEND_DOWN line
+ * already marks and must NOT also appear as a CUT - a real cut there
+ * would sever the part). A shared seam is recognized purely
+ * geometrically: the wall's own boundary and the bend strip's boundary
+ * are traced independently (one via a rigid transform of the flange's
+ * B-Rep loop, the other via the bend cylinder's arc-length
+ * parametrization) but land on the SAME 2 endpoints, traversed in
+ * OPPOSITE order (each piece winds its own boundary consistently, e.g.
+ * both CCW, so a shared edge is walked forwards by one piece and
+ * backwards by the other).
+ *
+ * A HOLE loop can participate too: a "lanced tab" (a flange hinged from
+ * an interior tangent line rather than the wall's outer edge) has its
+ * parent-side tangent line traced as one edge of the parent's own hole
+ * loop (the hole is exactly where the tab folds back into), so that edge
+ * is shared with the tab's bend strip the same way an outer edge would
+ * be. Only a hole segment with no endpoints (a full circle) is always
+ * kept unconditionally, since a circle can never be a shared seam.
  */
 function computeCutSegments(outline: FlatOutlinePart[]): FlatCurveSegment[] {
-  type Candidate = { seg: FlatCurveSegment; a: Point2; b: Point2 };
+  type Candidate = { seg: FlatCurveSegment; a: Point2; b: Point2; loopId: number };
   const candidates: Candidate[] = [];
   const alwaysKept: FlatCurveSegment[] = [];
+  let nextLoopId = 0;
+
+  const collect = (seg: FlatCurveSegment, loopId: number) => {
+    const ends = segmentEndpoints(seg);
+    if (!ends) {
+      alwaysKept.push(seg); // a full circle - never a shared seam.
+      return;
+    }
+    candidates.push({ seg, a: ends[0], b: ends[1], loopId });
+  };
 
   for (const part of outline) {
-    for (const seg of part.outerCurves) {
-      const ends = segmentEndpoints(seg);
-      if (!ends) {
-        alwaysKept.push(seg); // a full circle used as an outer boundary (pathological) - never a shared seam.
-        continue;
-      }
-      candidates.push({ seg, a: ends[0], b: ends[1] });
-    }
+    const outerLoopId = nextLoopId++;
+    for (const seg of part.outerCurves) collect(seg, outerLoopId);
     for (const loop of part.holeCurves) {
-      alwaysKept.push(...loop);
+      const holeLoopId = nextLoopId++;
+      for (const seg of loop) collect(seg, holeLoopId);
     }
   }
 
@@ -289,13 +302,393 @@ function computeCutSegments(outline: FlatOutlinePart[]): FlatCurveSegment[] {
   // coincidental duplicate that ISN'T a real shared seam is not a
   // realistic possibility at this tolerance (1e-3mm) for real part
   // geometry, so any group of 2+ candidates sharing a key is dropped
-  // entirely rather than kept "to be safe".
+  // entirely rather than kept "to be safe" - UNLESS every candidate in the
+  // group belongs to the SAME loop: a hole (or outer boundary) that's
+  // split across 2 edges by an unrelated seam on the underlying B-Rep
+  // face (e.g. a round hole traced as 2 half-circle arcs) has its own 2
+  // halves meeting at exactly the same 2 endpoints too, but that's the
+  // loop closing on itself, not a fold shared with another piece - both
+  // halves are needed to keep the loop closed and must never be dropped.
   const kept: FlatCurveSegment[] = [...alwaysKept];
   for (const group of groups.values()) {
-    if (group.length >= 2) continue;
+    if (group.length >= 2 && !group.every((c) => c.loopId === group[0].loopId)) continue;
     for (const c of group) kept.push(c.seg);
   }
   return kept;
+}
+
+const VERTEX_SNAP_TOL = 0.01; // mm, per spec - merge CUT vertices closer than this.
+const MIN_SEGMENT_LEN = 0.01; // mm - drop zero/near-zero length segments.
+
+/**
+ * Snaps every line/arc endpoint and polyline first/last point to a shared
+ * representative wherever 2+ of them land within `VERTEX_SNAP_TOL` of each
+ * other (plain union-find over pairwise distance - segment counts here are
+ * small enough per fixture that O(n^2) is fine). Two independently-traced
+ * boundaries of the same physical seam (a wall's own loop vs. a bend
+ * strip's arc-length-parametrized loop) can leave a hairline gap at their
+ * shared vertex that this closes exactly, which downstream loop-closure
+ * tooling (and real CAM/nesting software) requires. Arc interiors are left
+ * alone - an arc's endpoint is derived from its (center, radius, angle), so
+ * "snapping" it without recomputing those would silently distort the arc;
+ * arcs built from the same analytic tangent data don't exhibit this
+ * hairline-gap problem the way independently-traced polylines do.
+ */
+function snapCutVertices(segments: FlatCurveSegment[]): FlatCurveSegment[] {
+  type Anchor = { point: Point2; set: (p: Point2) => void };
+  const anchors: Anchor[] = [];
+
+  for (const seg of segments) {
+    if (seg.kind === "line") {
+      anchors.push({ point: seg.a, set: (p) => (seg.a = p) });
+      anchors.push({ point: seg.b, set: (p) => (seg.b = p) });
+    } else if (seg.kind === "polyline" && seg.points.length >= 2) {
+      const last = seg.points.length - 1;
+      anchors.push({ point: seg.points[0], set: (p) => (seg.points[0] = p) });
+      anchors.push({ point: seg.points[last], set: (p) => (seg.points[last] = p) });
+    }
+  }
+
+  const n = anchors.length;
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  const union = (i: number, j: number) => {
+    const ri = find(i), rj = find(j);
+    if (ri !== rj) parent[ri] = rj;
+  };
+
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (closeEnough(anchors[i].point, anchors[j].point, VERTEX_SNAP_TOL)) union(i, j);
+    }
+  }
+
+  const clusterPoints = new Map<number, Point2[]>();
+  for (let i = 0; i < n; i++) {
+    const root = find(i);
+    const arr = clusterPoints.get(root) ?? [];
+    arr.push(anchors[i].point);
+    clusterPoints.set(root, arr);
+  }
+  const centroidOf = (root: number): Point2 => {
+    const pts = clusterPoints.get(root)!;
+    let sx = 0, sy = 0;
+    for (const p of pts) { sx += p[0]; sy += p[1]; }
+    return [sx / pts.length, sy / pts.length];
+  };
+
+  for (let i = 0; i < n; i++) {
+    anchors[i].set(centroidOf(find(i)));
+  }
+
+  return segments;
+}
+
+function segmentLength(seg: FlatCurveSegment): number {
+  if (seg.kind === "line") return Math.hypot(seg.b[0] - seg.a[0], seg.b[1] - seg.a[1]);
+  if (seg.kind === "polyline") {
+    let len = 0;
+    for (let i = 1; i < seg.points.length; i++) {
+      len += Math.hypot(seg.points[i][0] - seg.points[i - 1][0], seg.points[i][1] - seg.points[i - 1][1]);
+    }
+    return len;
+  }
+  if (seg.kind === "arc") {
+    const span = (((seg.endAngleDeg - seg.startAngleDeg) % 360) + 360) % 360;
+    return (span * Math.PI * seg.radius) / 180;
+  }
+  return Infinity; // circle: never dropped as "near-zero".
+}
+
+const COLLINEAR_DIR_TOL = 1e-6; // unitless (dot-product deficit) - real analytic geometry either matches a shared line closely or is clearly a different one.
+
+function isCollinear(points: Point2[], a: Point2, b: Point2): boolean {
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const len = Math.hypot(dx, dy);
+  if (len < MIN_SEGMENT_LEN) return false;
+  const nx = -dy / len, ny = dx / len;
+  for (const p of points) {
+    const dist = Math.abs((p[0] - a[0]) * nx + (p[1] - a[1]) * ny);
+    if (dist > SEAM_DEDUP_TOL) return false;
+  }
+  return true;
+}
+
+type LineLike = { a: Point2; b: Point2; original: FlatCurveSegment };
+
+/**
+ * Merges same-line CUT segments whose 1D extents (partially or fully)
+ * overlap into one segment spanning their union - fixes a real-part
+ * pattern the exact-endpoint seam dedup above cannot: a lanced tab's bend
+ * strip has its own genuine free-cut side edges, which happen to run along
+ * the SAME infinite line as its parent's (naively whole-rectangle-traced)
+ * interior hole edge, covering a sub-range of it rather than matching it
+ * end-to-end. Left alone, both get drawn - the true boundary is their
+ * union, not their sum. A pair that matches over their FULL extent was
+ * already dropped entirely by `computeCutSegments` (a genuine fold seam,
+ * not a same-side double-cut), so anything reaching this pass is a partial
+ * or non-overlap and unioning is always the physically correct outcome.
+ */
+function mergeCollinearOverlaps(segments: FlatCurveSegment[]): FlatCurveSegment[] {
+  const lineLike: LineLike[] = [];
+  const other: FlatCurveSegment[] = [];
+
+  for (const seg of segments) {
+    if (seg.kind === "line") {
+      lineLike.push({ a: seg.a, b: seg.b, original: seg });
+    } else if (seg.kind === "polyline" && seg.points.length >= 2) {
+      const first = seg.points[0];
+      const last = seg.points[seg.points.length - 1];
+      if (isCollinear(seg.points, first, last)) {
+        lineLike.push({ a: first, b: last, original: seg });
+      } else {
+        other.push(seg);
+      }
+    } else {
+      other.push(seg);
+    }
+  }
+
+  type Dir = { ux: number; uy: number; offset: number };
+  // Snaps a value that's within COLLINEAR_DIR_TOL of zero to EXACTLY 0 (the
+  // `|| 0` also turns a resulting -0 into +0) - without this, 2 segments
+  // traced independently but truly collinear (e.g. one direction ratio
+  // computed as exactly 0, the other as -3e-16 from float noise) format to
+  // DIFFERENT key strings ("0.000000" vs "-0.000000") via toFixed and
+  // silently fail to group.
+  const snapNearZero = (v: number): number => (Math.abs(v) <= COLLINEAR_DIR_TOL ? 0 : v) || 0;
+  const dirKeyOf = (a: Point2, b: Point2): { key: string; dir: Dir } => {
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const len = Math.hypot(dx, dy);
+    let ux = snapNearZero(dx / len), uy = snapNearZero(dy / len);
+    if (ux < 0 || (ux === 0 && uy < 0)) {
+      ux = -ux; uy = -uy;
+    }
+    const offset = a[0] * uy - a[1] * ux; // signed perpendicular distance from origin
+    const key = `${ux.toFixed(6)},${uy.toFixed(6)},${(Math.round(offset / SEAM_DEDUP_TOL) * SEAM_DEDUP_TOL).toFixed(3)}`;
+    return { key, dir: { ux, uy, offset } };
+  };
+
+  const groups = new Map<string, { dir: Dir; items: LineLike[] }>();
+  for (const item of lineLike) {
+    const { key, dir } = dirKeyOf(item.a, item.b);
+    const g = groups.get(key);
+    if (g) g.items.push(item);
+    else groups.set(key, { dir, items: [item] });
+  }
+
+  // Endpoints of every non-line-like segment (arcs - circles have none) -
+  // if one of these lands exactly on a group's shared line, that point is a
+  // real connection some OTHER segment depends on (e.g. a lanced tab's
+  // rounded-corner arc meeting a straight run partway along a parent hole's
+  // own, independently-traced straight edge) and must survive as a distinct
+  // vertex, not get silently absorbed into one big unioned segment.
+  const otherAnchors: Point2[] = [];
+  for (const seg of other) {
+    const ends = segmentEndpoints(seg);
+    if (ends) otherAnchors.push(ends[0], ends[1]);
+  }
+
+  const merged: FlatCurveSegment[] = [];
+  for (const { dir, items } of groups.values()) {
+    if (items.length === 1) {
+      merged.push(items[0].original);
+      continue;
+    }
+    const origin = items[0].a;
+    type Interval = { tMin: number; tMax: number };
+    const intervals: Interval[] = items.map((it) => {
+      const ta = (it.a[0] - origin[0]) * dir.ux + (it.a[1] - origin[1]) * dir.uy;
+      const tb = (it.b[0] - origin[0]) * dir.ux + (it.b[1] - origin[1]) * dir.uy;
+      return { tMin: Math.min(ta, tb), tMax: Math.max(ta, tb) };
+    });
+    intervals.sort((x, y) => x.tMin - y.tMin);
+    const mergedIntervals: Interval[] = [];
+    for (const iv of intervals) {
+      const last = mergedIntervals[mergedIntervals.length - 1];
+      if (last && iv.tMin <= last.tMax + SEAM_DEDUP_TOL) {
+        last.tMax = Math.max(last.tMax, iv.tMax);
+      } else {
+        mergedIntervals.push({ ...iv });
+      }
+    }
+
+    // Forced split points: any other-segment anchor lying on this line
+    // (within tolerance of the perpendicular offset already baked into the
+    // group's key) whose projection falls strictly inside a merged
+    // interval splits it there.
+    const forcedTs: number[] = [];
+    for (const p of otherAnchors) {
+      const perp = (p[0] - origin[0]) * -dir.uy + (p[1] - origin[1]) * dir.ux;
+      if (Math.abs(perp) > SEAM_DEDUP_TOL) continue;
+      const t = (p[0] - origin[0]) * dir.ux + (p[1] - origin[1]) * dir.uy;
+      forcedTs.push(t);
+    }
+
+    const finalIntervals: Interval[] = [];
+    for (const iv of mergedIntervals) {
+      const splitsInside = forcedTs
+        .filter((t) => t > iv.tMin + MIN_SEGMENT_LEN && t < iv.tMax - MIN_SEGMENT_LEN)
+        .sort((a, b) => a - b);
+      let start = iv.tMin;
+      for (const t of splitsInside) {
+        finalIntervals.push({ tMin: start, tMax: t });
+        start = t;
+      }
+      finalIntervals.push({ tMin: start, tMax: iv.tMax });
+    }
+
+    for (const iv of finalIntervals) {
+      const a: Point2 = [origin[0] + dir.ux * iv.tMin, origin[1] + dir.uy * iv.tMin];
+      const b: Point2 = [origin[0] + dir.ux * iv.tMax, origin[1] + dir.uy * iv.tMax];
+      merged.push({ kind: "line", a, b });
+    }
+  }
+
+  return [...merged, ...other];
+}
+
+type ArcSeg = Extract<FlatCurveSegment, { kind: "arc" }>;
+
+/**
+ * The exact same partial-overlap pattern `mergeCollinearOverlaps` fixes for
+ * straight edges also occurs for ROUNDED ones: a lanced tab with a filleted
+ * (rounded) hinge-side corner has its own free-cut arc running along the
+ * SAME circle (same center + radius) as its parent's own rounded hole/slot
+ * boundary, covering only part of that circle rather than matching it
+ * end-to-end. Groups arcs by (center, radius), merges overlapping angular
+ * sweeps into their union, and splits at any point where a straight (line)
+ * edge's endpoint lands exactly on that circle (the same "forced split"
+ * idea, in angular terms) - e.g. where the parent hole's own boundary
+ * transitions from this arc onto a straight side.
+ */
+function mergeArcOverlaps(arcs: ArcSeg[], lineAnchors: Point2[]): FlatCurveSegment[] {
+  const CENTER_TOL = 1e-3; // mm
+  const keyOf = (c: Point2, r: number) =>
+    `${(Math.round(c[0] / CENTER_TOL) * CENTER_TOL).toFixed(3)},${(Math.round(c[1] / CENTER_TOL) * CENTER_TOL).toFixed(3)},${(Math.round(r / CENTER_TOL) * CENTER_TOL).toFixed(3)}`;
+
+  const groups = new Map<string, ArcSeg[]>();
+  for (const a of arcs) {
+    const key = keyOf(a.center, a.radius);
+    const arr = groups.get(key) ?? [];
+    arr.push(a);
+    groups.set(key, arr);
+  }
+
+  const result: FlatCurveSegment[] = [];
+  for (const group of groups.values()) {
+    if (group.length === 1) {
+      result.push(group[0]);
+      continue;
+    }
+    const { center, radius } = group[0];
+
+    // Unroll onto a line by cutting through the largest untouched gap, so
+    // no interval straddles the wrap point during a plain linear merge.
+    const norm = (deg: number) => ((deg % 360) + 360) % 360;
+    const raw = group.map((a) => {
+      const start = norm(a.startAngleDeg);
+      const sweep = (((a.endAngleDeg - a.startAngleDeg) % 360) + 360) % 360 || 360;
+      return { start, end: start + sweep };
+    });
+    const sortedStarts = [...raw].sort((x, y) => x.start - y.start);
+    let cutAngle = 0;
+    let biggestGap = -Infinity;
+    for (let i = 0; i < sortedStarts.length; i++) {
+      const cur = sortedStarts[i];
+      const next = sortedStarts[(i + 1) % sortedStarts.length];
+      const nextStart = i + 1 < sortedStarts.length ? next.start : next.start + 360;
+      const gap = nextStart - cur.end;
+      if (gap > biggestGap) {
+        biggestGap = gap;
+        cutAngle = norm(cur.end);
+      }
+    }
+
+    type Interval = { uMin: number; uMax: number };
+    const intervals: Interval[] = raw
+      .map(({ start, end }) => {
+        const uMin = norm(start - cutAngle);
+        return { uMin, uMax: uMin + (end - start) };
+      })
+      .sort((x, y) => x.uMin - y.uMin);
+
+    const mergedIntervals: Interval[] = [];
+    for (const iv of intervals) {
+      const last = mergedIntervals[mergedIntervals.length - 1];
+      if (last && iv.uMin <= last.uMax + 1e-6) {
+        last.uMax = Math.max(last.uMax, iv.uMax);
+      } else {
+        mergedIntervals.push({ ...iv });
+      }
+    }
+
+    const minSweepDeg = ((MIN_SEGMENT_LEN / radius) * 180) / Math.PI;
+    const forcedUs: number[] = [];
+    for (const p of lineAnchors) {
+      const dist = Math.hypot(p[0] - center[0], p[1] - center[1]);
+      if (Math.abs(dist - radius) > SEAM_DEDUP_TOL) continue;
+      const angle = norm((Math.atan2(p[1] - center[1], p[0] - center[0]) * 180) / Math.PI);
+      const u = norm(angle - cutAngle);
+      forcedUs.push(u);
+      forcedUs.push(u + 360); // an unrolled interval can extend past 360 - the point must too.
+    }
+
+    for (const iv of mergedIntervals) {
+      const splits = forcedUs
+        .filter((u) => u > iv.uMin + minSweepDeg && u < iv.uMax - minSweepDeg)
+        .sort((x, y) => x - y);
+      let start = iv.uMin;
+      const pieces: Interval[] = [];
+      for (const u of splits) {
+        pieces.push({ uMin: start, uMax: u });
+        start = u;
+      }
+      pieces.push({ uMin: start, uMax: iv.uMax });
+
+      for (const p of pieces) {
+        // A merge that closes the full circle (e.g. 2 semicircle traces of
+        // one hole rejoining) lands start===end after normalizing mod 360 -
+        // that's a full circle, not a zero-sweep arc, and must be emitted
+        // as one so `segmentLength`/the writer don't read it as empty.
+        if (p.uMax - p.uMin >= 360 - 1e-6) {
+          result.push({ kind: "circle", center, radius });
+          continue;
+        }
+        const startAngleDeg = norm(cutAngle + p.uMin);
+        const endAngleDeg = norm(cutAngle + p.uMax);
+        result.push({ kind: "arc", center, radius, startAngleDeg, endAngleDeg });
+      }
+    }
+  }
+  return result;
+}
+
+/** Runs the full CUT post-process pipeline: exact-seam dedup already ran
+ * upstream (`computeCutSegments`); this closes hairline vertex gaps,
+ * unions same-line and same-circle partial overlaps, then drops whatever
+ * near-zero-length debris any step produced. */
+function cleanupCutSegments(segments: FlatCurveSegment[]): FlatCurveSegment[] {
+  const snapped = snapCutVertices(segments);
+  const lineMerged = mergeCollinearOverlaps(snapped);
+
+  const arcs: ArcSeg[] = [];
+  const rest: FlatCurveSegment[] = [];
+  const lineAnchors: Point2[] = [];
+  for (const seg of lineMerged) {
+    if (seg.kind === "arc") {
+      arcs.push(seg);
+    } else {
+      rest.push(seg);
+      if (seg.kind === "line") lineAnchors.push(seg.a, seg.b);
+      else if (seg.kind === "polyline" && seg.points.length) {
+        lineAnchors.push(seg.points[0], seg.points[seg.points.length - 1]);
+      }
+    }
+  }
+  const arcMerged = mergeArcOverlaps(arcs, lineAnchors);
+
+  return [...rest, ...arcMerged].filter((seg) => segmentLength(seg) >= MIN_SEGMENT_LEN);
 }
 
 function collectFramingPoints(segments: FlatCurveSegment[]): Point2[] {
@@ -396,7 +789,7 @@ function bendCenterline(bl: FlatBendLine): [Point2, Point2] {
 
 /** Builds an ASCII DXF (R12/AC1009) string for a flattened flange-tree sheet-metal part - see the Phase 4 spec (CUT/BEND_UP/BEND_DOWN/NOTES layers) this implements. */
 export function buildFlatPatternDxf(result: FlangeTreeResult, meta: DxfExportMeta): string {
-  const cutSegments = computeCutSegments(result.outline);
+  const cutSegments = cleanupCutSegments(computeCutSegments(result.outline));
   const framingPoints: Point2Like[] = [...collectFramingPoints(cutSegments)];
   for (const bl of result.bendLines) {
     const [a, b] = bendCenterline(bl);
