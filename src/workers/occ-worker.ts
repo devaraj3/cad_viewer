@@ -70,6 +70,7 @@ export type SheetMetalBendLineSegment = {
 export type SheetMetalUnfoldSummary =
   | {
       ok: true;
+      kind: "flange_tree" | "rolled_ring";
       flat: { positions: Float32Array; indices: Uint32Array };
       bendLineSegments: SheetMetalBendLineSegment[];
     }
@@ -466,6 +467,7 @@ function summarizeSheetMetalUnfold(u: UnfoldResult): SheetMetalUnfoldSummary {
   }
   return {
     ok: true,
+    kind: u.kind,
     flat: { positions: u.flatMesh.positions, indices: u.flatMesh.indices },
     bendLineSegments,
   };

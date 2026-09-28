@@ -200,7 +200,12 @@ export type SheetMetalBendLineSegment = {
 };
 
 export type SheetMetalUnfoldOutcome =
-  | { ok: true; flat: THREE.BufferGeometry; bendLineSegments: SheetMetalBendLineSegment[] }
+  | {
+      ok: true;
+      kind: "flange_tree" | "rolled_ring";
+      flat: THREE.BufferGeometry;
+      bendLineSegments: SheetMetalBendLineSegment[];
+    }
   | { ok: false; reason: string; reasonDetail: string };
 
 export type SheetMetalAnalysisResult = {
@@ -215,7 +220,12 @@ type SheetMetalAnalyzeOk = {
   type: "sheet_metal_analyze";
   detection: SheetMetalDetectionSummary;
   unfold:
-    | { ok: true; flat: { positions: Float32Array; indices: Uint32Array }; bendLineSegments: SheetMetalBendLineSegment[] }
+    | {
+        ok: true;
+        kind: "flange_tree" | "rolled_ring";
+        flat: { positions: Float32Array; indices: Uint32Array };
+        bendLineSegments: SheetMetalBendLineSegment[];
+      }
     | { ok: false; reason: string; reasonDetail: string }
     | null;
 };
@@ -1329,6 +1339,7 @@ export async function analyzeCadSheetMetal(
           computeGeometryBoundsTree(flat);
           unfold = {
             ok: true,
+            kind: data.unfold.kind,
             flat,
             bendLineSegments: Array.isArray(data.unfold.bendLineSegments)
               ? data.unfold.bendLineSegments

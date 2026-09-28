@@ -117,7 +117,7 @@ export function unfoldSheetMetal(
   }
 
   if (detection.bendCount === 0) {
-    const ring = tryRolledRing(faces, t, K, tol, opts);
+    const ring = tryRolledRing(faces, edges, t, K, tol, opts);
     if (ring) return ring;
   }
 
@@ -129,6 +129,7 @@ export function unfoldSheetMetal(
 
 function tryRolledRing(
   faces: SheetMetalFaceInput[],
+  edges: UnfoldEdgeInput[],
   t: number,
   K: number,
   tol: number,
@@ -153,7 +154,7 @@ function tryRolledRing(
   const outerFace = faces.find((f) => f.id === best!.outerId)!;
   const innerR = best.innerR;
   const outerR = best.outerR;
-  const axis = best.axis;
+  const axis = normalize(best.axis);
   const origin = best.origin;
   let min = Infinity, max = -Infinity;
   for (let i = 0; i < outerFace.vertices.length; i += 3) {
@@ -163,9 +164,24 @@ function tryRolledRing(
     if (proj > max) max = proj;
   }
   const heightMM = max - min;
-  const developedLengthMM = 2 * Math.PI * (innerR + K * t);
+  const Rdev = innerR + K * t;
+  const developedLengthMM = 2 * Math.PI * Rdev;
 
-  const flatMesh = extrudeRectangle(developedLengthMM, heightMM, t);
+  const chosenFaceId = opts.skin === "outer" ? best.outerId : best.innerId;
+  const outlinePart = developRolledRingOutline(
+    chosenFaceId,
+    edges,
+    axis,
+    origin,
+    Rdev,
+    min,
+    max,
+    developedLengthMM,
+    heightMM,
+  );
+
+  const { positions, indices } = extrudePolygon(outlinePart.outer, outlinePart.holes, t);
+  const flatMesh: FlatMesh = { positions: new Float32Array(positions), indices: new Uint32Array(indices) };
 
   return {
     kind: "rolled_ring",
@@ -178,18 +194,161 @@ function tryRolledRing(
     developedLengthMM,
     heightMM,
     flatMesh,
+    outline: [outlinePart],
   };
 }
 
-function extrudeRectangle(width: number, height: number, thickness: number): FlatMesh {
-  const outer: Point2[] = [
-    [0, 0],
-    [width, 0],
-    [width, height],
-    [0, height],
+/**
+ * Develops the rolled cylindrical skin's own boundary loops into the flat
+ * strip: the 2 axial-extreme loops are the band's rim (already exactly the
+ * plain [0,W]x[0,H] rectangle - discarded here, not cut), every OTHER loop
+ * is a genuine through-cut (hole/slot) and gets mapped point-by-point via
+ * the same isometric (arc-length at Rdev, axial position) unroll a bend
+ * strip's own tangent lines use (`computeBend`) - the reason this is exact
+ * rather than approximate: a straight cut made before rolling only ever
+ * runs axial (theta fixed, unrolls to a vertical line) or circumferential
+ * (axial position fixed, unrolls to a HORIZONTAL line, even though it was a
+ * circular arc in the rolled 3D part) - a real rolled-sheet cut is
+ * therefore made of straight developed edges in the overwhelming common
+ * case, detected here purely from the developed points themselves (constant
+ * X or constant Y along one edge run), not by trusting the edge's own 3D
+ * curveKind - anything else (e.g. a hole drilled radially after rolling,
+ * whose true developed shape is a general curve) falls back to a polyline,
+ * same convention as `buildCurveSegmentsForLoop`'s own fallback.
+ */
+function developRolledRingOutline(
+  faceId: string,
+  edges: UnfoldEdgeInput[],
+  axis: Vec3,
+  origin: Vec3,
+  Rdev: number,
+  axialMin: number,
+  axialMax: number,
+  width: number,
+  height: number,
+): FlatOutlinePart {
+  const outerRect: Point2[] = [[0, 0], [width, 0], [width, height], [0, height]];
+  const outerRectCurves: FlatCurveSegment[] = [
+    { kind: "line", a: [0, 0], b: [width, 0] },
+    { kind: "line", a: [width, 0], b: [width, height] },
+    { kind: "line", a: [width, height], b: [0, height] },
+    { kind: "line", a: [0, height], b: [0, 0] },
   ];
-  const { positions, indices } = extrudePolygon(outer, [], thickness);
-  return { positions: new Float32Array(positions), indices: new Uint32Array(indices) };
+  const empty: FlatOutlinePart = {
+    wallId: faceId,
+    sourceFaceIds: [faceId],
+    outer: outerRect,
+    holes: [],
+    outerCurves: outerRectCurves,
+    holeCurves: [],
+  };
+
+  const loops = chainFaceLoopsWithEdgeRuns(faceId, edges);
+  if (loops.length === 0) return empty;
+
+  const axialCoord = (p: Vec3) => dot(sub(p, origin), axis);
+  const RIM_TOL = Math.max(1e-3, height * 1e-4);
+  const interior = loops.filter((loop) => {
+    if (loop.points.length < 3) return false;
+    let locMin = Infinity, locMax = -Infinity;
+    for (const p of loop.points) {
+      const a = axialCoord(p);
+      if (a < locMin) locMin = a;
+      if (a > locMax) locMax = a;
+    }
+    return !(Math.abs(locMin - axialMin) < RIM_TOL || Math.abs(locMax - axialMax) < RIM_TOL);
+  });
+  if (interior.length === 0) return empty;
+
+  const r0 = tangentBasis(axis).u;
+  const rawAngleDeg = (p: Vec3): number => {
+    const d = axialCoord(p);
+    const radial = sub(sub(p, origin), scale(axis, d));
+    const rLen = length(radial);
+    if (rLen < 1e-9) return 0;
+    const rn = scale(radial, 1 / rLen);
+    const deg = (Math.atan2(dot(cross(r0, rn), axis), dot(r0, rn)) * 180) / Math.PI;
+    return deg < 0 ? deg + 360 : deg;
+  };
+
+  // Each loop's own angular footprint (unwrapped locally so a loop that
+  // itself straddles the 0/360deg reference isn't mis-measured), then the
+  // same "unroll at the biggest untouched gap" trick `mergeArcOverlaps`
+  // uses - guarantees the strip's own seam (wherever global theta wraps)
+  // never lands inside a genuine hole.
+  const norm360 = (deg: number) => ((deg % 360) + 360) % 360;
+  const footprints = interior.map((loop) => {
+    const first = rawAngleDeg(loop.points[0]);
+    let lo = first, hi = first, prev = first;
+    for (let i = 1; i < loop.points.length; i++) {
+      const raw = rawAngleDeg(loop.points[i]);
+      let delta = raw - (((prev - first) % 360) + first);
+      while (delta > 180) delta -= 360;
+      while (delta < -180) delta += 360;
+      const unwrapped = prev + delta;
+      lo = Math.min(lo, unwrapped);
+      hi = Math.max(hi, unwrapped);
+      prev = unwrapped;
+    }
+    return { start: norm360(lo), end: norm360(lo) + (hi - lo) };
+  });
+  const sortedByStart = [...footprints].sort((a, b) => a.start - b.start);
+  let cutAngleDeg = 0;
+  let biggestGap = -Infinity;
+  for (let i = 0; i < sortedByStart.length; i++) {
+    const cur = sortedByStart[i];
+    const next = sortedByStart[(i + 1) % sortedByStart.length];
+    const nextStart = i + 1 < sortedByStart.length ? next.start : next.start + 360;
+    const gap = nextStart - cur.end;
+    if (gap > biggestGap) {
+      biggestGap = gap;
+      cutAngleDeg = norm360(cur.end);
+    }
+  }
+
+  const devPoint = (p: Vec3): Point2 => {
+    const thetaDeg = norm360(rawAngleDeg(p) - cutAngleDeg);
+    const x = Rdev * (thetaDeg * Math.PI) / 180;
+    const y = axialCoord(p) - axialMin;
+    return [x, y];
+  };
+
+  const DEV_LINE_TOL = Math.max(1e-3, width * 1e-5);
+  const holes: FlatLoop[] = [];
+  const holeCurves: FlatCurveLoop[] = [];
+  for (const loop of interior) {
+    const { points, runs } = loop;
+    const n = points.length;
+    const dev = points.map(devPoint);
+    holes.push(dev);
+
+    const segments: FlatCurveSegment[] = [];
+    for (const run of runs) {
+      const startIdx = run.pointStart;
+      const endIdx = (run.pointStart + run.pointCount) % n;
+      const runPts: Point2[] = [dev[startIdx]];
+      for (let k = 1; k < run.pointCount; k++) runPts.push(dev[startIdx + k]);
+      runPts.push(dev[endIdx]);
+
+      const constantX = runPts.every((q) => Math.abs(q[0] - runPts[0][0]) <= DEV_LINE_TOL);
+      const constantY = runPts.every((q) => Math.abs(q[1] - runPts[0][1]) <= DEV_LINE_TOL);
+      if (constantX || constantY) {
+        segments.push({ kind: "line", a: runPts[0], b: runPts[runPts.length - 1] });
+      } else {
+        segments.push({ kind: "polyline", points: runPts });
+      }
+    }
+    holeCurves.push(segments);
+  }
+
+  return {
+    wallId: faceId,
+    sourceFaceIds: [faceId],
+    outer: outerRect,
+    holes,
+    outerCurves: outerRectCurves,
+    holeCurves,
+  };
 }
 
 // --- General case: a tree of planar flanges connected by circular bends ---
@@ -490,6 +649,26 @@ function unfoldFlangeTree(
   const meshIndices: number[] = [];
   const edgeById = new Map(edges.map((e) => [e.id, e]));
 
+  // Faces belonging to a stepped/formed feature (see DetectedSteppedFeature -
+  // an invalid, too-short-to-fold "bend" whose child flange stays attached
+  // to its parent, unfolded nowhere). Any interior loop bordering one of
+  // these faces is that feature's own connecting wall, NOT a through-cut -
+  // physically, the material there is continuous (formed, not cut), the
+  // same way a rejected emboss would be if this engine accepted embosses at
+  // all. Verified on NewCaster2.0Mirror.step: the wall's own rep face AND
+  // its opposite skin each independently trace this notch at a DIFFERENT
+  // size (31mm2 vs 95mm2 - genuinely different cross-sections at 2 depths
+  // through a stepped connecting wall, not a tessellation-density artifact
+  // the existing 5%-tolerance dedup below is meant for), so both survived
+  // as separate, near-concentric "holes" feeding earcut a self-overlapping
+  // hole pair - the exact zig-zag/corrupted-triangulation defect reported
+  // for NewCaster's 4 stepped-feature slots. Excluded before dedup even
+  // runs, from every member's own trace, so neither size-variant survives.
+  const steppedFeatureFaceIds = new Set(steppedFeatureFacePairs.flat());
+  const loopBordersSteppedFeature = (loop: ChainedLoop): boolean =>
+    steppedFeatureFaceIds.size > 0 &&
+    loop.runs.some((run) => edgeById.get(run.edgeId)?.adjacentFaceIds.some((id) => steppedFeatureFaceIds.has(id)));
+
   for (const w of walls.values()) {
     const rigid = rigidByWall.get(w.id)!;
     const repFaceId = Array.from(w.skinFaceIds).sort(
@@ -498,8 +677,9 @@ function unfoldFlangeTree(
     const repFace = faceById.get(repFaceId);
     if (!repFace?.origin || !repFace.normal) continue;
     const loops3D = chainFaceLoopsWithEdgeRuns(repFaceId, edges);
-    const { outer, holes } = classifyLoopsWithEdgeRuns(loops3D, repFace.origin, repFace.normal);
+    const { outer, holes: repHoles } = classifyLoopsWithEdgeRuns(loops3D, repFace.origin, repFace.normal);
     if (outer.points.length < 3) continue;
+    const holes = repHoles.filter((h) => !loopBordersSteppedFeature(h));
 
     // A wall's OUTER boundary always comes from the chosen rep skin face,
     // but its HOLES must be gathered from EVERY member face, not just the
@@ -516,7 +696,8 @@ function unfoldFlangeTree(
       const mFace = faceById.get(memberId);
       if (!mFace?.origin || !mFace.normal) continue;
       const mLoops = chainFaceLoopsWithEdgeRuns(memberId, edges);
-      const { holes: mHoles } = classifyLoopsWithEdgeRuns(mLoops, mFace.origin, mFace.normal);
+      const { holes: mHolesRaw } = classifyLoopsWithEdgeRuns(mLoops, mFace.origin, mFace.normal);
+      const mHoles = mHolesRaw.filter((h) => !loopBordersSteppedFeature(h));
       for (const cand of mHoles) {
         if (cand.points.length < 3) continue;
         const desc = describeLoop2D(cand.points, rigid);

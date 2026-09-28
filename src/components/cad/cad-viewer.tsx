@@ -6038,10 +6038,17 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                     )}
                     {sheetMetalStatus === "ready" &&
                       sheetMetalDetection &&
-                      (sheetMetalDetection.bendCount === 0 ? (
-                        // A flat blank (no bends at all) is already flat - there's
-                        // nothing to unfold and no bend allowance to configure, so
-                        // just say what it is instead of offering a no-op toggle.
+                      (sheetMetalDetection.bendCount === 0 &&
+                      !(sheetMetalUnfold?.ok && sheetMetalUnfold.kind === "rolled_ring") ? (
+                        // A flat blank (no bends at all, and not a rolled
+                        // ring either) is already flat - there's nothing to
+                        // unfold and no bend allowance to configure, so just
+                        // say what it is instead of offering a no-op toggle.
+                        // A rolled 360deg band ALSO has bendCount 0 (a roll
+                        // isn't a discrete bend line) but is a real formed
+                        // part with its own flat (unrolled) pattern - it
+                        // falls through to the interactive branch below
+                        // instead, same as any bent part.
                         <>
                           <div className="cad-status cad-status--info">
                             {`Sheet metal · flat blank · ${
@@ -6108,21 +6115,31 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                             </span>
                           </div>
                           <div className="cad-status cad-status--info">
-                            {`${sheetMetalDetection.bendCount} bend${
-                              sheetMetalDetection.bendCount === 1 ? "" : "s"
-                            }`}
-                            {sheetMetalDetection.embossCount > 0
-                              ? `, ${sheetMetalDetection.embossCount} emboss${
-                                  sheetMetalDetection.embossCount === 1 ? "" : "es"
-                                }`
-                              : ""}
-                            {sheetMetalDetection.steppedFeatureCount > 0
-                              ? `, ${sheetMetalDetection.steppedFeatureCount} stepped feature${
-                                  sheetMetalDetection.steppedFeatureCount === 1
-                                    ? ""
-                                    : "s"
-                                }`
-                              : ""}
+                            {sheetMetalUnfold?.ok && sheetMetalUnfold.kind === "rolled_ring" ? (
+                              `Sheet metal · rolled · 360° · ${
+                                typeof sheetMetalDetection.thicknessMM === "number"
+                                  ? `${sheetMetalDetection.thicknessMM.toFixed(2)} mm`
+                                  : "?"
+                              }`
+                            ) : (
+                              <>
+                                {`${sheetMetalDetection.bendCount} bend${
+                                  sheetMetalDetection.bendCount === 1 ? "" : "s"
+                                }`}
+                                {sheetMetalDetection.embossCount > 0
+                                  ? `, ${sheetMetalDetection.embossCount} emboss${
+                                      sheetMetalDetection.embossCount === 1 ? "" : "es"
+                                    }`
+                                  : ""}
+                                {sheetMetalDetection.steppedFeatureCount > 0
+                                  ? `, ${sheetMetalDetection.steppedFeatureCount} stepped feature${
+                                      sheetMetalDetection.steppedFeatureCount === 1
+                                        ? ""
+                                        : "s"
+                                    }`
+                                  : ""}
+                              </>
+                            )}
                           </div>
                           {sheetMetalUnfold && !sheetMetalUnfold.ok && (
                             <div

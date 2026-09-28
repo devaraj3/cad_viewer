@@ -477,16 +477,29 @@ function mergeCollinearOverlaps(segments: FlatCurveSegment[]): FlatCurveSegment[
     else groups.set(key, { dir, items: [item] });
   }
 
-  // Endpoints of every non-line-like segment (arcs - circles have none) -
-  // if one of these lands exactly on a group's shared line, that point is a
-  // real connection some OTHER segment depends on (e.g. a lanced tab's
-  // rounded-corner arc meeting a straight run partway along a parent hole's
-  // own, independently-traced straight edge) and must survive as a distinct
-  // vertex, not get silently absorbed into one big unioned segment.
+  // Endpoints of every OTHER segment that could depend on a point strictly
+  // inside this line group's own merged interval: both non-line-like
+  // segments (arcs - circles have none) AND, critically, every line-like
+  // segment from a DIFFERENT direction group - a T-junction where a
+  // differently-oriented line's endpoint lands partway along this line is
+  // exactly as real a connection as an arc's would be (e.g. a rolled ring's
+  // narrow perforation slots: many short divider walls, each a "line" in
+  // its OWN (perpendicular) direction group, meeting the long shared
+  // top/bottom rail line at regular intervals along ITS length - missing
+  // this forced split left the rail as one 3000mm+ unbroken line the
+  // reimporter could never close into 1441 separate slot loops, even though
+  // each divider was itself present and correctly placed). Excluding a
+  // group's OWN members here is unnecessary, not just unneeded: a fellow
+  // member's endpoint always lands exactly AT one of the merged interval's
+  // own boundaries (never strictly inside), so the existing bounds check
+  // below already excludes it as a no-op.
   const otherAnchors: Point2[] = [];
   for (const seg of other) {
     const ends = segmentEndpoints(seg);
     if (ends) otherAnchors.push(ends[0], ends[1]);
+  }
+  for (const item of lineLike) {
+    otherAnchors.push(item.a, item.b);
   }
 
   const merged: FlatCurveSegment[] = [];
@@ -879,16 +892,34 @@ export function buildFlatPatternDxf(result: FlangeTreeResult, meta: DxfExportMet
   return w.toString();
 }
 
-/** Rolled-ring flat blanks have no wall/hole outline - just a developed rectangle (circumference x band height). */
+/**
+ * A rolled ring's developed strip (circumference x band height), plus every
+ * genuine through-cut on its cylindrical skin (holes/slots), developed onto
+ * the same strip - from `result.outline`, the exact same canonical loops
+ * `result.flatMesh` was extruded from (see `developRolledRingOutline` in
+ * unfold-sheet-metal.ts), so the DXF can never show a cut the 3D flat view
+ * doesn't (or vice versa). The strip is already axis-aligned at the origin
+ * in this frame - no min-area-rect orientation step needed, unlike a
+ * flange-tree part's arbitrarily-oriented outline.
+ */
 export function buildRolledRingDxf(result: RolledRingResult, meta: DxfExportMeta): string {
   const width = result.developedLengthMM;
   const height = result.heightMM;
+  const cutSegments = cleanupCutSegments(computeCutSegments(result.outline));
 
   const w = new DxfWriter();
   w.header([0, 0], [width, height]);
   w.tables();
   w.entities(() => {
-    w.polyline(LAYERS.CUT.name, [[0, 0], [width, 0], [width, height], [0, height]], true);
+    for (const seg of cutSegments) {
+      if (seg.kind === "line") w.line(LAYERS.CUT.name, seg.a, seg.b);
+      else if (seg.kind === "circle") w.circle(LAYERS.CUT.name, seg.center, seg.radius);
+      else if (seg.kind === "arc") w.arc(LAYERS.CUT.name, seg.center, seg.radius, seg.startAngleDeg, seg.endAngleDeg);
+      else {
+        const closed = seg.points.length >= 3 && closeEnough(seg.points[0], seg.points[seg.points.length - 1], SEAM_DEDUP_TOL);
+        w.polyline(LAYERS.CUT.name, seg.points, closed);
+      }
+    }
     const infoHeight = 3.2;
     const infoMargin = 6;
     const infoLines = [

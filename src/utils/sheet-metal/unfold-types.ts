@@ -171,6 +171,17 @@ export type RolledRingResult = {
   /** Axial height of the rolled band. */
   heightMM: number;
   flatMesh: FlatMesh;
+  /**
+   * The developed flat strip as one outline part (a plain [0,W]x[0,H]
+   * rectangle) plus every genuine through-cut on the rolled cylindrical
+   * skin (holes/slots), developed point-by-point via the same (arc-length
+   * at Rdev, axial position) map the strip's own width uses - the single
+   * source of truth for both `flatMesh` (extruded from `outer`/`holes`
+   * here) and the DXF CUT layer (from `outerCurves`/`holeCurves` here), so
+   * a rolled part's cuts can never appear in one and not the other. Always
+   * exactly one entry.
+   */
+  outline: FlatOutlinePart[];
 };
 
 export type FlangeTreeResult = {
