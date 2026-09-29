@@ -6074,46 +6074,6 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                         </>
                       ) : (
                         <>
-                          <div className="cad-row cad-row--between">
-                            <span className="cad-label">Unfold</span>
-                            <button
-                              disabled={isUnfolding || !sheetMetalUnfold?.ok}
-                              title={
-                                sheetMetalUnfold && !sheetMetalUnfold.ok
-                                  ? sheetMetalUnfold.reasonDetail ||
-                                    sheetMetalUnfold.reason
-                                  : undefined
-                              }
-                              onClick={() => handleFlatToggle(!flatEnabled)}
-                              className={`cad-toggle ${flatEnabled ? "cad-toggle--on" : ""} ${
-                                isUnfolding || !sheetMetalUnfold?.ok
-                                  ? "cad-toggle--disabled"
-                                  : ""
-                              }`}
-                            >
-                              <span className="cad-toggle__thumb" />
-                            </button>
-                          </div>
-                          <div className="cad-row cad-row--between">
-                            <span className="cad-label">K-Factor</span>
-                            <input
-                              type="number"
-                              min={0}
-                              max={1}
-                              step={0.01}
-                              value={kFactor}
-                              onChange={(e) => handleKFactorChange(e.target.value)}
-                              className="cad-input"
-                            />
-                          </div>
-                          <div className="cad-row cad-row--between">
-                            <span className="cad-label">Thickness</span>
-                            <span className="cad-label">
-                              {typeof sheetMetalDetection.thicknessMM === "number"
-                                ? `${sheetMetalDetection.thicknessMM.toFixed(2)} mm`
-                                : "-"}
-                            </span>
-                          </div>
                           <div className="cad-status cad-status--info">
                             {sheetMetalUnfold?.ok && sheetMetalUnfold.kind === "rolled_ring" ? (
                               `Sheet metal · rolled · 360° · ${
@@ -6155,17 +6115,71 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                               )}
                             </div>
                           )}
-                          {isUnfolding && (
-                            <div className="cad-status cad-status--info">
-                              Recalculating...
-                            </div>
+                          <div className="cad-row cad-row--between">
+                            <span className="cad-label">Unfold</span>
+                            <button
+                              disabled={isUnfolding || !sheetMetalUnfold?.ok}
+                              title={
+                                sheetMetalUnfold && !sheetMetalUnfold.ok
+                                  ? sheetMetalUnfold.reasonDetail ||
+                                    sheetMetalUnfold.reason
+                                  : undefined
+                              }
+                              onClick={() => handleFlatToggle(!flatEnabled)}
+                              className={`cad-toggle ${flatEnabled ? "cad-toggle--on" : ""} ${
+                                isUnfolding || !sheetMetalUnfold?.ok
+                                  ? "cad-toggle--disabled"
+                                  : ""
+                              }`}
+                            >
+                              <span className="cad-toggle__thumb" />
+                            </button>
+                          </div>
+                          {/* K-Factor stays reachable during a refusal (not
+                              just while Unfold is ON) so a part that fails
+                              to unfold at the default K-factor can still be
+                              retried at a different one - hiding it there
+                              too would strand the user with no way to fix
+                              a bad value. */}
+                          {(flatEnabled || (sheetMetalUnfold !== null && !sheetMetalUnfold.ok)) && (
+                            <>
+                              <div className="cad-row cad-row--between">
+                                <span className="cad-label">K-Factor</span>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={1}
+                                  step={0.01}
+                                  value={kFactor}
+                                  onChange={(e) => handleKFactorChange(e.target.value)}
+                                  className="cad-input"
+                                />
+                              </div>
+                              <div className="cad-hint">
+                                0.33 typical - confirm with your shop (depends
+                                on material, thickness, bend radius)
+                              </div>
+                              <div className="cad-row cad-row--between">
+                                <span className="cad-label">Thickness</span>
+                                <span className="cad-label">
+                                  {typeof sheetMetalDetection.thicknessMM === "number"
+                                    ? `${sheetMetalDetection.thicknessMM.toFixed(2)} mm`
+                                    : "-"}
+                                </span>
+                              </div>
+                              {isUnfolding && (
+                                <div className="cad-status cad-status--info">
+                                  Recalculating...
+                                </div>
+                              )}
+                              {flattenError && (
+                                <div className="cad-status cad-status--error">
+                                  {flattenError}
+                                </div>
+                              )}
+                            </>
                           )}
-                          {flattenError && (
-                            <div className="cad-status cad-status--error">
-                              {flattenError}
-                            </div>
-                          )}
-                          {sheetMetalUnfold?.ok && (
+                          {flatEnabled && sheetMetalUnfold?.ok && (
                             <button
                               disabled={isExportingDxf}
                               onClick={() => void handleExportSheetMetalDxf()}

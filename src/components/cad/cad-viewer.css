@@ -251,6 +251,13 @@
   color: var(--color-error-500);
 }
 
+.cad-hint {
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--color-ink-faint);
+  margin-top: -2px;
+}
+
 .cad-debug {
   font-size: 10px;
   color: var(--color-ink-faint);
