@@ -4885,8 +4885,26 @@ export function createViewer(container: HTMLElement): Viewer {
         otherParts,
         occupiedHoleAxisByPartKey.get(r.partKey) ?? null,
       );
-      const isFastenerLike = cylinderCandidate
-        ? isFastenerLikePart(r.box0, assemblyBox, cylinderCandidate)
+      // A part with no cylindrical candidate of its own (e.g. a tapered
+      // lock pin - its faces are "cone" kind) can still be fastener-like;
+      // it just has no candidate face to run the volume/aspect-ratio test
+      // against. When it fell through to the occupied-hole-axis rule
+      // (rule = "occupied-hole-axis" - see computeExplodeAxisForPart), the
+      // bore it occupies IS its true axis and radius, so build a synthetic
+      // candidate from that bore instead of skipping the test outright.
+      const fastenerTestCandidate =
+        cylinderCandidate ??
+        (rule === "occupied-hole-axis"
+          ? (() => {
+              const boreAxis = occupiedHoleAxisByPartKey.get(r.partKey);
+              const boreRadius = occupiedHoleRadiusByPartKey.get(r.partKey);
+              return boreAxis && boreRadius !== undefined
+                ? { axis: boreAxis, radius: boreRadius }
+                : null;
+            })()
+          : null);
+      const isFastenerLike = fastenerTestCandidate
+        ? isFastenerLikePart(r.box0, assemblyBox, fastenerTestCandidate)
         : false;
       const centroidDist = r.centroid.distanceTo(assemblyCentroid);
       maxCentroidDist = Math.max(maxCentroidDist, centroidDist);
@@ -4951,8 +4969,18 @@ export function createViewer(container: HTMLElement): Viewer {
     // separately, off real mesh vertices, before the bbox test runs.
     for (const item of pending) {
       if (HEADED_FASTENER_SPECIAL_CASE_ENABLED) {
+        // detectHeadedFastenerAxisSign samples real mesh vertices, not the
+        // analytic face-kind classification - it works identically whether
+        // item.axis came from a "cylinder" candidate or from the
+        // "occupied-hole-axis" fallback (a cone-classified taper pin with
+        // no cylindrical candidate of its own, occupying another part's
+        // bore - see occupiedHoleAxisByPartKey above). Excludes
+        // "principal-axis"/"flat-face"/"radial-fallback" rules, where
+        // item.axis isn't a cylindrical axis at all and this sampling
+        // wouldn't mean anything.
         const headSign =
-          item.isFastenerLike && item.rule === "cylinder"
+          item.isFastenerLike &&
+          (item.rule === "cylinder" || item.rule === "occupied-hole-axis")
             ? detectHeadedFastenerAxisSign(item.object, item.axis, item.centroid)
             : null;
         if (headSign !== null) {
