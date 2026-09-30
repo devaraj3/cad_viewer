@@ -190,6 +190,7 @@ import {
   runMeasurementHoverInteraction,
 } from "./cad-viewer-measurement-interaction";
 import LoadingOverlay from "../../ui/LoadingOverlay";
+import SheetMetalBlankReport from "./sheet-metal-blank-report";
 import "./cad-viewer.css";
 
 type Units = "mm" | "cm" | "m" | "in";
@@ -3282,6 +3283,8 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       void recomputeSheetMetalUnfold(next);
     };
 
+    const blankReportPartName = (loadFileName || "part").replace(/\.[^./\\]+$/, "");
+
     const handleExportSheetMetalDxf = async () => {
       const worker = workerRef.current;
       if (!worker || !file || !sheetMetalUnfold?.ok) return;
@@ -6058,6 +6061,14 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                             }`}
                           </div>
                           {sheetMetalUnfold?.ok && (
+                            <SheetMetalBlankReport
+                              report={sheetMetalUnfold.report}
+                              partName={blankReportPartName}
+                              kFactor={kFactor}
+                              units={units === "in" ? "imperial" : "metric"}
+                            />
+                          )}
+                          {sheetMetalUnfold?.ok && (
                             <button
                               disabled={isExportingDxf}
                               onClick={() => void handleExportSheetMetalDxf()}
@@ -6178,6 +6189,14 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                                 </div>
                               )}
                             </>
+                          )}
+                          {flatEnabled && sheetMetalUnfold?.ok && (
+                            <SheetMetalBlankReport
+                              report={sheetMetalUnfold.report}
+                              partName={blankReportPartName}
+                              kFactor={kFactor}
+                              units={units === "in" ? "imperial" : "metric"}
+                            />
                           )}
                           {flatEnabled && sheetMetalUnfold?.ok && (
                             <button
