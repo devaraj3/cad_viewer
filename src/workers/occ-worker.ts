@@ -11,6 +11,22 @@ import type {
   ExactFaceKind,
   ExactVertex,
 } from "../components/cad/exact-cad-topology";
+import {
+  buildDxfFileName,
+  buildFlatPatternDxf,
+  buildRolledRingDxf,
+  buildSheetMetalInputFromTopology,
+  buildUnfoldEdgesFromTopology,
+  detectSheetMetal,
+  unfoldSheetMetal,
+  type RawMesh,
+  type RawTopologyEdge as SmRawTopologyEdge,
+  type RawTopologyEdgeWithGeometry,
+  type RawTopologyFace as SmRawTopologyFace,
+  type RawTopologyVertex,
+  type SheetMetalDetectionResult,
+  type UnfoldResult,
+} from "../utils/sheet-metal";
 
 type TessReq = {
   id: string;
@@ -36,56 +52,77 @@ type TessWithTopologyReq = {
 type CADExt = "step" | "stp" | "iges" | "igs" | "brep";
 type CadExactExportFormat = "step" | "iges" | "brep";
 
-type SheetMetalMeta = {
-  isAssembly: boolean;
+export type SheetMetalDetectionSummary = {
   isSheetMetal: boolean;
+  reason?: string;
+  reasonDetail?: string;
   thicknessMM?: number;
-  bendCount?: number;
-  reason?:
-    | "assembly"
-    | "not_sheetmetal"
-    | "not_brep_source"
-    | "unsupported_surfaces"
-    | "analysis_failed"
-    | string;
+  bendCount: number;
+  embossCount: number;
+  steppedFeatureCount: number;
 };
 
-type AnalyzeReq = {
-  id: string;
-  type: "analyze_sheetmetal";
-  payload: {
-    buffer: ArrayBuffer;
-    ext: CADExt;
-  };
+export type SheetMetalBendLineSegment = {
+  a: [number, number, number];
+  b: [number, number, number];
 };
 
-type AnalyzeOk = {
-  id: string;
-  ok: true;
-  meta: SheetMetalMeta;
-};
+export type SheetMetalUnfoldSummary =
+  | {
+      ok: true;
+      kind: "flange_tree" | "rolled_ring";
+      flat: { positions: Float32Array; indices: Uint32Array };
+      bendLineSegments: SheetMetalBendLineSegment[];
+    }
+  | { ok: false; reason: string; reasonDetail: string };
 
-type UnfoldReq = {
+type SheetMetalAnalyzeReq = {
   id: string;
-  type: "unfold_sheetmetal";
+  type: "sheet_metal_analyze";
   payload: {
     buffer: ArrayBuffer;
     ext: CADExt;
     kFactor: number;
-    thicknessOverrideMM?: number;
     linearDeflection?: number;
     angularDeflection?: number;
   };
 };
 
-type UnfoldOk = {
+type SheetMetalAnalyzeOk = {
   id: string;
   ok: true;
-  meta: SheetMetalMeta;
-  flat: {
-    positions: Float32Array;
-    indices: Uint32Array;
+  type: "sheet_metal_analyze";
+  detection: SheetMetalDetectionSummary;
+  unfold: SheetMetalUnfoldSummary | null;
+};
+
+type SheetMetalExportDxfReq = {
+  id: string;
+  type: "sheet_metal_export_dxf";
+  payload: {
+    buffer: ArrayBuffer;
+    ext: CADExt;
+    kFactor: number;
+    partName: string;
+    linearDeflection?: number;
+    angularDeflection?: number;
   };
+};
+
+type SheetMetalExportDxfOk = {
+  id: string;
+  ok: true;
+  type: "sheet_metal_export_dxf";
+  fileName: string;
+  dxfText: string;
+};
+
+type SheetMetalExportDxfErr = {
+  id: string;
+  ok: false;
+  type: "sheet_metal_export_dxf";
+  reason: string;
+  reasonDetail: string;
 };
 type TessOk = {
   id: string;
@@ -224,8 +261,24 @@ async function init() {
   runtimeArtifactUrls = { scriptUrl, wasmUrl };
 
   try {
-    // Load the JS glue from /public/occ/
-    ctx.importScripts(scriptUrl);
+    // Load the JS glue from /public/occ/. This worker runs as a module
+    // worker (needed so the real `import`s above - the sheet-metal engine,
+    // which pulls in three/three-mesh-bvh - resolve correctly; Vite's dev
+    // server only serves worker scripts with import syntax intact when the
+    // browser is told to run them as a module), and importScripts() is not
+    // available there. occt-import-js.v2.js is a UMD-style script (`var
+    // occtimportjs = ...`, no ESM export) written to be loaded exactly the
+    // way importScripts loads it - executed in global scope so the `var`
+    // becomes a property of `self`. Indirect eval reproduces that: it always
+    // runs in non-strict global scope regardless of the caller's own module
+    // context, so this is the standard importScripts-equivalent for a
+    // module worker loading a classic (non-module) script.
+    const res = await fetch(scriptUrl);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} ${res.statusText}`);
+    }
+    const scriptText = await res.text();
+    (0, eval)(scriptText);
   } catch (e: any) {
     throw new Error(
       `Failed to load OpenCascade script at ${scriptUrl}. Error: ${e.message}`,
@@ -253,10 +306,6 @@ async function init() {
       }
     },
   });
-  console.log(
-    "[OCCT] AnalyzeSheetMetal:",
-    typeof (occt as any).AnalyzeSheetMetal,
-  );
   console.log("[OCCT] ExportPart:", typeof (occt as any).ExportPart);
   console.log(
     "[OCCT] TessellateWithTopology:",
@@ -385,32 +434,58 @@ function normalizeColor(color: any): [number, number, number] | null {
   return null;
 }
 
-function normalizeSheetMetalMeta(raw: any): SheetMetalMeta {
-  const fallback: SheetMetalMeta = {
-    isAssembly: false,
-    isSheetMetal: false,
-    reason: "analysis_failed",
-  };
-  if (!raw || typeof raw !== "object") return fallback;
-
-  const isAssembly = !!raw.isAssembly;
-  const isSheetMetal = !!raw.isSheetMetal;
-  const thicknessMM = Number(raw.thicknessMM);
-  const bendCount = Number(raw.bendCount);
-  const reason =
-    typeof raw.reason === "string"
-      ? raw.reason
-      : isSheetMetal
-        ? undefined
-        : "analysis_failed";
-
+function summarizeSheetMetalDetection(
+  d: SheetMetalDetectionResult,
+): SheetMetalDetectionSummary {
   return {
-    isAssembly,
-    isSheetMetal,
-    thicknessMM: Number.isFinite(thicknessMM) ? thicknessMM : undefined,
-    bendCount: Number.isFinite(bendCount) ? bendCount : undefined,
-    reason,
+    isSheetMetal: d.isSheetMetal,
+    reason: d.reason,
+    reasonDetail: d.reasonDetail,
+    thicknessMM: d.thicknessMM,
+    bendCount: d.bendCount,
+    embossCount: d.embossCount,
+    steppedFeatureCount: d.steppedFeatureCount,
   };
+}
+
+function summarizeSheetMetalUnfold(u: UnfoldResult): SheetMetalUnfoldSummary {
+  if (!u.ok) {
+    return { ok: false, reason: u.reason, reasonDetail: u.reasonDetail };
+  }
+  const bendLineSegments: SheetMetalBendLineSegment[] = [];
+  if (u.kind === "flange_tree") {
+    for (const bl of u.bendLines) {
+      bendLineSegments.push({
+        a: [bl.parentTangentLine[0][0], bl.parentTangentLine[0][1], 0],
+        b: [bl.parentTangentLine[1][0], bl.parentTangentLine[1][1], 0],
+      });
+      bendLineSegments.push({
+        a: [bl.childTangentLine[0][0], bl.childTangentLine[0][1], 0],
+        b: [bl.childTangentLine[1][0], bl.childTangentLine[1][1], 0],
+      });
+    }
+  }
+  return {
+    ok: true,
+    kind: u.kind,
+    flat: { positions: u.flatMesh.positions, indices: u.flatMesh.indices },
+    bendLineSegments,
+  };
+}
+
+function buildRawMeshesForSheetMetal(rawMeshes: unknown[]): RawMesh[] {
+  return rawMeshes.map((raw) => {
+    const m = raw as any;
+    const brepFacesSrc = Array.isArray(m?.brep_faces) ? m.brep_faces : [];
+    return {
+      positions: toFloat32Array(m?.attributes?.position?.array),
+      indices: toUint32Array(m?.index?.array),
+      brepFaces: brepFacesSrc.map((r: any) => ({
+        first: Number(r?.first) || 0,
+        last: Number(r?.last) || 0,
+      })),
+    };
+  });
 }
 
 function getAvailableTopologyRuntimeSymbols(mod: any): string[] {
@@ -1072,94 +1147,93 @@ ctx.onmessage = async (e: MessageEvent<any>) => {
     return;
   }
 
-  if (type === "analyze_sheetmetal") {
+  if (type === "sheet_metal_analyze") {
     try {
-      const req = payload as AnalyzeReq["payload"];
-      if (!isCadExt(req?.ext)) {
-        const meta: SheetMetalMeta = {
-          isAssembly: false,
-          isSheetMetal: false,
-          reason: "not_brep_source",
-        };
-        ctx.postMessage({ id, ok: true, meta } as AnalyzeOk);
-        return;
-      }
-
-      const mod = await init();
-      const u8 = new Uint8Array(req.buffer);
-      const analyze = mod?.AnalyzeSheetMetal;
-      if (typeof analyze !== "function") {
-        const meta: SheetMetalMeta = {
-          isAssembly: false,
-          isSheetMetal: false,
-          reason: "analysis_failed",
-        };
-        ctx.postMessage({ id, ok: true, meta } as AnalyzeOk);
-        return;
-      }
-
-      let meta = normalizeSheetMetalMeta(analyze(u8, { ext: req.ext }));
-      if (!meta.isSheetMetal && !meta.reason) {
-        meta = { ...meta, reason: "analysis_failed" };
-      }
-      ctx.postMessage({ id, ok: true, meta } as AnalyzeOk);
-    } catch (_err: any) {
-      const meta: SheetMetalMeta = {
-        isAssembly: false,
-        isSheetMetal: false,
-        reason: "analysis_failed",
-      };
-      ctx.postMessage({ id, ok: true, meta } as AnalyzeOk);
-    }
-    return;
-  }
-
-  if (type === "unfold_sheetmetal") {
-    try {
-      const req = payload as UnfoldReq["payload"];
+      const req = payload as SheetMetalAnalyzeReq["payload"];
       if (!isCadExt(req?.ext)) {
         throw new Error("Unsupported extension");
       }
+
       const mod = await init();
-      const u8 = new Uint8Array(req.buffer);
-      const unfold = mod?.UnfoldSheetMetal;
-      if (typeof unfold !== "function") {
-        throw new Error("UnfoldSheetMetal export is not available");
+      const sourceBytes = new Uint8Array(req.buffer);
+      const effectiveDeflections = resolveEffectiveDeflections(
+        req.buffer.byteLength,
+        req.linearDeflection,
+        req.angularDeflection,
+      );
+      const topologySupport = resolveTopologyRuntimeSupport(mod);
+      if (
+        !topologySupport.exactCadTopology ||
+        topologySupport.symbolName !== REQUIRED_TOPOLOGY_RUNTIME_EXPORT
+      ) {
+        throw new Error(missingTopologyAvailability(mod).message);
+      }
+      const topologyFn = mod[REQUIRED_TOPOLOGY_RUNTIME_EXPORT];
+      if (typeof topologyFn !== "function") {
+        throw new Error(missingTopologyAvailability(mod).message);
       }
 
-      const result = unfold(u8, {
+      const raw = topologyFn(sourceBytes, {
+        inputExt: req.ext,
         ext: req.ext,
-        kFactor: req.kFactor,
-        thicknessOverrideMM: req.thicknessOverrideMM,
+        linearDeflection: effectiveDeflections.linearDeflection,
+        angularDeflection: effectiveDeflections.angularDeflection,
         mesh: {
-          linearDeflection: req.linearDeflection ?? 0.001,
-          angularDeflection: req.angularDeflection ?? 0.5,
+          linearDeflection: effectiveDeflections.linearDeflection,
+          angularDeflection: effectiveDeflections.angularDeflection,
         },
       });
-
-      if (!result || result.success === false) {
-        const err = result?.error || "Failed to unfold sheet metal geometry";
-        throw new Error(err);
+      if (!raw || raw.success === false) {
+        throw new Error(raw?.error || "Exact topology extraction failed in runtime.");
       }
 
-      const meta = normalizeSheetMetalMeta(result?.meta);
-      const flatPositions = toFloat32Array(result?.flat?.positions);
-      const flatIndices = toUint32Array(result?.flat?.indices);
-      if (flatPositions.length === 0 || flatIndices.length === 0) {
-        throw new Error("Unfolded flat pattern is empty");
+      const rawTopo = raw.topology ?? raw;
+      const rawFaces: SmRawTopologyFace[] = Array.isArray(rawTopo?.faces)
+        ? rawTopo.faces
+        : [];
+      const rawEdges: (SmRawTopologyEdge & RawTopologyEdgeWithGeometry)[] =
+        Array.isArray(rawTopo?.edges) ? rawTopo.edges : [];
+      const rawVertices: RawTopologyVertex[] = Array.isArray(rawTopo?.vertices)
+        ? rawTopo.vertices
+        : [];
+      const rawMeshes = buildRawMeshesForSheetMetal(
+        Array.isArray(raw.meshes) ? raw.meshes : [],
+      );
+
+      const built = buildSheetMetalInputFromTopology(rawFaces, rawEdges, rawMeshes);
+      const detection = detectSheetMetal(
+        built.faces,
+        built.edges,
+        built.bboxDims,
+        built.raycastGeometry,
+      );
+
+      let unfoldSummary: SheetMetalUnfoldSummary | null = null;
+      let transferables: Transferable[] = [];
+      if (detection.isSheetMetal) {
+        const unfoldEdges = buildUnfoldEdgesFromTopology(rawEdges, rawVertices);
+        const unfoldResult = unfoldSheetMetal(built.faces, unfoldEdges, detection, {
+          kFactor: req.kFactor,
+          skin: "outer",
+        });
+        unfoldSummary = summarizeSheetMetalUnfold(unfoldResult);
+        if (unfoldSummary.ok) {
+          transferables = [
+            unfoldSummary.flat.positions.buffer,
+            unfoldSummary.flat.indices.buffer,
+          ];
+        }
       }
 
       ctx.postMessage(
         {
           id,
           ok: true,
-          meta,
-          flat: {
-            positions: flatPositions,
-            indices: flatIndices,
-          },
-        } as UnfoldOk,
-        [flatPositions.buffer, flatIndices.buffer],
+          type: "sheet_metal_analyze",
+          detection: summarizeSheetMetalDetection(detection),
+          unfold: unfoldSummary,
+        } as SheetMetalAnalyzeOk,
+        transferables,
       );
     } catch (err: any) {
       ctx.postMessage({
@@ -1168,5 +1242,113 @@ ctx.onmessage = async (e: MessageEvent<any>) => {
         error: err?.message || String(err),
       } as TessErr);
     }
+    return;
+  }
+
+  if (type === "sheet_metal_export_dxf") {
+    try {
+      const req = payload as SheetMetalExportDxfReq["payload"];
+      if (!isCadExt(req?.ext)) {
+        throw new Error("Unsupported extension");
+      }
+
+      const mod = await init();
+      const sourceBytes = new Uint8Array(req.buffer);
+      const effectiveDeflections = resolveEffectiveDeflections(
+        req.buffer.byteLength,
+        req.linearDeflection,
+        req.angularDeflection,
+      );
+      const topologySupport = resolveTopologyRuntimeSupport(mod);
+      if (
+        !topologySupport.exactCadTopology ||
+        topologySupport.symbolName !== REQUIRED_TOPOLOGY_RUNTIME_EXPORT
+      ) {
+        throw new Error(missingTopologyAvailability(mod).message);
+      }
+      const topologyFn = mod[REQUIRED_TOPOLOGY_RUNTIME_EXPORT];
+      if (typeof topologyFn !== "function") {
+        throw new Error(missingTopologyAvailability(mod).message);
+      }
+
+      const raw = topologyFn(sourceBytes, {
+        inputExt: req.ext,
+        ext: req.ext,
+        linearDeflection: effectiveDeflections.linearDeflection,
+        angularDeflection: effectiveDeflections.angularDeflection,
+        mesh: {
+          linearDeflection: effectiveDeflections.linearDeflection,
+          angularDeflection: effectiveDeflections.angularDeflection,
+        },
+      });
+      if (!raw || raw.success === false) {
+        throw new Error(raw?.error || "Exact topology extraction failed in runtime.");
+      }
+
+      const rawTopo = raw.topology ?? raw;
+      const rawFaces: SmRawTopologyFace[] = Array.isArray(rawTopo?.faces) ? rawTopo.faces : [];
+      const rawEdges: (SmRawTopologyEdge & RawTopologyEdgeWithGeometry)[] =
+        Array.isArray(rawTopo?.edges) ? rawTopo.edges : [];
+      const rawVertices: RawTopologyVertex[] = Array.isArray(rawTopo?.vertices) ? rawTopo.vertices : [];
+      const rawMeshes = buildRawMeshesForSheetMetal(Array.isArray(raw.meshes) ? raw.meshes : []);
+
+      const built = buildSheetMetalInputFromTopology(rawFaces, rawEdges, rawMeshes);
+      const detection = detectSheetMetal(built.faces, built.edges, built.bboxDims, built.raycastGeometry);
+
+      if (!detection.isSheetMetal) {
+        ctx.postMessage({
+          id,
+          ok: false,
+          type: "sheet_metal_export_dxf",
+          reason: detection.reason ?? "not_sheet_metal",
+          reasonDetail: detection.reasonDetail ?? "Not detected as sheet metal.",
+        } as SheetMetalExportDxfErr);
+        return;
+      }
+
+      const unfoldEdges = buildUnfoldEdgesFromTopology(rawEdges, rawVertices);
+      const unfoldResult: UnfoldResult = unfoldSheetMetal(built.faces, unfoldEdges, detection, {
+        kFactor: req.kFactor,
+        skin: "outer",
+      });
+      if (!unfoldResult.ok) {
+        ctx.postMessage({
+          id,
+          ok: false,
+          type: "sheet_metal_export_dxf",
+          reason: unfoldResult.reason,
+          reasonDetail: unfoldResult.reasonDetail,
+        } as SheetMetalExportDxfErr);
+        return;
+      }
+
+      const meta = {
+        partName: req.partName,
+        thicknessMM: detection.thicknessMM ?? 0,
+        kFactor: req.kFactor,
+      };
+      const dxfText =
+        unfoldResult.kind === "flange_tree"
+          ? buildFlatPatternDxf(unfoldResult, meta)
+          : buildRolledRingDxf(unfoldResult, meta);
+      const fileName = buildDxfFileName(meta);
+
+      ctx.postMessage({
+        id,
+        ok: true,
+        type: "sheet_metal_export_dxf",
+        fileName,
+        dxfText,
+      } as SheetMetalExportDxfOk);
+    } catch (err: any) {
+      ctx.postMessage({
+        id,
+        ok: false,
+        type: "sheet_metal_export_dxf",
+        reason: "runtime_error",
+        reasonDetail: err?.message || String(err),
+      } as SheetMetalExportDxfErr);
+    }
+    return;
   }
 };

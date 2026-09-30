@@ -120,6 +120,18 @@ export type HiddenLineComputeResult = {
 
 export type HiddenLineViewName = "front" | "top" | "right";
 
+/** A full camera+controls pose (both projections kept in sync, only one active at a time) - see getCameraSnapshot/applyCameraSnapshot. */
+export type CameraSnapshot = {
+  perspPosition: THREE.Vector3;
+  orthoPosition: THREE.Vector3;
+  orthoLeft: number;
+  orthoRight: number;
+  orthoTop: number;
+  orthoBottom: number;
+  target: THREE.Vector3;
+  up: THREE.Vector3;
+};
+
 /**
  * One continuous run of hidden-line result geometry, already projected into
  * the captured view's own pixel space (the same space canvasWidth/
@@ -388,6 +400,9 @@ export type Viewer = {
     geom: THREE.BufferGeometry,
     opts?: { refit?: boolean },
   ) => void;
+  setBendLineOverlay: (
+    segments: Array<{ a: [number, number, number]; b: [number, number, number] }> | null,
+  ) => void;
   loadObject3D: (
     object: THREE.Object3D,
     options?: { explodeTopLevel?: boolean },
@@ -396,6 +411,17 @@ export type Viewer = {
   setView: (
     preset: "top" | "front" | "right" | "iso" | "bottom" | "left" | "back",
   ) => void;
+  /**
+   * Smoothly animates to `preset` and fits the current model bounds, then
+   * settles into exactly the same resting state setView()+fitCameraToBox()
+   * would reach instantly (used for the sheet-metal Unfold-on transition).
+   */
+  animatePresetViewFit: (
+    preset: "top" | "front" | "right" | "iso" | "bottom" | "left" | "back",
+    durationMs?: number,
+  ) => void;
+  getCameraSnapshot: () => CameraSnapshot;
+  applyCameraSnapshot: (snapshot: CameraSnapshot) => void;
   setProjection: (mode: "perspective" | "orthographic") => void;
   setFeatureEdgesEnabled: (enabled: boolean) => void;
   setExactCadEdgeDisplayOptions: (
@@ -4859,8 +4885,26 @@ export function createViewer(container: HTMLElement): Viewer {
         otherParts,
         occupiedHoleAxisByPartKey.get(r.partKey) ?? null,
       );
-      const isFastenerLike = cylinderCandidate
-        ? isFastenerLikePart(r.box0, assemblyBox, cylinderCandidate)
+      // A part with no cylindrical candidate of its own (e.g. a tapered
+      // lock pin - its faces are "cone" kind) can still be fastener-like;
+      // it just has no candidate face to run the volume/aspect-ratio test
+      // against. When it fell through to the occupied-hole-axis rule
+      // (rule = "occupied-hole-axis" - see computeExplodeAxisForPart), the
+      // bore it occupies IS its true axis and radius, so build a synthetic
+      // candidate from that bore instead of skipping the test outright.
+      const fastenerTestCandidate =
+        cylinderCandidate ??
+        (rule === "occupied-hole-axis"
+          ? (() => {
+              const boreAxis = occupiedHoleAxisByPartKey.get(r.partKey);
+              const boreRadius = occupiedHoleRadiusByPartKey.get(r.partKey);
+              return boreAxis && boreRadius !== undefined
+                ? { axis: boreAxis, radius: boreRadius }
+                : null;
+            })()
+          : null);
+      const isFastenerLike = fastenerTestCandidate
+        ? isFastenerLikePart(r.box0, assemblyBox, fastenerTestCandidate)
         : false;
       const centroidDist = r.centroid.distanceTo(assemblyCentroid);
       maxCentroidDist = Math.max(maxCentroidDist, centroidDist);
@@ -4925,8 +4969,18 @@ export function createViewer(container: HTMLElement): Viewer {
     // separately, off real mesh vertices, before the bbox test runs.
     for (const item of pending) {
       if (HEADED_FASTENER_SPECIAL_CASE_ENABLED) {
+        // detectHeadedFastenerAxisSign samples real mesh vertices, not the
+        // analytic face-kind classification - it works identically whether
+        // item.axis came from a "cylinder" candidate or from the
+        // "occupied-hole-axis" fallback (a cone-classified taper pin with
+        // no cylindrical candidate of its own, occupying another part's
+        // bore - see occupiedHoleAxisByPartKey above). Excludes
+        // "principal-axis"/"flat-face"/"radial-fallback" rules, where
+        // item.axis isn't a cylindrical axis at all and this sampling
+        // wouldn't mean anything.
         const headSign =
-          item.isFastenerLike && item.rule === "cylinder"
+          item.isFastenerLike &&
+          (item.rule === "cylinder" || item.rule === "occupied-hole-axis")
             ? detectHeadedFastenerAxisSign(item.object, item.axis, item.centroid)
             : null;
         if (headSign !== null) {
@@ -11767,6 +11821,86 @@ export function createViewer(container: HTMLElement): Viewer {
     return null;
   }
 
+  let bendLineOverlayGroup: THREE.Group | null = null;
+
+  function clearBendLineOverlay() {
+    if (!bendLineOverlayGroup) return;
+    const group = bendLineOverlayGroup;
+    bendLineOverlayGroup = null;
+    try {
+      group.traverse((obj: any) => {
+        if (obj?.geometry) {
+          try {
+            disposeGeometryBoundsTree(obj.geometry);
+            obj.geometry.dispose();
+          } catch {
+            /* ignore */
+          }
+        }
+        if (obj?.material) {
+          try {
+            if (Array.isArray(obj.material)) obj.material.forEach((m: any) => m?.dispose?.());
+            else obj.material?.dispose?.();
+          } catch {
+            /* ignore */
+          }
+        }
+      });
+      if (group.parent) group.parent.remove(group);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /**
+   * Dashed fold-line overlay for the sheet-metal flat pattern view. `segments`
+   * are already in the primary mesh's post-recenter local frame (the caller
+   * mirrors recenterGeometryAtOrigin's own translate-to-bbox-center math
+   * before calling this, since that function mutates its geom argument in
+   * place and this overlay is a separate object with no such hook). Each
+   * segment gets its own [0, length] lineDistance run rather than a shared
+   * running total - these are independent fold lines, not one connected
+   * polyline, so a shared run would dash them inconsistently relative to
+   * each segment's own endpoints.
+   */
+  function setBendLineOverlay(
+    segments: Array<{ a: [number, number, number]; b: [number, number, number] }> | null,
+  ) {
+    clearBendLineOverlay();
+    if (!segments || segments.length === 0) {
+      requestRender("bend_line_overlay_clear");
+      return;
+    }
+    const positions: number[] = [];
+    const distances: number[] = [];
+    for (const seg of segments) {
+      const [ax, ay, az] = seg.a;
+      const [bx, by, bz] = seg.b;
+      positions.push(ax, ay, az, bx, by, bz);
+      const len = Math.hypot(bx - ax, by - ay, bz - az);
+      distances.push(0, len);
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geom.setAttribute("lineDistance", new THREE.Float32BufferAttribute(distances, 1));
+    const dashSize = THREE.MathUtils.clamp(modelDiagonal * 0.01, 0.5, 3);
+    const mat = new THREE.LineDashedMaterial({
+      color: 0x1d4ed8,
+      dashSize,
+      gapSize: dashSize * 0.6,
+      depthTest: false,
+      depthWrite: false,
+    });
+    const line = new THREE.LineSegments(geom, mat);
+    line.renderOrder = 9999;
+    const group = new THREE.Group();
+    group.userData.__bendLineOverlay = true;
+    group.add(line);
+    modelRoot.add(group);
+    bendLineOverlayGroup = group;
+    requestRender("bend_line_overlay_set");
+  }
+
   function replacePrimaryGeometry(
     geom: THREE.BufferGeometry,
     opts?: { refit?: boolean },
@@ -11782,6 +11916,7 @@ export function createViewer(container: HTMLElement): Viewer {
     clearWireframeOverlays();
     clearFeatureEdges();
     clearEdgeHighlight();
+    clearBendLineOverlay();
     cadMeshData.delete(mesh);
 
     const prevGeom = mesh.geometry as THREE.BufferGeometry | undefined;
@@ -12059,6 +12194,7 @@ export function createViewer(container: HTMLElement): Viewer {
     clearFeatureEdges();
     clearWireframeOverlays();
     clearCadTopology();
+    clearBendLineOverlay();
     resetIsolationSnapshot();
     clearModelRootChildren();
     if (featureEdgesGroup.parent !== modelRoot) {
@@ -12160,6 +12296,109 @@ export function createViewer(container: HTMLElement): Viewer {
     scheduleExactCurveFeatureResample("set_view");
     emitViewChanged();
     requestRender("set_view");
+  }
+
+  function getCameraSnapshot(): CameraSnapshot {
+    return {
+      perspPosition: persp.position.clone(),
+      orthoPosition: ortho.position.clone(),
+      orthoLeft: ortho.left,
+      orthoRight: ortho.right,
+      orthoTop: ortho.top,
+      orthoBottom: ortho.bottom,
+      target: controls.target.clone(),
+      up: activeCamera.up.clone(),
+    };
+  }
+
+  function applyCameraSnapshot(snapshot: CameraSnapshot): void {
+    persp.position.copy(snapshot.perspPosition);
+    ortho.position.copy(snapshot.orthoPosition);
+    ortho.left = snapshot.orthoLeft;
+    ortho.right = snapshot.orthoRight;
+    ortho.top = snapshot.orthoTop;
+    ortho.bottom = snapshot.orthoBottom;
+    persp.up.copy(snapshot.up);
+    ortho.up.copy(snapshot.up);
+    persp.lookAt(snapshot.target);
+    ortho.lookAt(snapshot.target);
+    persp.updateProjectionMatrix();
+    ortho.updateProjectionMatrix();
+    controls.target.copy(snapshot.target);
+    controls.update();
+    requestUpdateSilhouette?.();
+    scheduleExactCurveFeatureResample("apply_camera_snapshot");
+    emitViewChanged();
+    requestRender("apply_camera_snapshot");
+  }
+
+  function animateCameraToSnapshot(target: CameraSnapshot, durationMs: number): void {
+    const startPersp = persp.position.clone();
+    const startOrtho = ortho.position.clone();
+    const startTarget = controls.target.clone();
+    const startUp = activeCamera.up.clone();
+    const startOrthoLeft = ortho.left;
+    const startOrthoRight = ortho.right;
+    const startOrthoTop = ortho.top;
+    const startOrthoBottom = ortho.bottom;
+    const startTime = performance.now();
+
+    const step = () => {
+      const t = Math.min(1, (performance.now() - startTime) / durationMs);
+      const ease = 1 - Math.pow(1 - t, 3);
+
+      persp.position.lerpVectors(startPersp, target.perspPosition, ease);
+      ortho.position.lerpVectors(startOrtho, target.orthoPosition, ease);
+      ortho.left = THREE.MathUtils.lerp(startOrthoLeft, target.orthoLeft, ease);
+      ortho.right = THREE.MathUtils.lerp(startOrthoRight, target.orthoRight, ease);
+      ortho.top = THREE.MathUtils.lerp(startOrthoTop, target.orthoTop, ease);
+      ortho.bottom = THREE.MathUtils.lerp(startOrthoBottom, target.orthoBottom, ease);
+      const nextTarget = new THREE.Vector3().lerpVectors(startTarget, target.target, ease);
+      const nextUp = new THREE.Vector3().lerpVectors(startUp, target.up, ease).normalize();
+
+      persp.up.copy(nextUp);
+      ortho.up.copy(nextUp);
+      persp.lookAt(nextTarget);
+      ortho.lookAt(nextTarget);
+      persp.updateProjectionMatrix();
+      ortho.updateProjectionMatrix();
+      controls.target.copy(nextTarget);
+      controls.update();
+      requestUpdateSilhouette?.();
+      requestRender("animate_camera_to_snapshot");
+
+      if (t < 1) {
+        requestAnimationFrame(step);
+      } else {
+        scheduleExactCurveFeatureResample("animate_camera_to_snapshot_done");
+        emitViewChanged();
+      }
+    };
+
+    step();
+  }
+
+  /**
+   * Smoothly animates to `preset` and fits the current model bounds -
+   * computed by instantly running the trusted setView()+fitCameraToBox()
+   * math, snapshotting that resting state, reverting to the pre-call state
+   * (all synchronous, before any paint happens), then animating from there
+   * to the snapshot. Guarantees the animation settles into exactly the same
+   * pose the instant version would reach.
+   */
+  function animatePresetViewFit(
+    preset: "top" | "front" | "right" | "iso" | "bottom" | "left" | "back",
+    durationMs = 450,
+  ): void {
+    const startSnapshot = getCameraSnapshot();
+    setView(preset);
+    const box = new THREE.Box3().setFromObject(modelRoot);
+    if (!box.isEmpty()) {
+      fitCameraToBox(box, 1.5);
+    }
+    const endSnapshot = getCameraSnapshot();
+    applyCameraSnapshot(startSnapshot);
+    animateCameraToSnapshot(endSnapshot, durationMs);
   }
 
   /**
@@ -12976,9 +13215,13 @@ export function createViewer(container: HTMLElement): Viewer {
   return {
     loadMeshFromGeometry,
     replacePrimaryGeometry,
+    setBendLineOverlay,
     loadObject3D,
     clear,
     setView,
+    animatePresetViewFit,
+    getCameraSnapshot,
+    applyCameraSnapshot,
     setProjection,
     setFeatureEdgesEnabled,
     setExactCadEdgeDisplayOptions,

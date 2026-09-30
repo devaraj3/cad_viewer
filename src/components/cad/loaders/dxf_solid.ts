@@ -1005,16 +1005,34 @@ function buildLoopsFromSegmentsByTurning(
     const seenAt = new Map<string, number>();
     const pathNodeKeys: string[] = [];
     const pathEdgeIds: number[] = [];
+    // Edges consumed by THIS walk so far, not yet committed to the shared
+    // `visited` array - a junction vertex (degree > 2: two loops meeting at
+    // exactly one point, or a seam-dedup "forced split" mid-edge) can send a
+    // walk down a dead-end "handle" before it ever reaches a real cycle
+    // (`cycleStart` matches an EARLIER node in this same path, not
+    // necessarily `startId` itself - see the `pathNodeKeys.slice(cycleStart)`
+    // below, which already only keeps the true cyclic tail). Marking every
+    // walked edge `visited` immediately - the previous behavior - permanently
+    // starves whichever face the discarded handle edges actually belong to,
+    // since no other `startId` will ever retry them: verified on
+    // NewCaster2.0Mirror.step's second mirrored half, whose real ~31-point
+    // outer boundary was getting swallowed into one 224-point Frankenstein
+    // loop this way. Only the edges that survive into the retained cycle are
+    // committed to `visited`, once the cycle is known, below - a handle's own
+    // edges stay free for a later `startId` to retrace (this time correctly,
+    // since whatever wrong edge it took last time is now visited and
+    // excluded from the turn-angle competition).
+    const walkedThisPass = new Set<number>();
 
     let currentId = startId;
     let guard = 0;
 
     while (guard < maxWalk) {
       guard += 1;
-      if (visited[currentId]) break;
+      if (visited[currentId] || walkedThisPass.has(currentId)) break;
 
       const current = directedEdges[currentId];
-      visited[currentId] = true;
+      walkedThisPass.add(currentId);
       pathEdgeIds.push(currentId);
 
       if (pathNodeKeys.length === 0) {
@@ -1056,6 +1074,7 @@ function buildLoopsFromSegmentsByTurning(
               }
             }
           }
+          for (const edgeId of cycleEdgeIds) visited[edgeId] = true;
         }
         break;
       }
@@ -1074,7 +1093,7 @@ function buildLoopsFromSegmentsByTurning(
 
       for (const candidateId of outgoing) {
         if (candidateId === current.twinId) continue;
-        if (visited[candidateId]) continue;
+        if (visited[candidateId] || walkedThisPass.has(candidateId)) continue;
 
         const candidate = directedEdges[candidateId];
         if (candidate.to === current.from) continue;
@@ -1156,33 +1175,34 @@ function filterLoopsToMainPlate(
     .sort((left, right) => right.absArea - left.absArea);
   if (topLevel.length === 0) return null;
 
-  const dominant = topLevel[0];
-  const hasCompetingTopLevel =
-    topLevel.length > 1 &&
-    topLevel[1].absArea >= dominant.absArea * DOMINANT_OUTER_RATIO;
-  // Keep the dominant subtree so multi-view / multi-part drawings no longer hard-fail.
-  const kept: LoopCandidate[] = [dominant.loop];
-  const dominantPoints = dominant.loop.points;
+  // Keep EVERY top-level region (not just the single largest) plus each
+  // one's own correctly-nested descendants - a real multi-island flat
+  // pattern (a separate bend-tree component, a hem extension laid out
+  // beside the main body, 2 independent mirrored halves) is exactly as
+  // legitimate as a single dominant plate, and discarding every OTHER
+  // top-level region silently dropped whole islands' worth of real cut
+  // geometry (see NewCaster2.0Mirror.step's mirrored second half, and
+  // sh4/@NG's own separate bend islands). A genuine construction-frame or
+  // title-block artifact is a different shape class entirely and is
+  // suppressed separately, by `suppressConstructionFrameLoop`, run on this
+  // function's full result afterward - not this function's job to guess at.
   const crossingTol = Math.max(1e-6, tol * 0.5);
-
-  for (const info of infos) {
-    if (info.index === dominant.index) continue;
-    if (!loopIsInsideOrOnBoundary(info.loop.points, dominantPoints, crossingTol)) {
-      continue;
-    }
-    if (loopCrossesBoundary(info.loop.points, dominantPoints, crossingTol)) {
-      continue;
-    }
+  const keptIndices = new Set<number>();
+  const kept: LoopCandidate[] = [];
+  const keep = (info: (typeof infos)[number]) => {
+    if (keptIndices.has(info.index)) return;
+    keptIndices.add(info.index);
     kept.push(info.loop);
-  }
+  };
 
-  if (hasCompetingTopLevel && kept.length === 1) {
-    const looksLikeTwoIndependentBodies =
-      topLevel.length === 2 &&
-      !loopLooksCircular(topLevel[0].loop.points) &&
-      !loopLooksCircular(topLevel[1].loop.points);
-    if (!looksLikeTwoIndependentBodies) {
-      return null;
+  for (const top of topLevel) {
+    keep(top);
+    const topPoints = top.loop.points;
+    for (const info of infos) {
+      if (keptIndices.has(info.index)) continue;
+      if (!loopIsInsideOrOnBoundary(info.loop.points, topPoints, crossingTol)) continue;
+      if (loopCrossesBoundary(info.loop.points, topPoints, crossingTol)) continue;
+      keep(info);
     }
   }
 
@@ -1312,15 +1332,36 @@ function suppressConstructionFrameLoop(
     );
   }
 
-  const nextOuterLike = infos
+  const outerLikeCandidates = infos
     .filter(
       (info) =>
         info.index !== l0.index &&
         (childCountByIndex.get(info.index) ?? 0) > 0 &&
         info.absArea > 1e-9,
     )
-    .sort((left, right) => right.absArea - left.absArea)[0];
+    .sort((left, right) => right.absArea - left.absArea);
+  const nextOuterLike = outerLikeCandidates[0];
   if (!nextOuterLike) {
+    return { loops, suppressed: false };
+  }
+
+  // A real drawing-sheet frame/title-block wraps exactly ONE actual part, so
+  // removing it should leave a single, clearly dominant remaining body (the
+  // part itself). If there are instead several SEPARATE, comparably-sized
+  // "outer-like" loops left over (each with its own children, none of them
+  // wrapping the others), that pattern means l0 isn't a frame at all - it's
+  // the real part's own outer boundary, and what looked like "the frame's
+  // one contained part" is really just one of several repeated FEATURES
+  // (e.g. dowel holes, each with its own nested countersink/step island) of
+  // that same real body. Suppressing l0 here would turn a real plate with
+  // holes into several disconnected floating rings. Verified on
+  // "@NG__ 1 !_ 16561-76.stp": a plain 93.8x30mm hinge-leaf rectangle
+  // wrongly matched the pure-shape frame heuristic below, with 3 identical
+  // ~36mm2 dowel-hole+island features as the "contained part" candidates.
+  const comparableSiblings = outerLikeCandidates.filter(
+    (info) => info.index !== nextOuterLike.index && info.absArea >= nextOuterLike.absArea * 0.5,
+  );
+  if (comparableSiblings.length > 0) {
     return { loops, suppressed: false };
   }
 
@@ -2375,11 +2416,28 @@ function extractSolidRegionsFromDxfRepairPass(
     entityUid: polyline.entityUid,
   }));
 
+  // Tightest tolerance FIRST, same precedence the primary extraction already
+  // uses (`extractSolidRegionsFromDxf`'s own `attemptTolerances`) - a looser
+  // tolerance is more likely to bridge a genuine hairline gap, but it is
+  // just as likely to spuriously weld 2 UNRELATED nearby vertices (2
+  // different small holes spaced a few tenths of a mm apart, common on a
+  // densely-featured real part) into one shared graph node, corrupting the
+  // turning-based face walk into a single garbled multi-hole "Frankenstein"
+  // loop even though it still has plausible-looking area (passes
+  // `regionsHaveMeaningfulArea`, so the wrong result is never even retried).
+  // `repairTolerance`'s hard 0.5mm floor is 10x+ looser than this writer's
+  // own 0.01mm vertex-snap tolerance ever requires for a real hairline gap -
+  // verified on NewCaster2.0Mirror.step, where trying 0.5mm first merged 2
+  // unrelated nearby vertices into 6 spurious junctions and swallowed one
+  // wall's real ~31-point outer boundary into a 224-point mess; the natural
+  // `flattenJoinTolerance` (0.05mm there) closes every genuine gap cleanly
+  // with zero spurious junctions. Only reached for a file where the tight
+  // tolerance genuinely can't close a real gap.
   const repairTolerance = Math.max(flattenJoinTolerance * 3, 0.5);
   const attemptTolerances = [
-    repairTolerance,
     Math.max(1e-6, flattenJoinTolerance),
     Math.max(1e-6, flattenJoinTolerance * 2),
+    repairTolerance,
   ].filter(
     (value, index, values) =>
       values.findIndex((other) => Math.abs(other - value) <= 1e-9) === index,
@@ -2646,8 +2704,19 @@ export function buildSolidFromDxfWithDebug(
   let extraction = extractSolidRegionsFromDxf(dxf, scaleToMm, opts);
   const holeCountOf = (result: DxfSolidRegionExtractionResult | null): number =>
     result?.regions.reduce((sum, region) => sum + region.holes.length, 0) ?? 0;
-  const areaSumOf = (result: DxfSolidRegionExtractionResult | null): number =>
-    result?.regions.reduce((sum, region) => sum + region.area, 0) ?? 0;
+  // The OUTER boundary's own (gross) area, ignoring holes - what
+  // "comparable" should actually mean here: is the repair pass's outer
+  // silhouette trustworthy, not "does it have as much NET material". Region
+  // `.area` is already net (outer minus holes - see its construction sites),
+  // so comparing THAT directly would score a MORE complete result (more
+  // real holes correctly found, hence less net material) as "worse" than a
+  // LESS complete one - the exact opposite of `holesImproved`'s own intent.
+  // Verified on NewCaster2.0Mirror.step: the repair pass correctly finding
+  // all 16 holes (vs the primary's 8) legitimately has ~1800mm2 less net
+  // area than primary over the same ~29873mm2 outer silhouette, which used
+  // to fail a net-area 98% comparability check and get discarded.
+  const grossAreaSumOf = (result: DxfSolidRegionExtractionResult | null): number =>
+    result?.regions.reduce((sum, region) => sum + Math.abs(polygonAreaStable(region.outer)), 0) ?? 0;
 
   const primaryHasMeaningfulArea = !!extraction && regionsHaveMeaningfulArea(extraction.regions);
   const primaryHoleCount = holeCountOf(extraction);
@@ -2668,11 +2737,11 @@ export function buildSolidFromDxfWithDebug(
       extraction = repairedExtraction;
       usedRepairPass = true;
     } else if (repairedHasMeaningfulArea) {
-      const primaryArea = areaSumOf(extraction);
-      const repairedArea = areaSumOf(repairedExtraction);
+      const primaryGrossArea = grossAreaSumOf(extraction);
+      const repairedGrossArea = grossAreaSumOf(repairedExtraction);
       const holesImproved = repairedHoleCount > primaryHoleCount;
-      const areaComparable = repairedArea >= primaryArea * 0.98;
-      if (holesImproved && areaComparable) {
+      const outerComparable = repairedGrossArea >= primaryGrossArea * 0.98;
+      if (holesImproved && outerComparable) {
         extraction = repairedExtraction;
         usedRepairPass = true;
       }

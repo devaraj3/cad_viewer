@@ -19,18 +19,22 @@ import {
   type HiddenLineViewSetResult,
   type ExplodeDebugEntry,
   type ExplodeAxisOverride,
+  type CameraSnapshot,
 } from "./viewer";
+import { layFlatPatternOnBed } from "../../utils/sheet-metal/lay-flat-on-bed";
 import {
   analyzeCadSheetMetal,
   buildCadAssemblyFromCachePayload,
   DEFAULT_WORKER_CAPABILITIES,
+  exportSheetMetalFlatPatternDxf,
   getWorkerCapabilities,
   loadCadAssemblyWithTopology,
   loadMeshAssemblyAsObject3D,
   loadMeshFile,
-  SheetMetalMeta,
+  type SheetMetalBendLineSegment,
+  type SheetMetalDetectionSummary,
+  type SheetMetalUnfoldOutcome,
   type CadTopologyAvailability,
-  unfoldCadSheetMetal,
   type CadTopologyResult,
   type WorkerCapabilities,
 } from "./mesh-loader";
@@ -150,6 +154,7 @@ import { triggerSelectedPartExport } from "./cad-viewer-export-controller";
 import {
   cloneWorldBakedSubtree,
   getWorkingPartExportPlan,
+  triggerDownload,
   type PartExportPlan,
 } from "./exporters/part-export";
 import {
@@ -642,9 +647,59 @@ function getFileCacheKey(
   return `file:${file.name}:${file.size}:${file.lastModified}`;
 }
 
+const DEFAULT_K_FACTOR = 0.33;
+
+/**
+ * Sheet-metal detection only ever makes sense for a single solid body - a
+ * multi-body assembly's topology has no one "thickness" to report. The exact
+ * topology extraction already tags every face with the body it came from
+ * (partId), so counting distinct non-null partIds is a free, already-fetched
+ * signal for this - no separate OCCT assembly check needed.
+ */
+function isSingleBodyCadTopology(
+  topology: CadTopologyResult | null | undefined,
+): boolean {
+  if (!topology || !Array.isArray(topology.faces)) return false;
+  const ids = new Set<string>();
+  for (const f of topology.faces) {
+    if (f.partId) {
+      ids.add(f.partId);
+      if (ids.size > 1) return false;
+    }
+  }
+  return true;
+}
+
+type SheetMetalUiStatus = "idle" | "analyzing" | "ready" | "not_sheet_metal";
+
 function clampKFactor(value: number): number {
-  if (!Number.isFinite(value)) return 0.33;
+  if (!Number.isFinite(value)) return DEFAULT_K_FACTOR;
   return Math.min(1, Math.max(0, value));
+}
+
+/** One short line for the disabled-Unfold status text - the full reasonDetail sentence stays available via the button/status `title` (hover) only. */
+function shortSheetMetalRefusalMessage(
+  reason: string | undefined,
+  detection: SheetMetalDetectionSummary,
+): string {
+  switch (reason) {
+    case "embosses_present":
+      return `Can't unfold: ${detection.embossCount} formed feature${
+        detection.embossCount === 1 ? "" : "s"
+      } (emboss/rib)`;
+    case "non_developable_surface":
+      return "Can't unfold: non-developable bend surface";
+    case "bend_graph_not_a_tree":
+      return "Can't unfold: branching bend layout";
+    case "no_walls_found":
+      return "Can't unfold: no flat faces found";
+    case "missing_tangent_edge":
+      return "Can't unfold: incomplete bend geometry";
+    case "not_sheet_metal":
+      return "Can't unfold: not sheet metal";
+    default:
+      return "Can't unfold this part";
+  }
 }
 
 function convert(valMM: number, to: Units) {
@@ -668,8 +723,6 @@ function measureHasResult(measureMM: number | null) {
   return measureMM !== null;
 }
 
-const FORCE_SHOW_FLATTEN = false;
-const SHOW_SHEET_META_DEBUG = false;
 const MISSING_RUNTIME_TOPOLOGY_WARNING_MESSAGE =
   "Exact CAD topology unavailable in current OCC runtime. Circle/arc measurement is running in approximate mode.";
 const PERF_DIAGNOSTICS_STORAGE_KEY = "cadViewerPerfDiagnostics";
@@ -801,7 +854,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       backgroundColor,
       showViewCube = true,
       showHomeButton = true,
-      showFlatParts = false,
+      showFlatParts = true,
       assemblyLoadMode: assemblyLoadModeProp,
     },
     ref,
@@ -888,7 +941,26 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
     const [cadTopologyAvailability, setCadTopologyAvailability] =
       useState<CadTopologyAvailability | null>(null);
     const [cadTopologyEdgeCount, setCadTopologyEdgeCount] = useState(0);
-    const [sheetMeta, setSheetMeta] = useState<SheetMetalMeta | null>(null);
+    // Cheap early "is this file a multi-body assembly" signal for CAD loads,
+    // derived from the exact topology's per-face partId tagging - available
+    // well before "Assembly parts" mode has actually loaded per-part meshes
+    // (see the assemblyDetected computation below, which needs this to show
+    // the "Assembly parts" toggle for a freshly-loaded flat-mode assembly).
+    const [cadIsAssemblyDetected, setCadIsAssemblyDetected] = useState(false);
+    const [sheetMetalStatus, setSheetMetalStatus] =
+      useState<SheetMetalUiStatus>("idle");
+    const [sheetMetalDetection, setSheetMetalDetection] =
+      useState<SheetMetalDetectionSummary | null>(null);
+    const [sheetMetalUnfold, setSheetMetalUnfoldRaw] =
+      useState<SheetMetalUnfoldOutcome | null>(null);
+    const setSheetMetalUnfold = (next: SheetMetalUnfoldOutcome | null) => {
+      setSheetMetalUnfoldRaw((prev) => {
+        if (prev?.ok && prev.flat && prev.flat !== (next?.ok ? next.flat : null)) {
+          disposeGeometrySafe(prev.flat);
+        }
+        return next;
+      });
+    };
     const [meshAssemblyPreviewPartCount, setMeshAssemblyPreviewPartCount] =
       useState<number | null>(null);
     const [flatEnabled, setFlatEnabled] = useState(false);
@@ -906,13 +978,20 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
     const [formedGeom, setFormedGeom] = useState<THREE.BufferGeometry | null>(
       null,
     );
-    const [flatGeom, setFlatGeom] = useState<THREE.BufferGeometry | null>(null);
-    const [kFactor, setKFactor] = useState(0.33);
-    const [thicknessOverrideMM, setThicknessOverrideMM] = useState<
-      number | undefined
-    >(undefined);
+    const [kFactor, setKFactor] = useState(DEFAULT_K_FACTOR);
     const [isUnfolding, setIsUnfolding] = useState(false);
     const [flattenError, setFlattenError] = useState<string | null>(null);
+    const [isExportingDxf, setIsExportingDxf] = useState(false);
+    const [dxfExportError, setDxfExportError] = useState<string | null>(null);
+    // The flat pattern's grid-squaring rotation (radians), fed back into
+    // layFlatPatternOnBed as `preferredAngleRad` on every K-factor recompute
+    // so the plate doesn't visibly jump to a new rotation on small edits -
+    // only a materially different developed shape re-squares it. Reset on
+    // every new load (see clearFlatCache).
+    const flatLayAngleRef = useRef<number | null>(null);
+    // The camera pose from just before Unfold was turned on, restored
+    // exactly when it's turned back off. Reset on every new load.
+    const flatCameraSnapshotRef = useRef<CameraSnapshot | null>(null);
     const snapshotTakenRef = useRef(false);
     const loadRequestRef = useRef(0);
     const unfoldRequestRef = useRef(0);
@@ -921,7 +1000,6 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       null,
     );
     const activeFileKeyRef = useRef<string | null>(null);
-    const flatCacheKeyRef = useRef<string | null>(null);
     const pendingMeasureHoverRef = useRef<{ x: number; y: number } | null>(null);
     const measureHoverRafRef = useRef<number | null>(null);
     const displayAssemblySnapshotRef = useRef<DisplayAssemblySnapshot | null>(
@@ -1157,7 +1235,10 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
         setComparePickerOpen(false);
         setRenderQualityProfile("normal");
         viewerRef.current?.setRenderQualityProfile("normal");
-        setSheetMeta(null);
+        setCadIsAssemblyDetected(false);
+        setSheetMetalStatus("idle");
+        setSheetMetalDetection(null);
+        setKFactor(DEFAULT_K_FACTOR);
         setMeshAssemblyPreviewPartCount(null);
         setFlatEnabled(false);
         setFlattenError(null);
@@ -1690,6 +1771,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       try {
         workerRef.current = new Worker(
           new URL("../../workers/occ-worker.ts", import.meta.url),
+          { type: "module" },
         );
         setWorkerReady(true);
         setWorkerCapabilities(DEFAULT_WORKER_CAPABILITIES);
@@ -1814,6 +1896,57 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       setDimsMM({ x: size.x, y: size.y, z: size.z });
     }
 
+    // viewer.replacePrimaryGeometry recenters whatever geometry it's given
+    // to its own bbox center (see recenterGeometryAtOrigin in viewer.ts),
+    // mutating it in place - the bend-line segments are a separate overlay
+    // with no such hook, so this mirrors that same translate-to-bbox-center
+    // math to keep the dashed lines aligned with the recentered mesh.
+    // `center` MUST be captured by the caller BEFORE handing the geometry to
+    // replacePrimaryGeometry (which mutates it in place) - reading it off
+    // the geometry here, after the fact, would return the already-recentered
+    // (near-zero) center and leave the overlay stranded at its pre-recenter
+    // offset instead of on the plate (a real bug this comment is here to
+    // stop from coming back).
+    function applyBendLineOverlay(
+      viewer: Viewer,
+      center: THREE.Vector3,
+      segments: SheetMetalBendLineSegment[],
+      // Applied to each raw segment endpoint BEFORE the center subtraction -
+      // the same lay-flat-on-bed rotation (thickness-to-up-axis + grid
+      // squaring) already baked into the mesh, since the segments come from
+      // the unfold worker in the UN-rotated frame.
+      orientMatrix?: THREE.Matrix4,
+    ) {
+      if (segments.length === 0) {
+        viewer.setBendLineOverlay(null);
+        return;
+      }
+      const v = new THREE.Vector3();
+      const orient = (p: [number, number, number]): [number, number, number] => {
+        if (!orientMatrix) return p;
+        v.set(p[0], p[1], p[2]).applyMatrix4(orientMatrix);
+        return [v.x, v.y, v.z];
+      };
+      viewer.setBendLineOverlay(
+        segments.map((seg) => {
+          const a = orient(seg.a);
+          const b = orient(seg.b);
+          return {
+            a: [a[0] - center.x, a[1] - center.y, a[2] - center.z] as [
+              number,
+              number,
+              number,
+            ],
+            b: [b[0] - center.x, b[1] - center.y, b[2] - center.z] as [
+              number,
+              number,
+              number,
+            ],
+          };
+        }),
+      );
+    }
+
     function setDimsFromObject(object: THREE.Object3D) {
       const bounds = new THREE.Box3().setFromObject(object);
       if (bounds.isEmpty()) {
@@ -1888,11 +2021,9 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
     }
 
     function clearFlatCache() {
-      setFlatGeom((prev) => {
-        disposeGeometrySafe(prev);
-        return null;
-      });
-      flatCacheKeyRef.current = null;
+      setSheetMetalUnfold(null);
+      flatLayAngleRef.current = null;
+      flatCameraSnapshotRef.current = null;
     }
 
     function clearFormedCache() {
@@ -2110,7 +2241,10 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
         setDimsMM(null);
         setMeasureMode(false);
         setMeasureMM(null);
-        setSheetMeta(null);
+        setCadIsAssemblyDetected(false);
+        setSheetMetalStatus("idle");
+        setSheetMetalDetection(null);
+        setKFactor(DEFAULT_K_FACTOR);
         setMeshAssemblyPreviewPartCount(null);
         setFlatEnabled(false);
         setFlattenError(null);
@@ -2118,6 +2252,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
         unfoldRequestRef.current += 1;
         clearFlatCache();
         clearFormedCache();
+        viewerRef.current?.setBendLineOverlay(null);
         viewerRef.current?.setMeasurementSegment(null, null, null);
         const loadStartedAt = performance.now();
         const stageTimes: Record<string, number> = {};
@@ -2331,6 +2466,11 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                 assembly.topology,
                 assembly.topologyAvailability,
               );
+              setCadIsAssemblyDetected(
+                assembly.topologyAvailability?.exact === true &&
+                  !!assembly.topology &&
+                  !isSingleBodyCadTopology(assembly.topology),
+              );
               const cadComplexity = summarizeObjectComplexity(assembly.object);
               const runtimeProfile = resolveViewerQualityProfile({
                 fileSizeBytes,
@@ -2425,6 +2565,46 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                 setViewerMode({ kind: "assembly" });
                 displayAssemblySnapshotRef.current = null;
                 markStage(usedCadCache ? "cad_flat_mode_loaded_cache" : "cad_flat_mode_loaded");
+
+                const topologyOk =
+                  assembly.topologyAvailability?.exact === true &&
+                  !!assembly.topology;
+                const singleBody =
+                  topologyOk && isSingleBodyCadTopology(assembly.topology);
+                if (
+                  showFlatParts === true &&
+                  (ext === "step" || ext === "stp") &&
+                  topologyOk &&
+                  singleBody
+                ) {
+                  setSheetMetalStatus("analyzing");
+                  setSheetMetalDetection(null);
+                  setSheetMetalUnfold(null);
+                  const analysisId = ++unfoldRequestRef.current;
+                  analyzeCadSheetMetal(file, workerRef.current!, {
+                    kFactor: DEFAULT_K_FACTOR,
+                  })
+                    .then((result) => {
+                      if (isStale()) return;
+                      if (activeFileKeyRef.current !== fileKey) return;
+                      if (unfoldRequestRef.current !== analysisId) return;
+                      setSheetMetalDetection(result.detection);
+                      setSheetMetalUnfold(result.unfold);
+                      setSheetMetalStatus(
+                        result.detection.isSheetMetal
+                          ? "ready"
+                          : "not_sheet_metal",
+                      );
+                    })
+                    .catch(() => {
+                      if (isStale()) return;
+                      if (activeFileKeyRef.current !== fileKey) return;
+                      if (unfoldRequestRef.current !== analysisId) return;
+                      setSheetMetalStatus("not_sheet_metal");
+                    });
+                } else {
+                  setSheetMetalStatus("idle");
+                }
               }
             } else if (usePartsMode && isMeshAssemblyExt(ext)) {
               const object = await loadMeshAssemblyAsObject3D(file);
@@ -2520,24 +2700,6 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
               setViewerMode({ kind: "assembly" });
               displayAssemblySnapshotRef.current = null;
               markStage("mesh_single_loaded");
-            }
-
-            if (assemblyMode !== "parts" && isCadExt(ext)) {
-              analyzeCadSheetMetal(file, workerRef.current!)
-                .then((meta) => {
-                  if (isStale()) return;
-                  if (activeFileKeyRef.current !== fileKey) return;
-                  setSheetMeta(meta);
-                })
-                .catch(() => {
-                  if (isStale()) return;
-                  if (activeFileKeyRef.current !== fileKey) return;
-                  setSheetMeta({
-                    isAssembly: false,
-                    isSheetMetal: false,
-                    reason: "analysis_failed",
-                  });
-                });
             }
           }
 
@@ -2852,6 +3014,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       setFlattenError(null);
       setIsUnfolding(false);
       unfoldRequestRef.current += 1;
+      viewerRef.current?.setBendLineOverlay(null);
     }, [assemblyMode]);
 
     useEffect(() => {
@@ -2878,7 +3041,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
     const supportsAssemblyMode =
       !!file && (isCadExt(currentExt) || isMeshAssemblyExt(currentExt));
     const assemblyDetected =
-      sheetMeta?.isAssembly === true ||
+      cadIsAssemblyDetected ||
       (meshAssemblyPreviewPartCount !== null &&
         meshAssemblyPreviewPartCount > 1) ||
       hasAssembly;
@@ -2968,86 +3131,136 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       return "z";
     };
 
-    const baseFlattenEligible =
-      showControls && assemblyMode !== "parts" && isCadExt(currentExt);
-    const hasExplicitSheetMetalData =
-      sheetMeta?.isAssembly === false && sheetMeta?.isSheetMetal === true;
     const sheetMetalUiEnabled = showFlatParts === true;
-    const naturalFlattenVisible =
-      baseFlattenEligible &&
-      hasExplicitSheetMetalData;
-    const forceFlattenVisible =
-      FORCE_SHOW_FLATTEN &&
-      baseFlattenEligible &&
-      (currentExt === "step" || currentExt === "stp") &&
-      hasExplicitSheetMetalData;
     const flattenControlVisible =
-      sheetMetalUiEnabled && (naturalFlattenVisible || forceFlattenVisible);
+      showControls &&
+      assemblyMode !== "parts" &&
+      sheetMetalUiEnabled &&
+      (sheetMetalStatus === "analyzing" || sheetMetalStatus === "ready");
 
-    const handleFlatToggle = async (nextEnabled: boolean) => {
+    // Restores the formed part after Unfold is turned off (by the toggle
+    // itself, or because a K-factor edit made the shape un-unfoldable):
+    // restores the EXACT pre-unfold camera pose if we captured one, since a
+    // generic refit would re-frame from whatever direction the camera
+    // happens to be pointing post-flatten (usually Top), not where the user
+    // actually was.
+    function restoreFormedViewAfterFlatOff(viewer: Viewer, formed: THREE.BufferGeometry) {
+      const snapshot = flatCameraSnapshotRef.current;
+      viewer.replacePrimaryGeometry(formed.clone(), { refit: !snapshot });
+      setDimsFromGeometry(formed);
+      if (snapshot) {
+        viewer.applyCameraSnapshot(snapshot);
+        flatCameraSnapshotRef.current = null;
+      }
+    }
+
+    // Orients a freshly-unfolded flat mesh to lie on the grid bed (thickness
+    // on the up axis, footprint squared to the grid, longer side along X -
+    // see layFlatPatternOnBed's own doc comment) and applies the matching
+    // bend-line overlay. `flat` is cloned first since the lay-flat transform
+    // mutates in place and sheetMetalUnfold.flat must stay in its original,
+    // un-rotated frame for the next K-factor recompute/toggle to start from.
+    function orientAndShowFlatPattern(
+      viewer: Viewer,
+      flat: THREE.BufferGeometry,
+      bendLineSegments: SheetMetalBendLineSegment[],
+      refit: boolean,
+    ) {
+      const oriented = flat.clone();
+      const layFlat = layFlatPatternOnBed(oriented, flatLayAngleRef.current);
+      flatLayAngleRef.current = layFlat.angleRad;
+      // Captured BEFORE replacePrimaryGeometry recenters `oriented` in place
+      // - see applyBendLineOverlay's doc comment for why this order matters.
+      oriented.computeBoundingBox();
+      const center =
+        oriented.boundingBox?.getCenter(new THREE.Vector3()) ?? new THREE.Vector3();
+      viewer.replacePrimaryGeometry(oriented, { refit });
+      setDimsFromGeometry(oriented);
+      applyBendLineOverlay(viewer, center, bendLineSegments, layFlat.matrix);
+    }
+
+    // Toggling Unfold never needs a worker round trip: detection + an
+    // unfold attempt at the current K-factor already ran right after load
+    // (see the sheet_metal_analyze call in the load effect) so the flat
+    // geometry, if any, is already sitting in sheetMetalUnfold - this just
+    // swaps which geometry the viewer is showing.
+    const handleFlatToggle = (nextEnabled: boolean) => {
       const viewer = viewerRef.current;
-      if (!viewer || !formedGeom || !file) return;
+      if (!viewer || !formedGeom) return;
 
       if (!nextEnabled) {
-        viewer.replacePrimaryGeometry(formedGeom.clone(), { refit: true });
-        setDimsFromGeometry(formedGeom);
+        viewer.setBendLineOverlay(null);
+        restoreFormedViewAfterFlatOff(viewer, formedGeom);
         setFlatEnabled(false);
         setFlattenError(null);
         return;
       }
 
+      if (!sheetMetalUnfold?.ok) return;
+      setFlattenError(null);
+      flatCameraSnapshotRef.current = viewer.getCameraSnapshot();
+      orientAndShowFlatPattern(
+        viewer,
+        sheetMetalUnfold.flat,
+        sheetMetalUnfold.bendLineSegments,
+        false,
+      );
+      viewer.animatePresetViewFit("top");
+      setFlatEnabled(true);
+    };
+
+    // K-factor changes the developed bend allowance, so the flat geometry
+    // (and, while unfolded, what's on screen) needs a fresh worker call -
+    // detection itself is unaffected and gets re-derived as a byproduct
+    // (unfoldSheetMetal needs it as input either way).
+    const recomputeSheetMetalUnfold = async (nextK: number) => {
+      const worker = workerRef.current;
+      if (!worker || !file) return;
       const currentFileKey = getFileCacheKey(file);
       if (!currentFileKey) return;
 
-      const normalizedK = clampKFactor(kFactor);
-      const thicknessKey =
-        typeof thicknessOverrideMM === "number" &&
-        Number.isFinite(thicknessOverrideMM)
-          ? thicknessOverrideMM.toString()
-          : "";
-      const cacheKey = `${currentFileKey}::${normalizedK.toFixed(4)}::${thicknessKey}`;
       setFlattenError(null);
-
-      if (flatGeom && flatCacheKeyRef.current === cacheKey) {
-        viewer.replacePrimaryGeometry(flatGeom.clone(), { refit: true });
-        setDimsFromGeometry(flatGeom);
-        setFlatEnabled(true);
-        return;
-      }
-
-      const worker = workerRef.current;
-      if (!worker) return;
-
       setIsUnfolding(true);
-      setFlatEnabled(false);
-      const unfoldId = ++unfoldRequestRef.current;
+      const requestId = ++unfoldRequestRef.current;
       try {
-        const result = await unfoldCadSheetMetal(file, worker, {
-          kFactor: normalizedK,
-          thicknessOverrideMM,
+        const result = await analyzeCadSheetMetal(file, worker, {
+          kFactor: nextK,
         });
-        if (unfoldRequestRef.current !== unfoldId) return;
+        if (unfoldRequestRef.current !== requestId) return;
         if (activeFileKeyRef.current !== currentFileKey) return;
 
-        const flatCache = result.flat.clone();
-        setFlatGeom((prev) => {
-          disposeGeometrySafe(prev);
-          return flatCache;
-        });
-        flatCacheKeyRef.current = cacheKey;
-        setSheetMeta(result.meta);
-        viewer.replacePrimaryGeometry(flatCache.clone(), { refit: true });
-        setDimsFromGeometry(flatCache);
-        setFlatEnabled(true);
+        setSheetMetalDetection(result.detection);
+        setSheetMetalUnfold(result.unfold);
+        if (!result.detection.isSheetMetal) {
+          setSheetMetalStatus("not_sheet_metal");
+          return;
+        }
+
+        const viewer = viewerRef.current;
+        if (!flatEnabled || !viewer) return;
+        if (result.unfold?.ok) {
+          // refit: false - orientation is kept stable (see
+          // layFlatPatternOnBed/flatLayAngleRef) and the camera must not
+          // jump on a K-factor edit.
+          orientAndShowFlatPattern(
+            viewer,
+            result.unfold.flat,
+            result.unfold.bendLineSegments,
+            false,
+          );
+        } else {
+          viewer.setBendLineOverlay(null);
+          if (formedGeom) {
+            restoreFormedViewAfterFlatOff(viewer, formedGeom);
+          }
+          setFlatEnabled(false);
+        }
       } catch (err: any) {
-        if (unfoldRequestRef.current !== unfoldId) return;
+        if (unfoldRequestRef.current !== requestId) return;
         if (activeFileKeyRef.current !== currentFileKey) return;
-        setFlattenError(err?.message || "Failed to unfold sheet metal.");
-        setFlatEnabled(false);
-        viewer.replacePrimaryGeometry(formedGeom.clone(), { refit: true });
-        setDimsFromGeometry(formedGeom);
+        setFlattenError(err?.message || "Failed to recompute unfold.");
       } finally {
-        if (unfoldRequestRef.current === unfoldId) {
+        if (unfoldRequestRef.current === requestId) {
           setIsUnfolding(false);
         }
       }
@@ -3065,39 +3278,27 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       if (!Number.isFinite(parsed)) return;
       const next = clampKFactor(parsed);
       setKFactor(next);
-      setFlattenError(null);
-      unfoldRequestRef.current += 1;
-      setIsUnfolding(false);
-      if (flatEnabled && formedGeom && viewerRef.current) {
-        viewerRef.current.replacePrimaryGeometry(formedGeom.clone(), {
-          refit: true,
-        });
-        setDimsFromGeometry(formedGeom);
-        setFlatEnabled(false);
-      }
-      clearFlatCache();
+      if (sheetMetalStatus !== "ready") return;
+      void recomputeSheetMetalUnfold(next);
     };
 
-    const handleThicknessOverrideChange = (raw: string) => {
-      const trimmed = raw.trim();
-      if (!trimmed) {
-        setThicknessOverrideMM(undefined);
-      } else {
-        const parsed = Number(trimmed);
-        if (!Number.isFinite(parsed)) return;
-        setThicknessOverrideMM(parsed);
-      }
-      setFlattenError(null);
-      unfoldRequestRef.current += 1;
-      setIsUnfolding(false);
-      if (flatEnabled && formedGeom && viewerRef.current) {
-        viewerRef.current.replacePrimaryGeometry(formedGeom.clone(), {
-          refit: true,
+    const handleExportSheetMetalDxf = async () => {
+      const worker = workerRef.current;
+      if (!worker || !file || !sheetMetalUnfold?.ok) return;
+      setDxfExportError(null);
+      setIsExportingDxf(true);
+      try {
+        const partName = (loadFileName || "part").replace(/\.[^./\\]+$/, "");
+        const { fileName, dxfText } = await exportSheetMetalFlatPatternDxf(file, worker, {
+          kFactor,
+          partName,
         });
-        setDimsFromGeometry(formedGeom);
-        setFlatEnabled(false);
+        triggerDownload(dxfText, fileName, "application/dxf");
+      } catch (err: any) {
+        setDxfExportError(err?.message || "Failed to export DXF.");
+      } finally {
+        setIsExportingDxf(false);
       }
-      clearFlatCache();
     };
 
     const handleSnapshot = (type: "normal" | "outline") => {
@@ -5828,54 +6029,172 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                   <div className="cad-divider" />
                   <div className="cad-section">
                     <div className="cad-row cad-row--between">
-                      <span className="cad-label">Flatten</span>
-                      <button
-                        disabled={isUnfolding}
-                        onClick={() => handleFlatToggle(!flatEnabled)}
-                        className={`cad-toggle ${flatEnabled ? "cad-toggle--on" : ""} ${isUnfolding ? "cad-toggle--disabled" : ""}`}
-                      >
-                        <span className="cad-toggle__thumb" />
-                      </button>
+                      <span className="cad-label">Sheet metal</span>
                     </div>
-                    <div className="cad-row cad-row--between">
-                      <span className="cad-label">K-Factor</span>
-                      <input
-                        type="number"
-                        min={0}
-                        max={1}
-                        step={0.01}
-                        value={kFactor}
-                        onChange={(e) => handleKFactorChange(e.target.value)}
-                        className="cad-input"
-                      />
-                    </div>
-                    <div className="cad-row cad-row--between">
-                      <span className="cad-label">Thickness</span>
-                      <input
-                        type="number"
-                        min={0}
-                        step={0.01}
-                        placeholder="auto"
-                        value={thicknessOverrideMM ?? ""}
-                        onChange={(e) =>
-                          handleThicknessOverrideChange(e.target.value)
-                        }
-                        className="cad-input"
-                      />
-                    </div>
-                    {isUnfolding && (
-                      <div className="cad-status cad-status--info">Unfolding...</div>
-                    )}
-                    {flattenError && (
-                      <div className="cad-status cad-status--error">{flattenError}</div>
-                    )}
-                    {SHOW_SHEET_META_DEBUG && sheetMeta && (
-                      <div className="cad-debug">
-                        {`sheet=${sheetMeta.isSheetMetal ? "true" : "false"} assembly=${
-                          sheetMeta.isAssembly ? "true" : "false"
-                        } reason=${sheetMeta.reason ?? "none"}`}
+                    {sheetMetalStatus === "analyzing" && (
+                      <div className="cad-status cad-status--info">
+                        Analyzing sheet metal...
                       </div>
                     )}
+                    {sheetMetalStatus === "ready" &&
+                      sheetMetalDetection &&
+                      (sheetMetalDetection.bendCount === 0 &&
+                      !(sheetMetalUnfold?.ok && sheetMetalUnfold.kind === "rolled_ring") ? (
+                        // A flat blank (no bends at all, and not a rolled
+                        // ring either) is already flat - there's nothing to
+                        // unfold and no bend allowance to configure, so just
+                        // say what it is instead of offering a no-op toggle.
+                        // A rolled 360deg band ALSO has bendCount 0 (a roll
+                        // isn't a discrete bend line) but is a real formed
+                        // part with its own flat (unrolled) pattern - it
+                        // falls through to the interactive branch below
+                        // instead, same as any bent part.
+                        <>
+                          <div className="cad-status cad-status--info">
+                            {`Sheet metal · flat blank · ${
+                              typeof sheetMetalDetection.thicknessMM === "number"
+                                ? `${sheetMetalDetection.thicknessMM.toFixed(2)} mm`
+                                : "?"
+                            }`}
+                          </div>
+                          {sheetMetalUnfold?.ok && (
+                            <button
+                              disabled={isExportingDxf}
+                              onClick={() => void handleExportSheetMetalDxf()}
+                              className={`cad-btn cad-btn--wide ${isExportingDxf ? "cad-btn--disabled" : "cad-btn--neutral"}`}
+                            >
+                              {isExportingDxf ? "Exporting DXF..." : "Export DXF"}
+                            </button>
+                          )}
+                          {dxfExportError && (
+                            <div className="cad-status cad-status--error">
+                              {dxfExportError}
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <div className="cad-status cad-status--info">
+                            {sheetMetalUnfold?.ok && sheetMetalUnfold.kind === "rolled_ring" ? (
+                              `Sheet metal · rolled · 360° · ${
+                                typeof sheetMetalDetection.thicknessMM === "number"
+                                  ? `${sheetMetalDetection.thicknessMM.toFixed(2)} mm`
+                                  : "?"
+                              }`
+                            ) : (
+                              <>
+                                {`${sheetMetalDetection.bendCount} bend${
+                                  sheetMetalDetection.bendCount === 1 ? "" : "s"
+                                }`}
+                                {sheetMetalDetection.embossCount > 0
+                                  ? `, ${sheetMetalDetection.embossCount} emboss${
+                                      sheetMetalDetection.embossCount === 1 ? "" : "es"
+                                    }`
+                                  : ""}
+                                {sheetMetalDetection.steppedFeatureCount > 0
+                                  ? `, ${sheetMetalDetection.steppedFeatureCount} stepped feature${
+                                      sheetMetalDetection.steppedFeatureCount === 1
+                                        ? ""
+                                        : "s"
+                                    }`
+                                  : ""}
+                              </>
+                            )}
+                          </div>
+                          {sheetMetalUnfold && !sheetMetalUnfold.ok && (
+                            <div
+                              className="cad-status cad-status--info"
+                              title={
+                                sheetMetalUnfold.reasonDetail ||
+                                sheetMetalUnfold.reason
+                              }
+                            >
+                              {shortSheetMetalRefusalMessage(
+                                sheetMetalUnfold.reason,
+                                sheetMetalDetection,
+                              )}
+                            </div>
+                          )}
+                          <div className="cad-row cad-row--between">
+                            <span className="cad-label">Unfold</span>
+                            <button
+                              disabled={isUnfolding || !sheetMetalUnfold?.ok}
+                              title={
+                                sheetMetalUnfold && !sheetMetalUnfold.ok
+                                  ? sheetMetalUnfold.reasonDetail ||
+                                    sheetMetalUnfold.reason
+                                  : undefined
+                              }
+                              onClick={() => handleFlatToggle(!flatEnabled)}
+                              className={`cad-toggle ${flatEnabled ? "cad-toggle--on" : ""} ${
+                                isUnfolding || !sheetMetalUnfold?.ok
+                                  ? "cad-toggle--disabled"
+                                  : ""
+                              }`}
+                            >
+                              <span className="cad-toggle__thumb" />
+                            </button>
+                          </div>
+                          {/* K-Factor stays reachable during a refusal (not
+                              just while Unfold is ON) so a part that fails
+                              to unfold at the default K-factor can still be
+                              retried at a different one - hiding it there
+                              too would strand the user with no way to fix
+                              a bad value. */}
+                          {(flatEnabled || (sheetMetalUnfold !== null && !sheetMetalUnfold.ok)) && (
+                            <>
+                              <div className="cad-row cad-row--between">
+                                <span className="cad-label">K-Factor</span>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={1}
+                                  step={0.01}
+                                  value={kFactor}
+                                  onChange={(e) => handleKFactorChange(e.target.value)}
+                                  className="cad-input"
+                                />
+                              </div>
+                              <div className="cad-hint">
+                                0.33 typical - confirm with your shop (depends
+                                on material, thickness, bend radius)
+                              </div>
+                              <div className="cad-row cad-row--between">
+                                <span className="cad-label">Thickness</span>
+                                <span className="cad-label">
+                                  {typeof sheetMetalDetection.thicknessMM === "number"
+                                    ? `${sheetMetalDetection.thicknessMM.toFixed(2)} mm`
+                                    : "-"}
+                                </span>
+                              </div>
+                              {isUnfolding && (
+                                <div className="cad-status cad-status--info">
+                                  Recalculating...
+                                </div>
+                              )}
+                              {flattenError && (
+                                <div className="cad-status cad-status--error">
+                                  {flattenError}
+                                </div>
+                              )}
+                            </>
+                          )}
+                          {flatEnabled && sheetMetalUnfold?.ok && (
+                            <button
+                              disabled={isExportingDxf}
+                              onClick={() => void handleExportSheetMetalDxf()}
+                              className={`cad-btn cad-btn--wide ${isExportingDxf ? "cad-btn--disabled" : "cad-btn--neutral"}`}
+                            >
+                              {isExportingDxf ? "Exporting DXF..." : "Export DXF"}
+                            </button>
+                          )}
+                          {dxfExportError && (
+                            <div className="cad-status cad-status--error">
+                              {dxfExportError}
+                            </div>
+                          )}
+                        </>
+                      ))}
                   </div>
                 </>
               )}
