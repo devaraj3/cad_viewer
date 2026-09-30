@@ -14,6 +14,8 @@ import type {
 import {
   buildDxfFileName,
   buildFlatPatternDxf,
+  computeBlankReport,
+  type BlankReport,
   buildRolledRingDxf,
   buildSheetMetalInputFromTopology,
   buildUnfoldEdgesFromTopology,
@@ -73,6 +75,7 @@ export type SheetMetalUnfoldSummary =
       kind: "flange_tree" | "rolled_ring";
       flat: { positions: Float32Array; indices: Uint32Array };
       bendLineSegments: SheetMetalBendLineSegment[];
+      report: BlankReport;
     }
   | { ok: false; reason: string; reasonDetail: string };
 
@@ -115,6 +118,7 @@ type SheetMetalExportDxfOk = {
   type: "sheet_metal_export_dxf";
   fileName: string;
   dxfText: string;
+  report: BlankReport;
 };
 
 type SheetMetalExportDxfErr = {
@@ -448,7 +452,10 @@ function summarizeSheetMetalDetection(
   };
 }
 
-function summarizeSheetMetalUnfold(u: UnfoldResult): SheetMetalUnfoldSummary {
+function summarizeSheetMetalUnfold(
+  u: UnfoldResult,
+  detection: SheetMetalDetectionResult,
+): SheetMetalUnfoldSummary {
   if (!u.ok) {
     return { ok: false, reason: u.reason, reasonDetail: u.reasonDetail };
   }
@@ -470,6 +477,10 @@ function summarizeSheetMetalUnfold(u: UnfoldResult): SheetMetalUnfoldSummary {
     kind: u.kind,
     flat: { positions: u.flatMesh.positions, indices: u.flatMesh.indices },
     bendLineSegments,
+    report: computeBlankReport(u, {
+      thicknessMM: detection.thicknessMM ?? 0,
+      bendCount: detection.bendCount,
+    }),
   };
 }
 
@@ -1216,7 +1227,7 @@ ctx.onmessage = async (e: MessageEvent<any>) => {
           kFactor: req.kFactor,
           skin: "outer",
         });
-        unfoldSummary = summarizeSheetMetalUnfold(unfoldResult);
+        unfoldSummary = summarizeSheetMetalUnfold(unfoldResult, detection);
         if (unfoldSummary.ok) {
           transferables = [
             unfoldSummary.flat.positions.buffer,
@@ -1339,6 +1350,10 @@ ctx.onmessage = async (e: MessageEvent<any>) => {
         type: "sheet_metal_export_dxf",
         fileName,
         dxfText,
+        report: computeBlankReport(unfoldResult, {
+          thicknessMM: meta.thicknessMM,
+          bendCount: detection.bendCount,
+        }),
       } as SheetMetalExportDxfOk);
     } catch (err: any) {
       ctx.postMessage({

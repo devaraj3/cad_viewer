@@ -5,6 +5,7 @@ import { ThreeMFLoader } from "three/examples/jsm/loaders/3MFLoader.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import * as BufferGeometryUtils from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { createStainlessSteelMaterial } from "./viewer";
+import type { BlankReport } from "../../utils/sheet-metal/blank-report";
 import {
   DEFAULT_CAD_TOPOLOGY_AVAILABILITY,
   type CadTopologyAvailability,
@@ -92,6 +93,7 @@ type SheetMetalExportDxfOk = {
   type: "sheet_metal_export_dxf";
   fileName: string;
   dxfText: string;
+  report: BlankReport;
 };
 
 type SheetMetalExportDxfErr = {
@@ -194,6 +196,8 @@ export type SheetMetalDetectionSummary = {
   steppedFeatureCount: number;
 };
 
+export type { BlankReport };
+
 export type SheetMetalBendLineSegment = {
   a: [number, number, number];
   b: [number, number, number];
@@ -205,6 +209,7 @@ export type SheetMetalUnfoldOutcome =
       kind: "flange_tree" | "rolled_ring";
       flat: THREE.BufferGeometry;
       bendLineSegments: SheetMetalBendLineSegment[];
+      report: BlankReport;
     }
   | { ok: false; reason: string; reasonDetail: string };
 
@@ -225,6 +230,7 @@ type SheetMetalAnalyzeOk = {
         kind: "flange_tree" | "rolled_ring";
         flat: { positions: Float32Array; indices: Uint32Array };
         bendLineSegments: SheetMetalBendLineSegment[];
+        report: BlankReport;
       }
     | { ok: false; reason: string; reasonDetail: string }
     | null;
@@ -1344,6 +1350,7 @@ export async function analyzeCadSheetMetal(
             bendLineSegments: Array.isArray(data.unfold.bendLineSegments)
               ? data.unfold.bendLineSegments
               : [],
+            report: data.unfold.report,
           };
         } else {
           unfold = {
@@ -1379,7 +1386,7 @@ export async function exportSheetMetalFlatPatternDxf(
   file: File | string,
   worker: Worker,
   opts: { kFactor: number; partName: string },
-): Promise<{ fileName: string; dxfText: string }> {
+): Promise<{ fileName: string; dxfText: string; report: BlankReport }> {
   const { fileObj, ext } = await resolveInputFile(file);
   if (!isCADExt(ext)) {
     throw new Error("DXF export requires a CAD source (STEP/IGES/BREP).");
@@ -1388,7 +1395,7 @@ export async function exportSheetMetalFlatPatternDxf(
   const id = Math.random().toString(36).slice(2);
   const buf = await fileObj.arrayBuffer();
 
-  return new Promise<{ fileName: string; dxfText: string }>((resolve, reject) => {
+  return new Promise<{ fileName: string; dxfText: string; report: BlankReport }>((resolve, reject) => {
     const handle = (e: MessageEvent<SheetMetalExportDxfOk | SheetMetalExportDxfErr | TessErr>) => {
       const data = e.data;
       if (!data || data.id !== id) return;
@@ -1405,7 +1412,7 @@ export async function exportSheetMetalFlatPatternDxf(
         return;
       }
 
-      resolve({ fileName: data.fileName, dxfText: data.dxfText });
+      resolve({ fileName: data.fileName, dxfText: data.dxfText, report: data.report });
     };
 
     worker.addEventListener("message", handle as any);

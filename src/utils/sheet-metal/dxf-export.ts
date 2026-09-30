@@ -208,7 +208,7 @@ function rotatePoint(p: Point2Like, cos: number, sin: number): Point2 {
   return [p[0] * cos - p[1] * sin, p[0] * sin + p[1] * cos];
 }
 
-function segmentEndpoints(seg: FlatCurveSegment): [Point2, Point2] | null {
+export function segmentEndpoints(seg: FlatCurveSegment): [Point2, Point2] | null {
   if (seg.kind === "line") return [seg.a, seg.b];
   if (seg.kind === "polyline") {
     if (seg.points.length < 2) return null;
@@ -800,8 +800,25 @@ function bendCenterline(bl: FlatBendLine): [Point2, Point2] {
 
 // --- Public API --------------------------------------------------------------
 
-/** Builds an ASCII DXF (R12/AC1009) string for a flattened flange-tree sheet-metal part - see the Phase 4 spec (CUT/BEND_UP/BEND_DOWN/NOTES layers) this implements. */
-export function buildFlatPatternDxf(result: FlangeTreeResult, meta: DxfExportMeta): string {
+/**
+ * The canonical flat-pattern geometry for a flange-tree part: the exact CUT
+ * segments (deduped, snapped, min-area-rect oriented, origin at the
+ * bottom-left) and bend centerlines that `buildFlatPatternDxf` writes.
+ * Exported so the blank report reads the very same geometry - there is no
+ * second path from the unfold result to numbers.
+ */
+export type FlatPatternGeometry = {
+  cut: FlatCurveSegment[];
+  bendLines: { bl: FlatBendLine; a: Point2; b: Point2 }[];
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+  extMin: Point2;
+  extMax: Point2;
+};
+
+export function buildFlatPatternGeometry(result: FlangeTreeResult): FlatPatternGeometry {
   const cutSegments = cleanupCutSegments(computeCutSegments(result.outline));
   const framingPoints: Point2Like[] = [...collectFramingPoints(cutSegments)];
   for (const bl of result.bendLines) {
@@ -825,8 +842,8 @@ export function buildFlatPatternDxf(result: FlangeTreeResult, meta: DxfExportMet
   const tx = -minX;
   const ty = -minY;
 
-  const finalCut = rotatedCut.map((seg) => transformSegment(seg, 1, 0, tx, ty));
-  const finalBendLines = result.bendLines.map((bl) => {
+  const cut = rotatedCut.map((seg) => transformSegment(seg, 1, 0, tx, ty));
+  const bendLines = result.bendLines.map((bl) => {
     const [a, b] = bendCenterline(bl);
     const ra = rotatePoint(a, cos, sin);
     const rb = rotatePoint(b, cos, sin);
@@ -837,8 +854,22 @@ export function buildFlatPatternDxf(result: FlangeTreeResult, meta: DxfExportMet
     };
   });
 
-  const extMax: Point2 = [maxX + tx, maxY + ty];
-  const extMin: Point2 = [0, 0];
+  return { cut, bendLines, minX, minY, maxX, maxY, extMin: [0, 0], extMax: [maxX + tx, maxY + ty] };
+}
+
+/** The rolled-ring counterpart: already axis-aligned at the origin, so no orientation step. */
+export function buildRolledRingGeometry(result: RolledRingResult): { cut: FlatCurveSegment[]; width: number; height: number } {
+  return {
+    cut: cleanupCutSegments(computeCutSegments(result.outline)),
+    width: result.developedLengthMM,
+    height: result.heightMM,
+  };
+}
+
+/** Builds an ASCII DXF (R12/AC1009) string for a flattened flange-tree sheet-metal part - see the Phase 4 spec (CUT/BEND_UP/BEND_DOWN/NOTES layers) this implements. */
+export function buildFlatPatternDxf(result: FlangeTreeResult, meta: DxfExportMeta): string {
+  const { cut: finalCut, bendLines: finalBendLines, minX, minY, maxX, maxY, extMin, extMax } =
+    buildFlatPatternGeometry(result);
 
   const w = new DxfWriter();
   w.header(extMin, extMax);
@@ -903,9 +934,7 @@ export function buildFlatPatternDxf(result: FlangeTreeResult, meta: DxfExportMet
  * flange-tree part's arbitrarily-oriented outline.
  */
 export function buildRolledRingDxf(result: RolledRingResult, meta: DxfExportMeta): string {
-  const width = result.developedLengthMM;
-  const height = result.heightMM;
-  const cutSegments = cleanupCutSegments(computeCutSegments(result.outline));
+  const { cut: cutSegments, width, height } = buildRolledRingGeometry(result);
 
   const w = new DxfWriter();
   w.header([0, 0], [width, height]);

@@ -1359,3 +1359,26 @@
     max-height: 44vh;
   }
 }
+
+/* Sheet metal blank report */
+.cad-blank-report {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.cad-blank-report__header {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 2px 0;
+  cursor: pointer;
+}
+
+.cad-blank-report__value {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-ink-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
