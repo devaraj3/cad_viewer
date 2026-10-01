@@ -5477,6 +5477,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
         {/* Blank report: right-side panel, independent of the left controls column */}
         {blankPanelOpen && sheetMetalUnfold?.ok && (
           <SheetMetalBlankReport
+            partName={(loadFileName || "part").replace(/\.[^./\\]+$/, "")}
             report={sheetMetalUnfold.report}
             units={units === "in" ? "imperial" : "metric"}
             isExporting={isExportingDxf}
