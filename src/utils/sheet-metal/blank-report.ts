@@ -347,11 +347,15 @@ export const BLANK_MATERIALS: BlankMaterial[] = [
 
 export const DEFAULT_BLANK_MATERIAL_ID = "mild_steel";
 
+/** Default clearance kept around the part when nesting it in its bounding rectangle. */
+export const DEFAULT_PART_SPACING_MM = 5;
+
 export type BlankFigures = {
+  /** Bounding rectangle grown by the part-spacing margin on every side. */
   rectAreaMM2: number;
   partWeightKg: number;
   blankWeightKg: number;
-  /** 1 - net area / bounding-rectangle area, as a percentage. */
+  /** 1 - net area / (margin-grown) bounding-rectangle area, as a percentage. */
   scrapPct: number;
   /** blank weight x rate; null when no valid rate was given. */
   materialCost: number | null;
@@ -360,8 +364,14 @@ export type BlankFigures = {
 /** g/cm^3 == 1e-6 kg/mm^3 (1 g/cm^3 = 1e-3 kg / 1e3 mm^3). */
 const KG_PER_MM3_PER_GCM3 = 1e-6;
 
-export function deriveBlankFigures(r: BlankReport, densityGcm3: number, ratePerKg: number | null): BlankFigures {
-  const rectAreaMM2 = r.lengthMM * r.widthMM;
+export function deriveBlankFigures(
+  r: BlankReport,
+  densityGcm3: number,
+  ratePerKg: number | null,
+  spacingMM = DEFAULT_PART_SPACING_MM,
+): BlankFigures {
+  const m = Number.isFinite(spacingMM) && spacingMM > 0 ? spacingMM : 0;
+  const rectAreaMM2 = (r.lengthMM + 2 * m) * (r.widthMM + 2 * m);
   const rho = densityGcm3 * KG_PER_MM3_PER_GCM3;
   const partWeightKg = r.netAreaMM2 * r.thicknessMM * rho;
   const blankWeightKg = rectAreaMM2 * r.thicknessMM * rho;
@@ -419,39 +429,4 @@ export function pierceSummary(r: BlankReport): string {
   if (r.junctions > 0) return `~${r.pierces} (approximate)`;
   const openPart = r.openChains > 0 ? ` (+${r.openChains} open cut path${r.openChains === 1 ? "" : "s"})` : "";
   return `${r.pierces}${openPart}`;
-}
-
-export function formatBlankReportText(
-  r: BlankReport,
-  opts: {
-    partName: string;
-    material: BlankMaterial;
-    kFactor: number;
-    ratePerKg: number | null;
-    units: BlankUnitSystem;
-  },
-): string {
-  const f = deriveBlankFigures(r, opts.material.densityGcm3, opts.ratePerKg);
-  const u = opts.units;
-  const lines = [
-    `Blank report - ${opts.partName}`,
-    `Material: ${opts.material.label} (${opts.material.densityGcm3} g/cm³)`,
-    `Thickness: ${formatBlankLength(r.thicknessMM, u)}`,
-    `K-factor: ${opts.kFactor.toFixed(2)}`,
-    `Flat size (L x W): ${formatBlankLength(r.lengthMM, u).replace(/ \S+$/, "")} x ${formatBlankLength(r.widthMM, u)}`,
-    `Net area: ${formatBlankArea(r.netAreaMM2, u)}`,
-    `Part weight: ${formatBlankWeight(f.partWeightKg, u)}`,
-    `Blank weight: ${formatBlankWeight(f.blankWeightKg, u)}`,
-    `Scrap: ${f.scrapPct.toFixed(1)} %`,
-    `Cut length: ${formatBlankCutLength(r.cutLengthMM, u)}`,
-    `Pierces: ${pierceSummary(r)}`,
-    `Bends: ${bendSummary(r)}`,
-  ];
-  if (f.materialCost !== null && opts.ratePerKg !== null) {
-    lines.push(`Material cost: ${f.materialCost.toFixed(2)} (rate ${opts.ratePerKg} per kg)`);
-  }
-  if (r.junctions > 0) {
-    lines.push("Note: cut outline has unresolved slot junctions - area, weights and pierces are approximate.");
-  }
-  return lines.join("\n");
 }

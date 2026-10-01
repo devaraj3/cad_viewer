@@ -4,6 +4,7 @@ import {
   IDENTITY_AFFINE,
   ensureWinding,
   isClosedFlag,
+  isNonGeometryEntity,
   isPaperSpaceEntity,
   isViewportEntityType,
   normalizeArcAngles,
@@ -1472,9 +1473,15 @@ export function flattenDxfLineworkWithMeta(
   opts: FlattenDxfOptions,
 ): FlattenDxfLineworkWithMetaResult {
   const flattened = flattenDxfEntities(dxf, opts);
+  // Drawing aids (dashed bend/hidden/centre lines, annotation + bend/notes
+  // layers) never belong in a solid's outline loops - resolved with layer
+  // inheritance, so it holds for any DXF, not just our own export.
+  const geometry = flattened.polylines.filter(
+    (polyline) => !isNonGeometryEntity(polyline.entity, polyline.layer, dxf),
+  );
   return {
     diagnostics: flattened.diagnostics,
-    polylines: flattened.polylines.map((polyline) => ({
+    polylines: geometry.map((polyline) => ({
       points: polyline.points,
       closed: polyline.closed,
       entityUid: polyline.entityUid,

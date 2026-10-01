@@ -6,6 +6,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import * as BufferGeometryUtils from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { createStainlessSteelMaterial } from "./viewer";
 import type { BlankReport } from "../../utils/sheet-metal/blank-report";
+import type { FlatDrawModel } from "../../utils/sheet-metal/flat-draw-model";
 import {
   DEFAULT_CAD_TOPOLOGY_AVAILABILITY,
   type CadTopologyAvailability,
@@ -93,6 +94,9 @@ type SheetMetalExportDxfOk = {
   type: "sheet_metal_export_dxf";
   fileName: string;
   dxfText: string;
+  cutFileName: string;
+  dxfCutOnly: string;
+  flat: FlatDrawModel;
   report: BlankReport;
 };
 
@@ -1382,11 +1386,23 @@ export async function analyzeCadSheetMetal(
  * never has to carry the full flat-pattern outline/curve data through the
  * live-view message shape) and builds the DXF export text on the worker.
  */
+export type SheetMetalExportPackage = {
+  /** DXF with bend lines + notes (CUT / BEND_UP / BEND_DOWN / NOTES). */
+  fileName: string;
+  dxfText: string;
+  /** DXF with the CUT layer only - nothing a quote service could misread. */
+  cutFileName: string;
+  dxfCutOnly: string;
+  /** Geometry for the flat-pattern PDF. */
+  flat: FlatDrawModel;
+  report: BlankReport;
+};
+
 export async function exportSheetMetalFlatPatternDxf(
   file: File | string,
   worker: Worker,
   opts: { kFactor: number; partName: string },
-): Promise<{ fileName: string; dxfText: string; report: BlankReport }> {
+): Promise<SheetMetalExportPackage> {
   const { fileObj, ext } = await resolveInputFile(file);
   if (!isCADExt(ext)) {
     throw new Error("DXF export requires a CAD source (STEP/IGES/BREP).");
@@ -1395,7 +1411,7 @@ export async function exportSheetMetalFlatPatternDxf(
   const id = Math.random().toString(36).slice(2);
   const buf = await fileObj.arrayBuffer();
 
-  return new Promise<{ fileName: string; dxfText: string; report: BlankReport }>((resolve, reject) => {
+  return new Promise<SheetMetalExportPackage>((resolve, reject) => {
     const handle = (e: MessageEvent<SheetMetalExportDxfOk | SheetMetalExportDxfErr | TessErr>) => {
       const data = e.data;
       if (!data || data.id !== id) return;
@@ -1412,7 +1428,14 @@ export async function exportSheetMetalFlatPatternDxf(
         return;
       }
 
-      resolve({ fileName: data.fileName, dxfText: data.dxfText, report: data.report });
+      resolve({
+        fileName: data.fileName,
+        dxfText: data.dxfText,
+        cutFileName: data.cutFileName,
+        dxfCutOnly: data.dxfCutOnly,
+        flat: data.flat,
+        report: data.report,
+      });
     };
 
     worker.addEventListener("message", handle as any);

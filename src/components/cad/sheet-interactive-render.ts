@@ -1253,6 +1253,17 @@ export function paintInteractiveSheet(
   for (const view of views) {
     const { dx, dy } = combinedViewOffset(view, adjustments);
     strokeSheetEdgeRuns(ctx, base.layoutModel.views[view].edgeRuns, dx, dy);
+    for (const label of base.layoutModel.views[view].labels ?? []) {
+      ctx.save();
+      ctx.translate(label.x + dx, label.y + dy);
+      ctx.rotate(label.angle);
+      ctx.fillStyle = "#000000";
+      ctx.font = "16px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label.text, 0, 0);
+      ctx.restore();
+    }
   }
   // Isometric reference view: moves with the composition offset AND its own
   // free `viewGroups.iso` offset (task 2's "3D VIEW" option) - never with

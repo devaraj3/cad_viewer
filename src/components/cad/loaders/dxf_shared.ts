@@ -2117,3 +2117,82 @@ export function ensureWinding(points: Vec2[], wantCCW: boolean): Vec2[] {
   if (!wantCCW && area > 0) return [...points].reverse();
   return [...points];
 }
+
+// --- Resolved entity style (linetype + colour, with layer inheritance) --------
+
+export type EntityStyle = {
+  /** Upper-case resolved linetype name ("" when none), after BYLAYER lookup. */
+  lineTypeName: string;
+  /** True for any non-continuous linetype (dashed, hidden, centre, phantom, ...). */
+  dashed: boolean;
+  /** Dash/gap pattern in drawing units from the LTYPE table, when defined. */
+  pattern: number[] | null;
+  /** 0xRRGGBB, or null when no colour could be resolved (ACI 7 / white is reported as null). */
+  color: number | null;
+};
+
+type LayerStyleRecord = { lineType?: unknown; color?: unknown; colorIndex?: unknown };
+type LineTypeRecord = { pattern?: unknown };
+
+const CONTINUOUS_LINETYPES = new Set(["", "CONTINUOUS", "BYLAYER", "BYBLOCK", "SOLID"]);
+const DASHED_LINETYPE_TOKENS = ["DASH", "HIDDEN", "PHANTOM", "CENTER", "DOT", "DIVIDE", "BORDER"];
+const ACI_WHITE_BLACK = 0xffffff;
+
+function lookupLayerRecord(dxf: unknown, layerName: string): LayerStyleRecord | null {
+  const layers = (dxf as { tables?: { layer?: { layers?: Record<string, LayerStyleRecord> } } })?.tables?.layer
+    ?.layers;
+  if (!layers) return null;
+  if (layers[layerName]) return layers[layerName];
+  const upper = layerName.toUpperCase();
+  for (const [name, rec] of Object.entries(layers)) if (name.toUpperCase() === upper) return rec;
+  return null;
+}
+
+function lookupLinePattern(dxf: unknown, lineTypeName: string): number[] | null {
+  const types = (dxf as { tables?: { lineType?: { lineTypes?: Record<string, LineTypeRecord> } } })?.tables
+    ?.lineType?.lineTypes;
+  if (!types) return null;
+  const upper = lineTypeName.toUpperCase();
+  for (const [name, rec] of Object.entries(types)) {
+    if (name.toUpperCase() === upper && Array.isArray(rec.pattern) && rec.pattern.length > 0) {
+      return (rec.pattern as unknown[]).filter((v): v is number => typeof v === "number");
+    }
+  }
+  return null;
+}
+
+/**
+ * Linetype + colour of an entity as a CAD application would draw it: the
+ * entity's own value, else (BYLAYER / unset) its layer's. Works for any DXF -
+ * the layer's linetype is read from the raw LAYER table (the base parser drops
+ * it), see `attachLayerLineTypes` in dxf.ts.
+ */
+export function resolveEntityStyle(entity: RawEntity, layerName: string, dxf: unknown): EntityStyle {
+  const layer = lookupLayerRecord(dxf, layerName);
+  let lineTypeName = normalizeToken(entity.lineType ?? entity.linetype ?? entity.lType);
+  if (lineTypeName === "" || lineTypeName === "BYLAYER") lineTypeName = normalizeToken(layer?.lineType);
+
+  const pattern = lineTypeName ? lookupLinePattern(dxf, lineTypeName) : null;
+  const dashed = CONTINUOUS_LINETYPES.has(lineTypeName)
+    ? false
+    : pattern !== null || tokenMatchesAny(lineTypeName, DASHED_LINETYPE_TOKENS);
+
+  const entityIndex = readFiniteNumber(entity.colorIndex);
+  const byLayer = entityIndex === null || entityIndex === 256 || entityIndex === 0;
+  const raw = byLayer ? (layer?.color ?? entity.color) : entity.color;
+  const color = typeof raw === "number" && Number.isFinite(raw) && raw !== ACI_WHITE_BLACK ? raw : null;
+  return { lineTypeName, dashed, pattern, color };
+}
+
+const NON_GEOMETRY_LAYER_TOKENS = ["BEND", "NOTE", "TEXT", "DIM", "ANNOT", "CENTER", "DEFPOINTS"];
+
+/**
+ * True for entities that are drawing aids, not part outline: dashed/hidden
+ * lines (bend lines, hidden edges, centre lines), annotation entities and
+ * bend/notes/dimension layers. Used to keep them out of the 3D extrusion.
+ */
+export function isNonGeometryEntity(entity: RawEntity, layerName: string, dxf: unknown): boolean {
+  if (isAnnotationEntity(entity, layerName)) return true;
+  if (resolveEntityStyle(entity, layerName, dxf).dashed) return true;
+  return tokenMatchesAny(normalizeToken(layerName), NON_GEOMETRY_LAYER_TOKENS);
+}

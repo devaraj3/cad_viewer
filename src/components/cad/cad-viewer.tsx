@@ -190,7 +190,11 @@ import {
   runMeasurementHoverInteraction,
 } from "./cad-viewer-measurement-interaction";
 import LoadingOverlay from "../../ui/LoadingOverlay";
-import SheetMetalBlankReport from "./sheet-metal-blank-report";
+import SheetMetalBlankReport, {
+  type QuoteExportContext,
+  type QuoteExportFormat,
+} from "./sheet-metal-blank-report";
+import { composeFlatPatternSheet, type FlatSheetInput } from "./flat-pattern-sheet";
 import "./cad-viewer.css";
 
 type Units = "mm" | "cm" | "m" | "in";
@@ -899,6 +903,7 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
     // per-part mesh loading) without the user having opened this panel -
     // see the Explode View toggle and the two "Assembly parts" gates below.
     const [assemblyPanelOpen, setAssemblyPanelOpen] = useState(false);
+    const [blankPanelOpen, setBlankPanelOpen] = useState(false);
     const [parts, setParts] = useState<LoadedPart[]>([]);
     const [modelSession, setModelSession] = useState<ModelSession | null>(null);
     const modelSessionRef = useRef<ModelSession | null>(null);
@@ -1345,6 +1350,11 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       partName: string;
       date: string;
     } | null>(null);
+    // Set instead of sheetCaptureRef when the open sheet is the sheet-metal
+    // flat-pattern drawing (Cost estimate > "Flat pattern drawing"): the
+    // inputs composeFlatPatternSheet needs to recompose it at a new scale.
+    const flatSheetRef = useRef<FlatSheetInput | null>(null);
+    const [isFlatSheet, setIsFlatSheet] = useState(false);
     // "auto" (the default - see task doc comment) or one of
     // MANUAL_SCALE_RATIOS, chosen from the modal's "Scale" dropdown.
     // sheetPaintBase.scaleLabel always reflects whichever of the two is
@@ -3283,22 +3293,51 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       void recomputeSheetMetalUnfold(next);
     };
 
-    const blankReportPartName = (loadFileName || "part").replace(/\.[^./\\]+$/, "");
-
-    const handleExportSheetMetalDxf = async () => {
+    const handleQuoteExport = async (format: QuoteExportFormat, ctx: QuoteExportContext) => {
       const worker = workerRef.current;
       if (!worker || !file || !sheetMetalUnfold?.ok) return;
       setDxfExportError(null);
       setIsExportingDxf(true);
       try {
         const partName = (loadFileName || "part").replace(/\.[^./\\]+$/, "");
-        const { fileName, dxfText } = await exportSheetMetalFlatPatternDxf(file, worker, {
-          kFactor,
-          partName,
-        });
-        triggerDownload(dxfText, fileName, "application/dxf");
+        const pkg = await exportSheetMetalFlatPatternDxf(file, worker, { kFactor, partName });
+        if (format === "laser_dxf") {
+          triggerDownload(pkg.dxfCutOnly, pkg.cutFileName, "application/dxf");
+        } else if (format === "bend_dxf") {
+          triggerDownload(pkg.dxfText, pkg.fileName, "application/dxf");
+        } else {
+          const input: FlatSheetInput = {
+            model: pkg.flat,
+            report: pkg.report,
+            partName,
+            materialLabel: ctx.materialLabel,
+            kFactor,
+            partWeightKg: ctx.partWeightKg,
+            units: units === "in" ? "imperial" : "metric",
+            date: new Date().toLocaleDateString("en-CA"),
+          };
+          resetSheetEditorState();
+          flatSheetRef.current = input;
+          setIsFlatSheet(true);
+          const composed = composeFlatPatternSheet(input);
+          setSheetPaintBase({
+            layoutModel: composed.layoutModel,
+            partName,
+            date: input.date,
+            scaleLabel: composed.scaleLabel,
+          });
+          titleTableRef.current = composed.titleTable;
+          logoImageRef.current = null;
+          bumpTitleTable();
+          setHasTitleTableEdits(false);
+          setAutoScaleLabel(composed.scaleLabel);
+          setSheetOverflowWarning(
+            computeLiveOverflowWarning(composed.layoutModel, sheetAdjustmentsRef.current),
+          );
+          setDrawingSheetModalOpen(true);
+        }
       } catch (err: any) {
-        setDxfExportError(err?.message || "Failed to export DXF.");
+        setDxfExportError(err?.message || "Failed to export.");
       } finally {
         setIsExportingDxf(false);
       }
@@ -4029,8 +4068,8 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       return true;
     };
 
-    const handleGenerateDrawingSheet = async () => {
-      if (!viewerRef.current) return;
+    // Fresh-sheet reset shared by "Generate 2D Drawing" and the flat-pattern drawing.
+    const resetSheetEditorState = () => {
       setSheetPaintBase(null);
       sheetAdjustmentsRef.current = createEmptySheetLayoutAdjustments();
       setHasSheetAdjustments(false);
@@ -4056,6 +4095,13 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       setAutoScaleLabel(null);
       setSheetOverflowWarning(null);
       setScaleChangeNotice(null);
+      flatSheetRef.current = null;
+      setIsFlatSheet(false);
+    };
+
+    const handleGenerateDrawingSheet = async () => {
+      if (!viewerRef.current) return;
+      resetSheetEditorState();
       setDrawingSheetProgress({
         label: "Starting...",
         index: 0,
@@ -4144,7 +4190,8 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
     // (task) and were never part of SheetLayoutAdjustments to begin with.
     const handleScaleChange = async (next: number | "auto") => {
       const cached = sheetCaptureRef.current;
-      if (!cached || sheetScaleBusy || next === sheetScaleMode) return;
+      const flat = flatSheetRef.current;
+      if ((!cached && !flat) || sheetScaleBusy || next === sheetScaleMode) return;
       const hadPositionAdjustments = hasPositionAdjustments(
         sheetAdjustmentsRef.current,
       );
@@ -4162,7 +4209,22 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
       );
       setSheetScaleBusy(true);
       try {
-        const { captureResult, partName, date } = cached;
+        if (flat) {
+          const composed = composeFlatPatternSheet(flat, next === "auto" ? undefined : next);
+          setSheetPaintBase({
+            layoutModel: composed.layoutModel,
+            partName: flat.partName,
+            date: flat.date,
+            scaleLabel: composed.scaleLabel,
+          });
+          setSheetScaleMode(next);
+          setSheetOverflowWarning(
+            computeLiveOverflowWarning(composed.layoutModel, sheetAdjustmentsRef.current),
+          );
+          if (next === "auto") setAutoScaleLabel(composed.scaleLabel);
+          return;
+        }
+        const { captureResult, partName, date } = cached!;
         const composed = await composeA4DrawingSheet({
           captureResult,
           partName,
@@ -5412,6 +5474,18 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
           </div>
         )}
 
+        {/* Blank report: right-side panel, independent of the left controls column */}
+        {blankPanelOpen && sheetMetalUnfold?.ok && (
+          <SheetMetalBlankReport
+            report={sheetMetalUnfold.report}
+            units={units === "in" ? "imperial" : "metric"}
+            isExporting={isExportingDxf}
+            exportError={dxfExportError}
+            onExport={(format, ctx) => void handleQuoteExport(format, ctx)}
+            onClose={() => setBlankPanelOpen(false)}
+          />
+        )}
+
         {/* Controls Overlay */}
         {showControls && (
           <div className="cad-controls-overlay">
@@ -6061,26 +6135,14 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                             }`}
                           </div>
                           {sheetMetalUnfold?.ok && (
-                            <SheetMetalBlankReport
-                              report={sheetMetalUnfold.report}
-                              partName={blankReportPartName}
-                              kFactor={kFactor}
-                              units={units === "in" ? "imperial" : "metric"}
-                            />
-                          )}
-                          {sheetMetalUnfold?.ok && (
                             <button
-                              disabled={isExportingDxf}
-                              onClick={() => void handleExportSheetMetalDxf()}
-                              className={`cad-btn cad-btn--wide ${isExportingDxf ? "cad-btn--disabled" : "cad-btn--neutral"}`}
+                              onClick={() => setBlankPanelOpen((v) => !v)}
+                              className={`cad-btn cad-btn--wide ${blankPanelOpen ? "cad-btn--active" : "cad-btn--neutral"}`}
+                              aria-expanded={blankPanelOpen}
+                              data-testid="blank-report-toggle"
                             >
-                              {isExportingDxf ? "Exporting DXF..." : "Export DXF"}
+                              Cost estimate
                             </button>
-                          )}
-                          {dxfExportError && (
-                            <div className="cad-status cad-status--error">
-                              {dxfExportError}
-                            </div>
                           )}
                         </>
                       ) : (
@@ -6191,26 +6253,14 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                             </>
                           )}
                           {flatEnabled && sheetMetalUnfold?.ok && (
-                            <SheetMetalBlankReport
-                              report={sheetMetalUnfold.report}
-                              partName={blankReportPartName}
-                              kFactor={kFactor}
-                              units={units === "in" ? "imperial" : "metric"}
-                            />
-                          )}
-                          {flatEnabled && sheetMetalUnfold?.ok && (
                             <button
-                              disabled={isExportingDxf}
-                              onClick={() => void handleExportSheetMetalDxf()}
-                              className={`cad-btn cad-btn--wide ${isExportingDxf ? "cad-btn--disabled" : "cad-btn--neutral"}`}
+                              onClick={() => setBlankPanelOpen((v) => !v)}
+                              className={`cad-btn cad-btn--wide ${blankPanelOpen ? "cad-btn--active" : "cad-btn--neutral"}`}
+                              aria-expanded={blankPanelOpen}
+                              data-testid="blank-report-toggle"
                             >
-                              {isExportingDxf ? "Exporting DXF..." : "Export DXF"}
+                              Cost estimate
                             </button>
-                          )}
-                          {dxfExportError && (
-                            <div className="cad-status cad-status--error">
-                              {dxfExportError}
-                            </div>
                           )}
                         </>
                       ))}
@@ -6755,8 +6805,8 @@ export const CadViewer = forwardRef<CadViewerRef, CadViewerProps>(
                         >
                           <option value="overall">Overall</option>
                           <option value="top">Top</option>
-                          <option value="right">Right</option>
-                          <option value="iso">3D View</option>
+                          {!isFlatSheet && <option value="right">Right</option>}
+                          {!isFlatSheet && <option value="iso">3D View</option>}
                         </select>
                       )}
                       <button

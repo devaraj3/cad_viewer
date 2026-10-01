@@ -1360,19 +1360,61 @@
   }
 }
 
-/* Sheet metal blank report */
-.cad-blank-report {
+/* Sheet metal blank report - right-side panel, same chrome as .cad-parts-panel */
+.cad-blank-panel {
+  position: absolute;
+  top: 24px;
+  right: 24px;
+  z-index: 10;
+  width: 280px;
+  max-height: calc(100% - 48px);
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 8px;
+  overflow: hidden;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.15);
+  backdrop-filter: blur(10px);
+  color: var(--color-ink-muted);
+  font-size: 13px;
 }
 
-.cad-blank-report__header {
-  width: 100%;
+.cad-blank-panel__body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  min-height: 0;
+  padding-right: 2px;
+}
+
+.cad-blank-panel__close {
   border: 0;
   background: transparent;
-  padding: 2px 0;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--color-ink-muted);
   cursor: pointer;
+  padding: 0 4px;
+}
+
+.cad-blank-panel__link {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--color-accent, #2563eb);
+  text-decoration: underline;
+  cursor: pointer;
+  font: inherit;
+}
+
+.cad-blank-report__item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
 }
 
 .cad-blank-report__value {
@@ -1381,4 +1423,16 @@
   color: var(--color-ink-muted);
   font-variant-numeric: tabular-nums;
   text-align: right;
+}
+
+@media (max-width: 900px) {
+  /* Bottom sheet: the left controls card keeps the top (max 44vh), this takes at most 34vh. */
+  .cad-blank-panel {
+    top: auto;
+    right: 12px;
+    left: 12px;
+    bottom: 12px;
+    width: auto;
+    max-height: 34vh;
+  }
 }
