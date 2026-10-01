@@ -248,6 +248,57 @@ export const REFERENCE_RATES: Record<RegionId, Record<MaterialId, ReferenceRate>
   },
 };
 
+/**
+ * Process cost sources (laser speed / pierce time, regional process rates,
+ * sheet sizes) behind cost-tables.ts. Read 2026-10-01. APPROXIMATE reference
+ * data, not manufacturer-certified; no OEM chart (Trumpf, Bystronic, Amada,
+ * Mazak) was publicly reachable, so speeds come from vendor databases that
+ * disagree with each other by up to ~2x on thin stainless.
+ *
+ * Tags: published = read from the source; derived = computed from published
+ * rows with a stated factor; estimated = judgement, no source.
+ *
+ * LASER SPEED
+ *  - published: https://www.laserspechub.com/guides/cutting-speed-chart
+ *    (dated 2026-02-01, reviewed 2026-05-03, "chart-calibrated reference
+ *    data") - mild steel O2 speeds at 3 / 6 / 12 kW, 1-12 mm. The 1.5 kW
+ *    column is interpolated from its 1 / 2 kW columns (derived).
+ *  - derived: stainless (x0.85 to 3 mm, x0.5 at 5 mm, x0.3 at 10 mm) and
+ *    aluminium (x0.7 to 3 mm, x0.4 at 6 mm) factors on mild steel, anchored
+ *    on https://www.gwklaser.com/fiber-laser-cutting-parameters-guide.html
+ *    (undated; also the source of 3 kW max thickness: stainless 10 mm,
+ *    aluminium 8 mm; the 1.5 kW limits of 5 / 4 mm are estimates).
+ *    https://www.raymondlaser.com/laser-cutting-thickness-and-speed-chart/
+ *    (undated) is a cross-check only; its thin-stainless speeds are ~2x
+ *    GWEIKE's, so the stainless factors are a compromise.
+ *  - cross-check: https://www.cuttingedgeplasma.com/feeds/blog/fiber-laser-cutting-speed-mild-steel-1mm
+ *    (undated) - 3 kW mild steel 6 / 10 / 12 mm within ~40% of the table
+ *    (6 mm is the worst case).
+ *  - estimated: galvanized = 0.9 x mild steel. Copper and brass have no
+ *    laser estimate (no trustworthy speeds found).
+ *  - estimated: ALL pierce times and the power multipliers (1.5 / 1 / 0.7 /
+ *    0.5 kW) - no published pierce-time table was found.
+ *
+ * REGIONAL PROCESS RATES
+ *  - India laser INR 800/h (published): https://cyclotronindustries.com/laser-cutting-cost-per-hour-in-india/
+ *    (undated, "2026" in title) says INR 400-800/h for 3-4 kW fiber; the
+ *    default is the top of that range.
+ *  - US laser USD 100/h (published): https://www.lyah-machining.com/sheet-metal-laser-cutting-price/
+ *    (2024-12-10) says USD 60-150/h. EU EUR 90 and UK GBP 75 are scaled
+ *    from it (derived).
+ *  - US powder coat USD 22/m2 (published): https://yicenprecision.com/powder-coating-cost-guide-for-sheet-metal-parts-2026/
+ *    (2026) says USD 1.75-4.50/ft2 (~19-48/m2) standard polyester. EU 18 and
+ *    UK 16 are scaled from it (derived).
+ *  - India powder coat INR 150/m2 (estimated): sources conflict (INR 15-50/m2
+ *    vs ~130-160/m2); the higher is used, the lower looks like a typo.
+ *  - Bend rates (all regions) and setup fees (all regions): estimated. No
+ *    verifiable per-bend source: the pages found price per part (US ~USD
+ *    0.10-0.80, India INR 10-150/piece), not per bend.
+ *  - Standard sheet sizes: estimated - common mill sizes from general
+ *    knowledge (4 x 8 ft / 5 x 10 ft US; 1000 x 2000, 1250 x 2500,
+ *    1500 x 3000 metric), not web-verified.
+ */
+
 const EU_TIMEZONE_PREFIXES = ["Europe/"];
 const EU_LOCALE_REGIONS = new Set([
   "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU", "IE", "IT", "LV", "LT", "LU", "MT",

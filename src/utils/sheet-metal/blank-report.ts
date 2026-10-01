@@ -424,9 +424,20 @@ export function bendSummary(r: BlankReport): string {
   return `${r.bends}${hemPart}`;
 }
 
+/**
+ * Laser starts per part: every closed cut loop plus every open cut path (each
+ * still needs a pierce). The ONE pierce count used by the panel, the cost
+ * model, the copied report and the flat pattern title block.
+ */
+export function pierceCount(r: BlankReport): number {
+  return r.pierces + r.openChains;
+}
+
+/** "N", or "~N" when unresolved slot-ladder junctions make the count approximate. */
+export function pierceCountText(r: BlankReport): string {
+  return r.junctions > 0 ? `~${pierceCount(r)}` : String(pierceCount(r));
+}
+
 export function pierceSummary(r: BlankReport): string {
-  // With unresolved junctions the open-path count is walker noise, not a real number.
-  if (r.junctions > 0) return `~${r.pierces} (approximate)`;
-  const openPart = r.openChains > 0 ? ` (+${r.openChains} open cut path${r.openChains === 1 ? "" : "s"})` : "";
-  return `${r.pierces}${openPart}`;
+  return r.junctions > 0 ? `${pierceCountText(r)} (approximate)` : pierceCountText(r);
 }

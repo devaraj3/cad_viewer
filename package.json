@@ -8,6 +8,7 @@
     "lint": "eslint .",
     "build": "node scripts/generate-sitemap.mjs && vite-react-ssg build",
     "typecheck": "tsc --noEmit",
+    "test": "node scripts/run-tests.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

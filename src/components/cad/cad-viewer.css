@@ -1366,8 +1366,9 @@
   top: 24px;
   right: 24px;
   z-index: 10;
-  width: 280px;
-  max-height: calc(100% - 48px);
+  width: 320px;
+  /* Bottom stays above the home button + view cube: the home button's top edge is 182px above the container bottom (140px cube + 12px offset + 30px), plus a 10px gap and our own 24px top offset. No floor, so it never overlaps; the body scrolls. */
+  max-height: calc(100% - 216px);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1431,8 +1432,84 @@
     top: auto;
     right: 12px;
     left: 12px;
-    bottom: 12px;
     width: auto;
-    max-height: 34vh;
+    bottom: 192px;
+    max-height: min(34vh, calc(100% - 216px));
   }
+}
+
+/* Cost estimate v3 - totals, breakdown, collapsible groups */
+.cad-cost-totals {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(148, 163, 184, 0.14);
+}
+
+.cad-cost-totals__main {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--color-ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.cad-cost-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.cad-tag {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.6);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 14px;
+  color: var(--color-ink-muted);
+  white-space: nowrap;
+}
+
+.cad-cost-details > summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-ink-muted);
+  padding: 2px 0;
+}
+
+.cad-cost-details__body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 6px;
+}
+
+.cad-cost-details--nested {
+  margin-top: 4px;
+}
+
+.cad-input--short {
+  width: 56px;
+}
+
+.cad-cost-sources ul {
+  margin: 0;
+  padding-left: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.cad-cost-sources a {
+  color: var(--color-accent, #2563eb);
+  word-break: break-word;
+}
+
+.cad-blank-report__value--left {
+  text-align: left;
 }
