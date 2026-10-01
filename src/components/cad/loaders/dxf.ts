@@ -4,7 +4,7 @@ import {
   flattenDxfEntities,
   type FlattenDebugMarkerMeta,
 } from "./dxf_flatten";
-import { isAnnotationEntity, type Vec2, type Vec3 } from "./dxf_shared";
+import { isAnnotationEntity, resolveEntityStyle, type EntityStyle, type Vec2, type Vec3 } from "./dxf_shared";
 
 export type DxfHeader = {
   $INSUNITS?: number;
@@ -1228,6 +1228,47 @@ function enrichParsedDxfWithRawSupplements(dxf: ParsedDxf, text: string): void {
   }
 }
 
+/**
+ * dxf-parser ignores group 6 (linetype) inside LAYER table records, so a
+ * BYLAYER entity on a dashed layer looks continuous. Re-scan the raw LAYER
+ * table and copy each layer's linetype onto the parsed layer record.
+ */
+function attachLayerLineTypes(dxf: ParsedDxf, text: string): void {
+  const layers = (dxf as { tables?: { layer?: { layers?: Record<string, Record<string, unknown>> } } }).tables?.layer
+    ?.layers;
+  if (!layers) return;
+  const lines = text.split(/\r\n|\r|\n/);
+  let inLayerTable = false;
+  let name: string | null = null;
+  let lineType: string | null = null;
+  let inRecord = false;
+  const flush = () => {
+    if (inRecord && name && lineType && layers[name]) layers[name].lineType = lineType;
+    name = null;
+    lineType = null;
+    inRecord = false;
+  };
+  for (let i = 0; i + 1 < lines.length; i += 2) {
+    const code = lines[i].trim();
+    const value = lines[i + 1].trim();
+    if (code === "0") {
+      flush();
+      if (value === "TABLE") inLayerTable = false;
+      else if (value === "ENDTAB") inLayerTable = false;
+      else if (value === "LAYER" && inLayerTable) inRecord = true;
+      continue;
+    }
+    if (code === "2" && !inRecord) {
+      if (value === "LAYER") inLayerTable = true;
+      continue;
+    }
+    if (!inRecord) continue;
+    if (code === "2") name = value;
+    else if (code === "6") lineType = value;
+  }
+  flush();
+}
+
 export function parseDxfFromArrayBuffer(buf: ArrayBuffer): {
   dxf: ParsedDxf;
   meta: { insUnits?: number; scaleToMm: number };
@@ -1237,6 +1278,11 @@ export function parseDxfFromArrayBuffer(buf: ArrayBuffer): {
     enrichParsedDxfWithRawSupplements(dxf, text);
   } catch (err) {
     debugLog("raw DXF supplement parse failed, using base parser output", err);
+  }
+  try {
+    attachLayerLineTypes(dxf, text);
+  } catch (err) {
+    debugLog("raw DXF layer linetype scan failed", err);
   }
 
   const { insUnits, scaleToMm } = getScaleToMm(dxf.header);
@@ -1370,7 +1416,10 @@ export function buildLineworkFromDxf(
   const debugBulgeCenters: Array<{ point: Vec2; meta: FlattenDebugMarkerMeta }> =
     [];
 
+  // One bucket per (layer, linetype, colour), so each draws with its own
+  // material: dashed linetypes as dashes, layer/entity colour as colour.
   const buckets = new Map<string, number[]>();
+  const bucketStyle = new Map<string, { layer: string; style: EntityStyle }>();
   const bounds = new THREE.Box3();
   const tmp = new THREE.Vector3();
 
@@ -1403,7 +1452,11 @@ export function buildLineworkFromDxf(
     }
 
     visibleEntityUids?.add(polyline.entityUid);
-    const bucket = getLayerBucket(buckets, polyline.layer || "0");
+    const layerName = polyline.layer || "0";
+    const style = resolveEntityStyle(polyline.entity, layerName, dxf);
+    const key = `${layerName}\u0000${style.dashed ? style.lineTypeName : ""}\u0000${style.color ?? ""}`;
+    if (!bucketStyle.has(key)) bucketStyle.set(key, { layer: layerName, style });
+    const bucket = getLayerBucket(buckets, key);
     appendPolylineSegments(bucket, bounds, tmp, polyline.points, polyline.closed);
   }
 
@@ -1434,13 +1487,36 @@ export function buildLineworkFromDxf(
   const group = new THREE.Group();
   group.name = "dxfLinework";
 
-  const material = new THREE.LineBasicMaterial({
-    color: 0x111111,
-    depthTest: true,
-  });
+  const solidMaterials = new Map<number, THREE.LineBasicMaterial>();
+  const dashedMaterials = new Map<string, THREE.LineDashedMaterial>();
+  const materialFor = (style: EntityStyle): THREE.LineBasicMaterial => {
+    const color = style.color ?? 0x111111;
+    if (!style.dashed) {
+      let m = solidMaterials.get(color);
+      if (!m) {
+        m = new THREE.LineBasicMaterial({ color, depthTest: true });
+        solidMaterials.set(color, m);
+      }
+      return m;
+    }
+    // LTYPE pattern is [dash, -gap, ...] in drawing units; fall back to the
+    // usual 2.5 / 1.25 when the file doesn't define the linetype.
+    const dash = style.pattern?.find((v) => v > 0);
+    const gap = style.pattern?.find((v) => v < 0);
+    const dashSize = (dash ?? 2.5) * scaleToMm;
+    const gapSize = Math.abs(gap ?? -1.25) * scaleToMm;
+    const mkey = `${color}:${dashSize}:${gapSize}`;
+    let m = dashedMaterials.get(mkey);
+    if (!m) {
+      m = new THREE.LineDashedMaterial({ color, dashSize, gapSize, depthTest: true });
+      dashedMaterials.set(mkey, m);
+    }
+    return m;
+  };
 
-  buckets.forEach((positions, layerName) => {
+  buckets.forEach((positions, key) => {
     if (positions.length < 6) return;
+    const { layer: layerName, style } = bucketStyle.get(key)!;
 
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute(
@@ -1449,7 +1525,8 @@ export function buildLineworkFromDxf(
     );
     geometry.computeBoundingSphere();
 
-    const line = new THREE.LineSegments(geometry, material);
+    const line = new THREE.LineSegments(geometry, materialFor(style));
+    if (style.dashed) line.computeLineDistances();
     line.name = `dxf:${layerName}`;
     line.renderOrder = 2;
     line.frustumCulled = false;

@@ -12,13 +12,19 @@ export type DxfExportMeta = {
   partName: string;
   thicknessMM: number;
   kFactor: number;
+  /**
+   * "full" (default): CUT + BEND_UP/BEND_DOWN + NOTES text.
+   * "cut_only": the CUT layer alone - no text, no bend lines - safe to upload to
+   * online laser quote services / CAM, which treat every entity as a cut path.
+   */
+  layers?: "full" | "cut_only";
 };
 
 export function buildDxfFileName(meta: DxfExportMeta): string {
   const safePart = meta.partName.trim().replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "") || "part";
   const t = meta.thicknessMM.toFixed(2);
   const k = meta.kFactor.toFixed(2);
-  return `${safePart}_flat_t${t}_K${k}.dxf`;
+  return meta.layers === "cut_only" ? `${safePart}_laser_t${t}.dxf` : `${safePart}_flat_t${t}_K${k}.dxf`;
 }
 
 // --- Low-level DXF ASCII writer (R12 / AC1009) -----------------------------
@@ -35,6 +41,11 @@ const LAYERS: Record<"CUT" | "BEND_UP" | "BEND_DOWN" | "NOTES", DxfLayerSpec> = 
 class DxfWriter {
   private lines: string[] = [];
   private nextHandle = 0x40;
+  private readonly layerSpecs: DxfLayerSpec[];
+
+  constructor(cutOnly = false) {
+    this.layerSpecs = cutOnly ? [LAYERS.CUT] : Object.values(LAYERS);
+  }
 
   private handle(): string {
     return (this.nextHandle++).toString(16).toUpperCase();
@@ -79,8 +90,8 @@ class DxfWriter {
 
       this.pair(0, "TABLE");
       this.pair(2, "LAYER");
-      this.pair(70, Object.keys(LAYERS).length);
-      for (const layer of Object.values(LAYERS)) this.layer(layer);
+      this.pair(70, this.layerSpecs.length);
+      for (const layer of this.layerSpecs) this.layer(layer);
       this.pair(0, "ENDTAB");
     });
   }
@@ -111,10 +122,12 @@ class DxfWriter {
     this.section("ENTITIES", body);
   }
 
-  line(layer: string, a: Point2, b: Point2): void {
+  /** `linetype` is written explicitly (group 6) so readers that ignore the layer's linetype still dash it. */
+  line(layer: string, a: Point2, b: Point2, linetype?: string): void {
     this.pair(0, "LINE");
     this.pair(5, this.handle());
     this.pair(8, layer);
+    if (linetype) this.pair(6, linetype);
     this.pair(10, a[0]);
     this.pair(20, a[1]);
     this.pair(30, 0);
@@ -871,7 +884,8 @@ export function buildFlatPatternDxf(result: FlangeTreeResult, meta: DxfExportMet
   const { cut: finalCut, bendLines: finalBendLines, minX, minY, maxX, maxY, extMin, extMax } =
     buildFlatPatternGeometry(result);
 
-  const w = new DxfWriter();
+  const cutOnly = meta.layers === "cut_only";
+  const w = new DxfWriter(cutOnly);
   w.header(extMin, extMax);
   w.tables();
   w.entities(() => {
@@ -885,10 +899,12 @@ export function buildFlatPatternDxf(result: FlangeTreeResult, meta: DxfExportMet
       }
     }
 
+    if (cutOnly) return;
+
     const noteHeight = 2.2;
     for (const { bl, a, b } of finalBendLines) {
       const layer = bl.direction === "up" ? LAYERS.BEND_UP.name : LAYERS.BEND_DOWN.name;
-      w.line(layer, a, b);
+      w.line(layer, a, b, "DASHED");
 
       const dx = b[0] - a[0];
       const dy = b[1] - a[1];
@@ -936,7 +952,8 @@ export function buildFlatPatternDxf(result: FlangeTreeResult, meta: DxfExportMet
 export function buildRolledRingDxf(result: RolledRingResult, meta: DxfExportMeta): string {
   const { cut: cutSegments, width, height } = buildRolledRingGeometry(result);
 
-  const w = new DxfWriter();
+  const cutOnly = meta.layers === "cut_only";
+  const w = new DxfWriter(cutOnly);
   w.header([0, 0], [width, height]);
   w.tables();
   w.entities(() => {
@@ -949,6 +966,7 @@ export function buildRolledRingDxf(result: RolledRingResult, meta: DxfExportMeta
         w.polyline(LAYERS.CUT.name, seg.points, closed);
       }
     }
+    if (cutOnly) return;
     const infoHeight = 3.2;
     const infoMargin = 6;
     const infoLines = [

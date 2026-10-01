@@ -11,6 +11,7 @@ import type {
   ExactFaceKind,
   ExactVertex,
 } from "../components/cad/exact-cad-topology";
+import { buildFlatDrawModel } from "../utils/sheet-metal/flat-draw-model";
 import {
   buildDxfFileName,
   buildFlatPatternDxf,
@@ -1338,11 +1339,13 @@ ctx.onmessage = async (e: MessageEvent<any>) => {
         thicknessMM: detection.thicknessMM ?? 0,
         kFactor: req.kFactor,
       };
-      const dxfText =
-        unfoldResult.kind === "flange_tree"
-          ? buildFlatPatternDxf(unfoldResult, meta)
-          : buildRolledRingDxf(unfoldResult, meta);
+      const buildDxf = (m: typeof meta & { layers?: "full" | "cut_only" }) =>
+        unfoldResult.kind === "flange_tree" ? buildFlatPatternDxf(unfoldResult, m) : buildRolledRingDxf(unfoldResult, m);
+      const dxfText = buildDxf(meta);
+      const cutMeta = { ...meta, layers: "cut_only" as const };
+      const dxfCutOnly = buildDxf(cutMeta);
       const fileName = buildDxfFileName(meta);
+      const cutFileName = buildDxfFileName(cutMeta);
 
       ctx.postMessage({
         id,
@@ -1350,6 +1353,9 @@ ctx.onmessage = async (e: MessageEvent<any>) => {
         type: "sheet_metal_export_dxf",
         fileName,
         dxfText,
+        cutFileName,
+        dxfCutOnly,
+        flat: buildFlatDrawModel(unfoldResult),
         report: computeBlankReport(unfoldResult, {
           thicknessMM: meta.thicknessMM,
           bendCount: detection.bendCount,

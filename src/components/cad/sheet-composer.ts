@@ -593,6 +593,8 @@ export type ViewLayoutModel = {
    * (they can exceed it only by half a stroke width, ~0.3mm against a 10mm
    * frame margin). */
   edgeRuns: SheetEdgeRun[];
+  /** Static text pinned to the view (e.g. a flat pattern's bend labels): sheet-px anchor, centred, rotated by `angle` radians. Moves with the view, never selectable. */
+  labels?: { text: string; x: number; y: number; angle: number }[];
 };
 
 /** The sheet's shaded isometric reference view (top-right corner): the raw
